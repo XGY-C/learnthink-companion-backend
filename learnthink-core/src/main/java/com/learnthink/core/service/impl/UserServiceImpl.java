@@ -1,13 +1,13 @@
 package com.learnthink.core.service.impl;
 
 import com.learnthink.core.domain.entity.User;
-import com.learnthink.core.repository.UserRepository;
+import com.learnthink.core.repository.UserMapper;
 import com.learnthink.core.service.UserService;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * 用户服务实现
@@ -16,34 +16,46 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class UserServiceImpl implements UserService {
     
-    private final UserRepository userRepository;
+    private final UserMapper userMapper;
 
     @Override
-    public Optional<User> findById(Long id) {
-        return userRepository.findById(id);
+    public User findById(String id) {
+        return userMapper.selectById(id);
     }
 
     @Override
-    public Optional<User> findByUsername(String username) {
-        return userRepository.findByUsername(username);
+    public User findByUsername(String username) {
+        LambdaQueryWrapper<User> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(User::getUsername, username);
+        return userMapper.selectOne(wrapper);
+    }
+
+    @Override
+    public User findByEmail(String email) {
+        LambdaQueryWrapper<User> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(User::getEmail, email);
+        return userMapper.selectOne(wrapper);
     }
 
     @Override
     public List<User> findAll() {
-        return userRepository.findAll();
+        return userMapper.selectList(null);
     }
 
     @Override
     public User save(User user) {
-        if (user.getId() == null) {
+        if (user.getId() == null || user.getId().isEmpty()) {
             user.setCreatedAt(LocalDateTime.now());
+            userMapper.insert(user);
+        } else {
+            user.setUpdatedAt(LocalDateTime.now());
+            userMapper.updateById(user);
         }
-        user.setUpdatedAt(LocalDateTime.now());
-        return userRepository.save(user);
+        return user;
     }
 
     @Override
-    public void deleteById(Long id) {
-        userRepository.deleteById(id);
+    public void deleteById(String id) {
+        userMapper.deleteById(id);
     }
 }

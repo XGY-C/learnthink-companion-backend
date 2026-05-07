@@ -1,33 +1,32 @@
 package com.learnthink.core.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
-import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * 用户实体
+ * 路径版本快照
  */
 @Data
-@TableName("users")
-public class User {
+@TableName("learning_path_versions")
+public class LearningPathVersion {
     @TableId(type = IdType.ASSIGN_UUID)
     private String id;
 
-    private String username;
+    private String userId;
 
-    private String email;
+    private String courseId;
 
-    @TableField("password_hash")
-    private String passwordHash;
+    private Integer version;
 
-    private String nickname;
+    private Integer generatedFromProfileVersion;
 
-    private String role;
+    /**
+     * nodes/edges/adjustments
+     */
+    private String pathJson;
 
     private LocalDateTime createdAt;
-
-    private LocalDateTime updatedAt;
 }

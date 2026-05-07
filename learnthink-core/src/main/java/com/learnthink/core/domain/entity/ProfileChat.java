@@ -1,33 +1,28 @@
 package com.learnthink.core.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
-import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * 用户实体
+ * 画像对话记录
  */
 @Data
-@TableName("users")
-public class User {
+@TableName("profile_chats")
+public class ProfileChat {
     @TableId(type = IdType.ASSIGN_UUID)
     private String id;
 
-    private String username;
+    private String userId;
 
-    private String email;
+    private String courseId;
 
-    @TableField("password_hash")
-    private String passwordHash;
-
-    private String nickname;
-
-    private String role;
+    /**
+     * [{role, content, at}]
+     */
+    private String messagesJson;
 
     private LocalDateTime createdAt;
-
-    private LocalDateTime updatedAt;
 }

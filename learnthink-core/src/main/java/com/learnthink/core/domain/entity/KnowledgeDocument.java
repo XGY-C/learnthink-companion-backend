@@ -1,33 +1,30 @@
 package com.learnthink.core.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
-import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * 用户实体
+ * 知识库元数据（最小实现）
  */
 @Data
-@TableName("users")
-public class User {
+@TableName("knowledge_documents")
+public class KnowledgeDocument {
     @TableId(type = IdType.ASSIGN_UUID)
     private String id;
 
-    private String username;
+    private String courseId;
 
-    private String email;
+    private String title;
 
-    @TableField("password_hash")
-    private String passwordHash;
+    /**
+     * 讲义/术语/题库/阅读
+     */
+    private String sourceType;
 
-    private String nickname;
-
-    private String role;
+    private String filePath;
 
     private LocalDateTime createdAt;
-
-    private LocalDateTime updatedAt;
 }

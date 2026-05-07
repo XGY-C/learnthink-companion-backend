@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: learnthink-web
+  datasource:
+    url: jdbc:mysql://localhost:3306/learnthink?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: root
+    password: xgy123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: 
+      database: 0
+      timeout: 3000ms
+      lettuce:
+        pool:
+          max-active: 8
+          max-wait: -1ms
+          max-idle: 8
+          min-idle: 0
+  mail:
+    host: smtp.qq.com  # SMTP服务器地址（以QQ邮箱为例）
+    port: 587  # SMTP端口（TLS）
+    username: 3929483358@qq.com  # 发件人邮箱
+    password: fsjnnkzoipidceae  # 邮箱授权码（非登录密码）
+    protocol: smtp
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+            required: true
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
+  ai:
+    openai:
+      api-key: ${DEEPSEEK_API_KEY}
+      base-url: https://api.deepseek.com
