@@ -16,7 +16,7 @@ import java.util.Map;
  */
 @Slf4j
 @RestController
-@RequestMapping("/api/auth")
+@RequestMapping("/auth")
 @RequiredArgsConstructor
 public class AuthController {
     
@@ -32,7 +32,7 @@ public class AuthController {
                                        @RequestHeader(value = "X-Real-IP", required = false) String realIp) {
         // 获取客户端IP
         String clientIp = getClientIp(forwardedFor, realIp);
-        log.info("Login attempt from IP: {}, username: {}", clientIp, request.getUsername());
+        log.info("Login attempt from IP: {}, identifier: {}", clientIp, request.getIdentifier());
         
         LoginResponse response = authService.login(request, clientIp);
         return Result.success(response);

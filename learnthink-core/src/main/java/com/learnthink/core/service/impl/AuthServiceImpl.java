@@ -44,17 +44,17 @@ public class AuthServiceImpl implements AuthService {
         // 1. 检查登录频率限制
         checkRateLimit(clientIp);
         
-        // 2. 查找用户
-        User user = userService.findByUsername(request.getUsername());
+        // 2. 查找用户（支持用户名或邮箱）
+        User user = findUserByIdentifier(request.getIdentifier());
         if (user == null) {
             incrementRateLimit(clientIp);
-            throw new BusinessException(ErrorCode.AUTH_ERROR, "用户名或密码错误");
+            throw new BusinessException(ErrorCode.AUTH_ERROR, "用户名/邮箱或密码错误");
         }
         
         // 3. 验证密码
         if (!passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
             incrementRateLimit(clientIp);
-            throw new BusinessException(ErrorCode.AUTH_ERROR, "用户名或密码错误");
+            throw new BusinessException(ErrorCode.AUTH_ERROR, "用户名/邮箱或密码错误");
         }
         
         // 4. 清除限流计数
@@ -236,5 +236,32 @@ public class AuthServiceImpl implements AuthService {
     private void clearRateLimit(String clientIp) {
         String key = RATE_LIMIT_PREFIX + clientIp;
         redisTemplate.delete(key);
+    }
+    
+    /**
+     * 根据标识符（用户名或邮箱）查找用户
+     */
+    private User findUserByIdentifier(String identifier) {
+        if (identifier == null || identifier.isEmpty()) {
+            return null;
+        }
+        
+        // 判断是否为邮箱格式
+        if (isValidEmail(identifier)) {
+            return userService.findByEmail(identifier);
+        } else {
+            return userService.findByUsername(identifier);
+        }
+    }
+    
+    /**
+     * 验证邮箱格式
+     */
+    private boolean isValidEmail(String email) {
+        if (email == null || email.isEmpty()) {
+            return false;
+        }
+        // 简单的邮箱格式验证
+        return email.matches("^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
     }
 }

@@ -11,7 +11,7 @@ import java.util.List;
  * 用户控制器
  */
 @RestController
-@RequestMapping("/api/users")
+@RequestMapping("/user")
 @RequiredArgsConstructor
 public class UserController {
     

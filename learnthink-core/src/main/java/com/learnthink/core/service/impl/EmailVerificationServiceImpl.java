@@ -124,17 +124,31 @@ public class EmailVerificationServiceImpl implements EmailVerificationService {
      */
     private void sendEmail(String to, String code) {
         SimpleMailMessage message = new SimpleMailMessage();
-        message.setFrom("noreply@learnthink.com"); // 发件人
+        message.setFrom("3929483358@qq.com"); // 发件人必须与SMTP授权用户一致
         message.setTo(to);
-        message.setSubject("学思伴行 - 注册验证码");
+        message.setSubject("【学思伴行】账户注册验证码 - 安全验证");
         message.setText(String.format(
-            "您好！\n\n" +
-            "您正在注册学思伴行（LearnThink Companion）账号。\n" +
-            "您的验证码是：%s\n" +
-            "验证码有效期为5分钟，请勿泄露给他人。\n\n" +
-            "如果这不是您的操作，请忽略此邮件。\n\n" +
-            "祝好，\n" +
-            "学思伴行团队",
+            "尊敬的学思伴行用户：\n\n" +
+            "您好！感谢您选择学思伴行（LearnThink Companion）智能学习平台。\n\n" +
+            "为了保障您的账户安全，我们正在进行身份验证。请使用以下验证码完成注册流程：\n\n" +
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+            "         验 证 码：%s          \n" +
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+            "重要提示：\n" +
+            "• 该验证码有效期为 5 分钟，请及时使用\n" +
+            "• 请勿将验证码泄露给任何人，包括自称客服的人员\n" +
+            "• 如非本人操作，请立即忽略此邮件并联系我们的客服团队\n" +
+            "• 本验证码仅用于本次注册验证，不可重复使用\n\n" +
+            "如有任何疑问，欢迎随时联系我们：\n" +
+            "官方网站：https://www.learnthink.com\n" +
+            "客服热线：400-xxx-xxxx\n" +
+            "服务时间：工作日 9:00-18:00\n\n" +
+            "祝您在学思伴行平台获得愉快的学习体验！\n\n" +
+            "此致\n" +
+            "敬礼\n\n" +
+            "学思伴行（LearnThink Companion）产品团队\n" +
+            "智能教育科技事业部\n" +
+            "© 2026 LearnThink. All Rights Reserved.",
             code
         ));
         
