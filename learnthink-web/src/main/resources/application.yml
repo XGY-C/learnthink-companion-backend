@@ -39,3 +39,9 @@ spring:
     openai:
       api-key: ${DEEPSEEK_API_KEY}
       base-url: https://api.deepseek.com
+
+rag:
+  service:
+    url: http://localhost:19531
+    connect-timeout: 5s
+    read-timeout: 30s

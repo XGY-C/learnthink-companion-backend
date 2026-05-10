@@ -7,6 +7,6 @@ import lombok.Data;
  */
 @Data
 public class LoginRequest {
-    private String identifier; // 用户名或邮箱
+    private String email; // 邮箱
     private String password;
 }

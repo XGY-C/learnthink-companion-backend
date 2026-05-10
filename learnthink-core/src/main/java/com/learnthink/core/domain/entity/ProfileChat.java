@@ -19,6 +19,8 @@ public class ProfileChat {
 
     private String courseId;
 
+    private String profileVersionId;
+
     /**
      * [{role, content, at}]
      */

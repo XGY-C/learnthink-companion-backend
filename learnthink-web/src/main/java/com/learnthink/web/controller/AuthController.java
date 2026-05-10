@@ -32,7 +32,7 @@ public class AuthController {
                                        @RequestHeader(value = "X-Real-IP", required = false) String realIp) {
         // 获取客户端IP
         String clientIp = getClientIp(forwardedFor, realIp);
-        log.info("Login attempt from IP: {}, identifier: {}", clientIp, request.getIdentifier());
+        log.info("Login attempt from IP: {}, email: {}", clientIp, request.getEmail());
         
         LoginResponse response = authService.login(request, clientIp);
         return Result.success(response);

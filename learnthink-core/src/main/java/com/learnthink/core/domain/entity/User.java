@@ -23,8 +23,6 @@ public class User {
     @TableField("password_hash")
     private String passwordHash;
 
-    private String nickname;
-
     private String role;
 
     private LocalDateTime createdAt;

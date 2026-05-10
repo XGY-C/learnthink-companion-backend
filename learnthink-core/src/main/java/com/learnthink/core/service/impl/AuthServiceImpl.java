@@ -44,23 +44,34 @@ public class AuthServiceImpl implements AuthService {
         // 1. 检查登录频率限制
         checkRateLimit(clientIp);
         
-        // 2. 查找用户（支持用户名或邮箱）
-        User user = findUserByIdentifier(request.getIdentifier());
+        // 2. 验证邮箱格式
+        if (request.getEmail() == null || request.getEmail().isEmpty()) {
+            incrementRateLimit(clientIp);
+            throw new BusinessException(ErrorCode.VALIDATION_ERROR, "邮箱不能为空");
+        }
+        
+        if (!isValidEmail(request.getEmail())) {
+            incrementRateLimit(clientIp);
+            throw new BusinessException(ErrorCode.VALIDATION_ERROR, "邮箱格式不正确");
+        }
+        
+        // 3. 查找用户（仅支持邮箱）
+        User user = userService.findByEmail(request.getEmail());
         if (user == null) {
             incrementRateLimit(clientIp);
-            throw new BusinessException(ErrorCode.AUTH_ERROR, "用户名/邮箱或密码错误");
+            throw new BusinessException(ErrorCode.AUTH_ERROR, "邮箱或密码错误");
         }
         
-        // 3. 验证密码
+        // 4. 验证密码
         if (!passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
             incrementRateLimit(clientIp);
-            throw new BusinessException(ErrorCode.AUTH_ERROR, "用户名/邮箱或密码错误");
+            throw new BusinessException(ErrorCode.AUTH_ERROR, "邮箱或密码错误");
         }
         
-        // 4. 清除限流计数
+        // 5. 清除限流计数
         clearRateLimit(clientIp);
         
-        // 5. 生成Token
+        // 6. 生成Token
         return generateTokens(user);
     }
     
