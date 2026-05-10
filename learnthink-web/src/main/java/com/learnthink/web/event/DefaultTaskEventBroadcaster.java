@@ -1,0 +1,129 @@
+package com.learnthink.web.event;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.learnthink.core.agent.orchestration.TaskEventBroadcaster;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Component;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.io.IOException;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+@Component
+public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
+
+    private static final Logger log = LoggerFactory.getLogger(DefaultTaskEventBroadcaster.class);
+    private final StringRedisTemplate redis;
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    private final ConcurrentHashMap<String, CopyOnWriteArrayList<SseEmitter>> subscribers = new ConcurrentHashMap<>();
+
+    public DefaultTaskEventBroadcaster(StringRedisTemplate redis) {
+        this.redis = redis;
+    }
+
+    @Override
+    public void taskAccepted(String taskId, Instant createdAt) {
+        broadcast(taskId, "task.accepted", Map.of("taskId", taskId, "createdAt", createdAt.toString()));
+    }
+
+    @Override
+    public void broadcastStage(String taskId, String stage, int percent, String message, Map<String, Object> stats) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("stage", stage);
+        payload.put("percent", percent);
+        payload.put("message", message);
+        if (stats != null) payload.put("stats", stats);
+        broadcast(taskId, "task.stage", payload);
+    }
+
+    @Override
+    public void broadcastEvent(String taskId, String eventType, Map<String, Object> payload) {
+        broadcast(taskId, eventType, payload);
+    }
+
+    @Override
+    public void resourceReady(String taskId, String type, String title, String confidence, int sourceCount) {
+        broadcast(taskId, "resource.ready", Map.of(
+            "type", type, "title", title, "confidence", confidence, "sources", sourceCount));
+    }
+
+    @Override
+    public void reviewFlag(String taskId, String type, String action, String confidence, double citationCoverage) {
+        broadcast(taskId, "review.flag", Map.of(
+            "type", type, "action", action, "confidence", confidence, "coverage", citationCoverage));
+    }
+
+    @Override
+    public void taskDone(String taskId, String status, String packId, int resourceCount, Set<String> failedTypes) {
+        broadcast(taskId, "task.done", Map.of(
+            "status", status, "packId", packId != null ? packId : "",
+            "resourcesReady", resourceCount,
+            "failedTypes", failedTypes != null ? failedTypes : Set.of()));
+        new Thread(() -> { try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
+            closeSubscribers(taskId); }).start();
+    }
+
+    @Override
+    public void taskFailed(String taskId, String errorCode, String message, boolean retryable) {
+        broadcast(taskId, "task.failed", Map.of(
+            "error", Map.of("code", errorCode, "message", message), "retryable", retryable));
+        closeSubscribers(taskId);
+    }
+
+    public SseEmitter subscribe(String taskId) {
+        SseEmitter emitter = new SseEmitter(600_000L);
+        subscribers.computeIfAbsent(taskId, k -> new CopyOnWriteArrayList<>()).add(emitter);
+        emitter.onCompletion(() -> removeSubscriber(taskId, emitter));
+        emitter.onTimeout(() -> removeSubscriber(taskId, emitter));
+        emitter.onError(e -> removeSubscriber(taskId, emitter));
+        return emitter;
+    }
+
+    private void broadcast(String taskId, String eventType, Map<String, Object> payload) {
+        String eventId = UUID.randomUUID().toString();
+        Map<String, Object> event = Map.of(
+            "eventId", eventId, "taskId", taskId, "eventType", eventType,
+            "createdAt", Instant.now().toString(), "payload", payload);
+
+        try {
+            String json = mapper.writeValueAsString(event);
+            redis.opsForList().leftPush("task:" + taskId + ":events", json);
+            redis.opsForList().trim("task:" + taskId + ":events", 0, 199);
+            redis.expire("task:" + taskId + ":events", Duration.ofHours(24));
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize event for task {}: {}", taskId, e.getMessage());
+        }
+
+        List<SseEmitter> emitters = subscribers.get(taskId);
+        if (emitters != null) {
+            for (SseEmitter emitter : emitters) {
+                try {
+                    emitter.send(SseEmitter.event().name(eventType).id(eventId).data(payload));
+                } catch (IOException e) {
+                    removeSubscriber(taskId, emitter);
+                }
+            }
+        }
+    }
+
+    private void removeSubscriber(String taskId, SseEmitter emitter) {
+        List<SseEmitter> emitters = subscribers.get(taskId);
+        if (emitters != null) {
+            emitters.remove(emitter);
+            if (emitters.isEmpty()) subscribers.remove(taskId);
+        }
+    }
+
+    private void closeSubscribers(String taskId) {
+        List<SseEmitter> emitters = subscribers.remove(taskId);
+        if (emitters != null) emitters.forEach(e -> { try { e.complete(); } catch (Exception ignored) {} });
+    }
+}

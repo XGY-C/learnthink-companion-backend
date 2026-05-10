@@ -1,33 +1,31 @@
 package com.learnthink.core.domain.entity;
 
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
-import jakarta.persistence.*;
 import java.time.LocalDateTime;
 
 /**
  * 用户实体
  */
 @Data
-@Entity
-@Table(name = "user")
+@TableName("users")
 public class User {
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    @TableId(type = IdType.ASSIGN_UUID)
+    private String id;
 
-    @Column(unique = true, nullable = false)
     private String username;
-
-    @Column(nullable = false)
-    private String password;
 
     private String email;
 
-    private String phone;
+    @TableField("password_hash")
+    private String passwordHash;
 
-    @Column(name = "created_at")
+    private String role;
+
     private LocalDateTime createdAt;
 
-    @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 }

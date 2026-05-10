@@ -11,17 +11,20 @@ import java.util.List;
  * 用户控制器
  */
 @RestController
-@RequestMapping("/api/users")
+@RequestMapping("/user")
 @RequiredArgsConstructor
 public class UserController {
     
     private final UserService userService;
 
     @GetMapping("/{id}")
-    public Result<User> getById(@PathVariable Long id) {
-        return userService.findById(id)
-                .map(Result::success)
-                .orElse(Result.error("用户不存在"));
+    public Result<User> getById(@PathVariable String id) {
+        User user = userService.findById(id);
+        if (user != null) {
+            return Result.success(user);
+        } else {
+            return Result.error("用户不存在");
+        }
     }
 
     @GetMapping
@@ -35,7 +38,7 @@ public class UserController {
     }
 
     @DeleteMapping("/{id}")
-    public Result<Void> delete(@PathVariable Long id) {
+    public Result<Void> delete(@PathVariable String id) {
         userService.deleteById(id);
         return Result.success();
     }
