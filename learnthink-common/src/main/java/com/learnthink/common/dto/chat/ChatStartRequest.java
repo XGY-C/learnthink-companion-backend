@@ -9,4 +9,5 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class ChatStartRequest {
     private String courseId;
+    private boolean forceNew;
 }

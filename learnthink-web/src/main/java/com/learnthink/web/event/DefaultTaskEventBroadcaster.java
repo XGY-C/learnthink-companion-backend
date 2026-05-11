@@ -72,6 +72,21 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
     }
 
     @Override
+    public void agentThought(String taskId, String agentName, String agentRole,
+                              String context, String observation, String thought,
+                              String decision, String confidenceLevel) {
+        broadcast(taskId, "agent.thought", Map.of(
+            "agentName", agentName,
+            "agentRole", agentRole,
+            "context", context,
+            "observation", observation,
+            "thought", thought,
+            "decision", decision,
+            "confidenceLevel", confidenceLevel,
+            "timestamp", Instant.now().toString()));
+    }
+
+    @Override
     public void taskFailed(String taskId, String errorCode, String message, boolean retryable) {
         broadcast(taskId, "task.failed", Map.of(
             "error", Map.of("code", errorCode, "message", message), "retryable", retryable));

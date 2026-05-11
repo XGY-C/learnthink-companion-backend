@@ -28,6 +28,11 @@ public interface TaskEventBroadcaster {
     /** Task completed (success or partial success) */
     void taskDone(String taskId, String status, String packId, int resourceCount, Set<String> failedTypes);
 
+    /** Agent thinking chain event — 4-layer visibility model (L1 identity → L4 reflection) */
+    void agentThought(String taskId, String agentName, String agentRole,
+                      String context, String observation, String thought,
+                      String decision, String confidenceLevel);
+
     /** Task failed with error */
     void taskFailed(String taskId, String errorCode, String message, boolean retryable);
 }

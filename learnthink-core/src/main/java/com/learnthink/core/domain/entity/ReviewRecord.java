@@ -18,6 +18,9 @@ public class ReviewRecord {
 
     private String resourceItemId;
 
+    /** 冗余字段，便于按包查询审校结果 */
+    private String resourcePackId;
+
     private String taskId;
 
     /**

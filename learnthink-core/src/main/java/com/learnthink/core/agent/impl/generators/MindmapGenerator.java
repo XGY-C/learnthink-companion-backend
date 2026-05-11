@@ -1,11 +1,13 @@
 package com.learnthink.core.agent.impl.generators;
 
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.config.PromptLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -16,45 +18,12 @@ public class MindmapGenerator implements TypeGenerator {
 
     private static final Logger log = LoggerFactory.getLogger(MindmapGenerator.class);
     private final ChatClient chatClient;
+    private final PromptLoader promptLoader;
 
-    private static final String SYSTEM_PROMPT = """
-        You are a knowledge visualization expert for LearnThink Companion.
-        Create a concept mindmap from the topic outline.
-
-        ## Output format (strict JSON — compatible with mindmap renderers):
-        {
-          "root": {
-            "text": "Topic Name",
-            "children": [
-              {
-                "text": "Subtopic 1",
-                "children": [
-                  { "text": "Key concept A" },
-                  { "text": "Key concept B" }
-                ]
-              },
-              {
-                "text": "Subtopic 2",
-                "children": [
-                  { "text": "Key concept C" },
-                  { "text": "Key concept D" }
-                ]
-              }
-            ]
-          }
-        }
-
-        ## Rules
-        - Root node = main topic
-        - Level 1 children = major subtopics (3-5 nodes)
-        - Level 2 children = key concepts under each subtopic (2-4 nodes each)
-        - Max depth: 3 levels
-        - Each node text should be ≤20 characters
-        - Structure should follow the topic outline provided
-        """;
-
-    public MindmapGenerator(ChatClient.Builder chatClientBuilder) {
+    public MindmapGenerator(@Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
+                            PromptLoader promptLoader) {
         this.chatClient = chatClientBuilder.build();
+        this.promptLoader = promptLoader;
     }
 
     @Override
@@ -68,13 +37,13 @@ public class MindmapGenerator implements TypeGenerator {
         boolean forceLowConfidence,
         String reviewFeedback) {
 
-        String prompt = SYSTEM_PROMPT;
+        String systemPrompt = promptLoader.get("generator/mindmap");
         if (reviewFeedback != null) {
-            prompt += "\n\nCORRECTION: " + reviewFeedback;
+            systemPrompt += "\n\nCORRECTION: " + reviewFeedback;
         }
 
         String content = chatClient.prompt()
-            .messages(new SystemMessage(prompt),
+            .messages(new SystemMessage(systemPrompt),
                 new UserMessage(String.format("Topic: %s\nKey points: %s\nDifficulty: %s",
                     item.title(), String.join(", ", item.keyPoints()), item.difficulty())))
             .call()

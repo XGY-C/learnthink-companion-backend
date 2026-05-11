@@ -3,27 +3,33 @@ package com.learnthink.core.agent.impl;
 import com.learnthink.core.agent.framework.AgentContext;
 import com.learnthink.core.agent.framework.AgentResult;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.config.PromptLoader;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Reviews generated content for factual accuracy, source coverage, and safety.
+ * Reviews generated content with layered audit + independent RAG fact-checking.
  *
- * <h3>Escalation protocol:</h3>
+ * <h3>v3.1 — Independent RAG access for fact verification:</h3>
  * <ol>
- *   <li>R1 (no sources) → RETRY for document/exercise/code</li>
- *   <li>R2 (low citation coverage) → confidence=low, still publish</li>
- *   <li>R3 (unsupported claims) → RETRY with specific feedback</li>
- *   <li>R4 (harmful content) → REJECT_PERMANENT, no retry</li>
+ *   <li>Rule layer (R1-R3): format check, source coverage, safety pre-filter (zero LLM)</li>
+ *   <li>Claim Extraction (LLM): extract factual assertions from content</li>
+ *   <li>Source Matching (rule): match claims against RetrieverAgent sources</li>
+ *   <li>Targeted Retrieval (RagTool): for unmatched claims, independent RAG search</li>
+ *   <li>Verdict: backed ≥ 70% → APPROVED / 40-70% → MEDIUM / < 40% → RETRY</li>
  * </ol>
  */
 @Component
@@ -31,45 +37,16 @@ public class ReviewerAgent {
 
     private static final Logger log = LoggerFactory.getLogger(ReviewerAgent.class);
     private final ChatClient chatClient;
+    private final PromptLoader promptLoader;
+    private final RagTool ragTool;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    private static final String SYSTEM_PROMPT = """
-        You are the content reviewer for LearnThink Companion.
-        Your job: verify generated educational content for quality and safety.
-
-        ## Checks (4 mandatory items)
-        R1 — sources empty: sources.length == 0 AND type in [document, exercise, code] → action=RETRY
-        R2 — citation coverage: % of factual claims traceable to sources. <0.4 → confidence=low
-        R3 — unsupported claims: content says "research shows..." but no source → action=RETRY
-        R4 — harmful content: political/violent/sexual/discriminatory → action=REJECT_PERMANENT
-
-        Exemptions: reading and mindmap are exempt from R1.
-
-        ## Output (strict JSON):
-        {
-          "reviewStatus": "APPROVED|REJECTED",
-          "confidence": "high|medium|low",
-          "reviewSummary": "1-2 sentence summary in Chinese",
-          "reasons": [
-            {"check": "R1", "result": "pass|fail|warn", "detail": "specific reason"}
-          ],
-          "citationCoverage": 0.75,
-          "action": "PUBLISH|RETRY|REJECT_PERMANENT"
-        }
-
-        ## Confidence rules
-        - high: sources≥3, all checks pass, coverage≥0.7
-        - medium: sources exist, no R1/R3 failure, coverage 0.4-0.7
-        - low: sources<3, or coverage<0.4, or forceLowConfidence=true
-
-        ## Action rules
-        - All pass → PUBLISH
-        - R1/R3 fail (not R4) → RETRY
-        - R4 fail → REJECT_PERMANENT
-        """;
-
-    public ReviewerAgent(ChatClient.Builder chatClientBuilder) {
+    public ReviewerAgent(@Qualifier("reasoningChatClientBuilder") ChatClient.Builder chatClientBuilder,
+                         PromptLoader promptLoader,
+                         RagTool ragTool) {
         this.chatClient = chatClientBuilder.build();
+        this.promptLoader = promptLoader;
+        this.ragTool = ragTool;
     }
 
     public AgentResult<ResourceGenerationState.ReviewResult> review(
@@ -80,7 +57,8 @@ public class ReviewerAgent {
         AgentContext ctx) {
 
         Instant start = Instant.now();
-        ctx.observation().onPrompt("ReviewerAgent", SYSTEM_PROMPT,
+        String systemPrompt = promptLoader.get("agent/reviewer");
+        ctx.observation().onPrompt("ReviewerAgent", systemPrompt,
             Map.of("type", resourceType, "sourcesCount", sources.size(),
                    "forceLowConfidence", forceLowConfidence));
 
@@ -110,6 +88,21 @@ public class ReviewerAgent {
                 return AgentResult.of(result);
             }
 
+            // v3.1: Extract factual claims and verify via independent RAG
+            String contentExcerpt = content.content().substring(0, Math.min(2000, content.content().length()));
+            List<Claim> claims = extractClaims(contentExcerpt);
+            Map<String, String> claimVerification = verifyClaims(claims, sources, ctx);
+
+            int backedCount = (int) claimVerification.values().stream()
+                .filter(s -> "backed".equals(s) || "backed_extra".equals(s)).count();
+            int totalClaims = claims.isEmpty() ? 1 : claims.size();
+            double backedRatio = (double) backedCount / totalClaims;
+
+            ctx.observation().onDecision("ReviewerAgent",
+                "CLAIMS_VERIFIED",
+                backedCount + "/" + totalClaims + " claims backed (ratio=" +
+                String.format("%.0f%%", backedRatio * 100) + ")");
+
             String sourcesJson = mapper.writeValueAsString(
                 sources.stream().map(s -> Map.of(
                     "docId", s.docId(), "title", s.title(),
@@ -121,14 +114,17 @@ public class ReviewerAgent {
                 Title: %s
                 Content (first 2000 chars): %s
                 Sources: %s
+                Claim verification: %d/%d backed (%.0f%%)
                 Force low confidence: %s
                 """,
                 resourceType, content.title(),
-                content.content().substring(0, Math.min(2000, content.content().length())),
-                sourcesJson, forceLowConfidence);
+                contentExcerpt,
+                sourcesJson,
+                backedCount, totalClaims, backedRatio * 100,
+                forceLowConfidence);
 
             String response = chatClient.prompt()
-                .messages(new SystemMessage(SYSTEM_PROMPT), new UserMessage(userMsg))
+                .messages(new SystemMessage(systemPrompt), new UserMessage(userMsg))
                 .call()
                 .content();
 
@@ -164,6 +160,98 @@ public class ReviewerAgent {
             throw new RuntimeException("Failed to parse review JSON: " + e.getMessage(), e);
         }
     }
+
+    // ================================================================
+    // v3.1: Claim extraction + independent RAG verification
+    // ================================================================
+
+    /** Extract factual assertions from generated content (1 LLM call) */
+    private List<Claim> extractClaims(String content) {
+        try {
+            String prompt = """
+                Extract all factual assertions from this educational content.
+                A factual assertion is a statement that can be verified against a knowledge base
+                (definitions, formulas, algorithm steps, specific claims about how something works).
+
+                Output JSON array:
+                [{"claim": "assertion text", "entity": "key entity", "topic": "topic area"}, ...]
+
+                Content:
+                """ + content;
+
+            String response = chatClient.prompt()
+                .messages(new SystemMessage(prompt), new UserMessage(content))
+                .call().content();
+
+            String json = response;
+            if (json.contains("```")) {
+                json = json.substring(json.indexOf("[") > 0 ? json.indexOf("[") : json.indexOf("```") + 3,
+                    json.lastIndexOf("]") + 1);
+            }
+            json = json.substring(json.indexOf("["), json.lastIndexOf("]") + 1);
+
+            List<Map<String, String>> raw = mapper.readValue(json, new TypeReference<>() {});
+            return raw.stream()
+                .map(m -> new Claim(
+                    m.getOrDefault("claim", ""),
+                    m.getOrDefault("entity", ""),
+                    m.getOrDefault("topic", "")))
+                .toList();
+
+        } catch (Exception e) {
+            log.warn("Claim extraction failed: {}", e.getMessage());
+            return List.of(); // fallback: skip claim verification
+        }
+    }
+
+    /** Verify claims against RetrieverAgent sources + independent RagTool retrieval */
+    private Map<String, String> verifyClaims(List<Claim> claims,
+                                              List<ResourceGenerationState.SourceItem> retrieverSources,
+                                              AgentContext ctx) {
+        Map<String, String> results = new HashMap<>();
+        String courseId = ctx.courseId();
+
+        for (Claim claim : claims) {
+            // Step 1: Try matching against RetrieverAgent sources
+            boolean found = retrieverSources.stream().anyMatch(s ->
+                s.quote() != null && claim.claim() != null &&
+                (s.quote().contains(claim.claim().substring(0, Math.min(10, claim.claim().length()))) ||
+                 claim.claim().contains(s.quote().substring(0, Math.min(20, s.quote().length()))))
+            );
+
+            if (found) {
+                results.put(claim.claim(), "backed");
+                continue;
+            }
+
+            // Step 2: Independent RagTool search for unmatched claims
+            if (ragTool != null && courseId != null) {
+                String searchQuery = claim.entity() + " " + claim.topic();
+                try {
+                    RetrieverAgent.RagClient.RagResponse extraResp =
+                        ragTool.retrieve(courseId, searchQuery, null, 3);
+                    if (extraResp != null && extraResp.sources() != null) {
+                        boolean extraFound = extraResp.sources().stream().anyMatch(s ->
+                            s.quote() != null && claim.claim() != null &&
+                            s.quote().contains(claim.claim().substring(0, Math.min(10, claim.claim().length())))
+                        );
+                        results.put(claim.claim(), extraFound ? "backed_extra" : "unverified");
+                    } else {
+                        results.put(claim.claim(), "unverified");
+                    }
+                } catch (Exception e) {
+                    log.warn("RagTool verification failed for claim: {}", claim.claim());
+                    results.put(claim.claim(), "unverified");
+                }
+            } else {
+                results.put(claim.claim(), "unverified");
+            }
+        }
+
+        return results;
+    }
+
+    record Claim(String claim, String entity, String topic) {}
 
     /** Rule-based pre-filter — catches obvious issues before LLM invocation. */
     static class ContentSafetyFilter {

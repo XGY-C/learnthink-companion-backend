@@ -3,12 +3,14 @@ package com.learnthink.core.agent.impl;
 import com.learnthink.core.agent.framework.AgentContext;
 import com.learnthink.core.agent.framework.AgentResult;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.config.PromptLoader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -16,57 +18,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-/**
- * Plans the resource composition, difficulty, and unified outline.
- * Supports replanning when the previous plan resulted in too many rejections.
- */
 @Component
 public class PlannerAgent {
 
     private static final Logger log = LoggerFactory.getLogger(PlannerAgent.class);
     private final ChatClient chatClient;
+    private final PromptLoader promptLoader;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    private static final String SYSTEM_PROMPT = """
-        You are the learning planner for LearnThink Companion.
-        Your job: plan a personalized set of learning resources for a student.
-
-        ## Input
-        - Student profile summary: {profile_summary}
-        - Available evidence sources: {merged_sources_summary}
-        - Target topic: {topic}
-        - Requested resource types: {resource_types}
-        - Previous plan feedback (if replanning): {plan_feedback}
-
-        ## Output (strict JSON)
-        {
-          "topicOutline": "## 1. Concept\\n## 2. Core Principles\\n## 3. Examples\\n## 4. Common Pitfalls\\n## 5. Summary",
-          "items": [
-            {
-              "type": "document",
-              "title": "Resource title",
-              "difficulty": "easy|medium|hard",
-              "estimatedMinutes": 15,
-              "keyPoints": ["point1", "point2"],
-              "personalizationNote": "Because you prefer X, this resource emphasizes Y"
-            }
-          ],
-          "pushReason": ["Reason 1 (≤15 chars)", "Reason 2", "Reason 3"],
-          "queries": ["search query 1", "search query 2"]
-        }
-
-        ## Rules
-        - Create exactly one item per requested resource type
-        - difficulty: match to student's weak areas (hard for weak topics, medium for review)
-        - estimatedMinutes: 10-30 minutes based on student's daily time
-        - personalizationNote: MUST reference specific profile details
-        - pushReason: 2-3 reasons, each ≤15 Chinese characters
-        - If replanning with feedback, address the specific issues mentioned
-        - Plan the topicOutline FIRST, then derive items from it
-        """;
-
-    public PlannerAgent(ChatClient.Builder chatClientBuilder) {
+    public PlannerAgent(@Qualifier("reasoningChatClientBuilder") ChatClient.Builder chatClientBuilder,
+                        PromptLoader promptLoader) {
         this.chatClient = chatClientBuilder.build();
+        this.promptLoader = promptLoader;
     }
 
     /**
@@ -85,7 +48,8 @@ public class PlannerAgent {
             ? "REPLANNING with feedback: " + feedback
             : "Initial planning";
 
-        ctx.observation().onPrompt("PlannerAgent", SYSTEM_PROMPT,
+        String systemPrompt = promptLoader.get("agent/planner");
+        ctx.observation().onPrompt("PlannerAgent", systemPrompt,
             Map.of("topic", topic, "types", resourceTypes, "replanning", feedback != null));
 
         try {
@@ -106,7 +70,7 @@ public class PlannerAgent {
                 contextInfo);
 
             String response = chatClient.prompt()
-                .messages(new SystemMessage(SYSTEM_PROMPT), new UserMessage(prompt))
+                .messages(new SystemMessage(systemPrompt), new UserMessage(prompt))
                 .call()
                 .content();
 

@@ -12,7 +12,10 @@ import java.time.LocalDateTime;
 public class ChatSessionDto {
     private String chatId;
     private String courseId;
+    private String title;
     private int messageCount;
+    private String lastMessagePreview;
+    private String lastMessageAt;
     private boolean analyzed;
     private String profileVersionId;
     private LocalDateTime createdAt;

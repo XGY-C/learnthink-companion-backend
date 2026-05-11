@@ -1,11 +1,13 @@
 package com.learnthink.core.agent.impl.generators;
 
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.config.PromptLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -16,30 +18,12 @@ public class ReadingGenerator implements TypeGenerator {
 
     private static final Logger log = LoggerFactory.getLogger(ReadingGenerator.class);
     private final ChatClient chatClient;
+    private final PromptLoader promptLoader;
 
-    private static final String SYSTEM_PROMPT = """
-        You are a reading list curator for LearnThink Companion.
-        Create an extended reading guide based on the topic and student profile.
-
-        ## Output format (Markdown):
-        ### Recommended Readings
-        For each reading:
-        - **Title**: ...
-        - **Source/Author**: ...
-        - **Why read**: 1-2 sentences connecting to the topic and student interests
-        - **Estimated time**: X minutes
-
-        ### Further Exploration
-        - Topics, papers, or resources for deeper study
-
-        ## Rules
-        - Include 3-5 readings
-        - Mix textbook references, papers, and online resources
-        - Personalization: {personalization_note}
-        """;
-
-    public ReadingGenerator(ChatClient.Builder chatClientBuilder) {
+    public ReadingGenerator(@Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
+                            PromptLoader promptLoader) {
         this.chatClient = chatClientBuilder.build();
+        this.promptLoader = promptLoader;
     }
 
     @Override
@@ -53,15 +37,15 @@ public class ReadingGenerator implements TypeGenerator {
         boolean forceLowConfidence,
         String reviewFeedback) {
 
-        String prompt = SYSTEM_PROMPT
+        String systemPrompt = promptLoader.get("generator/reading")
             .replace("{personalization_note}", item.personalizationNote());
 
         if (reviewFeedback != null) {
-            prompt += "\n\nCORRECTION: " + reviewFeedback;
+            systemPrompt += "\n\nCORRECTION: " + reviewFeedback;
         }
 
         String content = chatClient.prompt()
-            .messages(new SystemMessage(prompt),
+            .messages(new SystemMessage(systemPrompt),
                 new UserMessage(String.format("Topic: %s\nKey points: %s\nStudent interests: %s",
                     item.title(), String.join(", ", item.keyPoints()),
                     String.join(", ", profile.style()))))

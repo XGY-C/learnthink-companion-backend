@@ -1,6 +1,7 @@
 package com.learnthink.core.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
@@ -31,7 +32,11 @@ public class Task {
      */
     private String requestedResourceTypes;
 
-    private Integer profileVersion;
+    /**
+     * 生成时所依据的画像版本（profile_versions.id）
+     */
+    @TableField("profile_version_id")
+    private String profileVersionId;
 
     /**
      * PENDING/RUNNING/SUCCEEDED/FAILED/CANCELLED

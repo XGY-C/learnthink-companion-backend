@@ -8,6 +8,7 @@ import com.learnthink.core.domain.entity.ProfileVersion;
 import com.learnthink.core.repository.ProfileVersionMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.learnthink.core.config.PromptLoader;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -17,40 +18,19 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Extracts a structured learning profile summary from the user's profile data.
- * Reads from DB via profile service, produces a {@link ResourceGenerationState.ProfileSummary}.
- */
 @Component
 public class ProfileAgent {
 
     private static final Logger log = LoggerFactory.getLogger(ProfileAgent.class);
     private final ChatClient chatClient;
+    private final PromptLoader promptLoader;
 
-    private static final String SYSTEM_PROMPT = """
-        You are the profile analysis agent for LearnThink Companion.
-        Given a student's profile dimensions, extract a concise summary.
-
-        Output strictly as JSON:
-        {
-          "weakTop": ["weakness1", "weakness2", "weakness3"],
-          "style": ["preference1", "preference2"],
-          "minutesPerDay": 30,
-          "goal": "short goal summary",
-          "dimensionCount": 8
-        }
-
-        Rules:
-        - weakTop: top 3 weakest knowledge areas
-        - style: learning style preferences (e.g., "visual", "code_examples", "theoretical")
-        - minutesPerDay: estimated daily study time
-        - goal: one-sentence learning goal
-        - dimensionCount: total number of profile dimensions populated (minimum 6 required)
-        """;
-
-    public ProfileAgent(ChatClient.Builder chatClientBuilder, ProfileVersionMapper profileVersionMapper) {
+    public ProfileAgent(ChatClient.Builder chatClientBuilder,
+                        ProfileVersionMapper profileVersionMapper,
+                        PromptLoader promptLoader) {
         this.chatClient = chatClientBuilder.build();
         this.profileVersionMapper = profileVersionMapper;
+        this.promptLoader = promptLoader;
     }
 
     private final ProfileVersionMapper profileVersionMapper;
@@ -59,16 +39,16 @@ public class ProfileAgent {
         String userId, String courseId, int profileVersion, AgentContext ctx) {
 
         Instant start = Instant.now();
-        ctx.observation().onPrompt(this.getClass().getSimpleName(), SYSTEM_PROMPT,
+        String systemPrompt = promptLoader.get("agent/profile");
+        ctx.observation().onPrompt(this.getClass().getSimpleName(), systemPrompt,
             Map.of("userId", userId, "courseId", courseId, "version", profileVersion));
 
         try {
-            // In production, read profile from DB
             String profilesJson = loadProfileJson(userId, courseId, profileVersion);
 
             String response = chatClient.prompt()
                 .messages(
-                    new SystemMessage(SYSTEM_PROMPT),
+                    new SystemMessage(systemPrompt),
                     new UserMessage("Profile data (JSON): " + profilesJson)
                 )
                 .call()
