@@ -61,6 +61,7 @@ public class RagTool implements AgentTool {
     @Override
     public String execute(String jsonArgs) {
         try {
+            log.info("RagTool.execute called with args: {}", jsonArgs);
             @SuppressWarnings("unchecked")
             Map<String, Object> args = mapper.readValue(jsonArgs, Map.class);
             String courseId = (String) args.get("course_id");
@@ -68,10 +69,15 @@ public class RagTool implements AgentTool {
             int k = args.containsKey("k") ? ((Number) args.get("k")).intValue() : 8;
             String topic = (String) args.getOrDefault("topic", null);
 
+            log.info("RagTool executing retrieve - courseId: {}, query: '{}', k: {}, topic: {}", 
+                courseId, query, k, topic);
+
             RetrieverAgent.RagClient.RagResponse resp = ragClient.retrieve(courseId, query, topic, k, 0.4, 1);
             if (resp == null) {
+                log.warn("RagTool returned null response");
                 return mapper.writeValueAsString(Map.of("sources", List.of(), "error", "KB_NOT_READY"));
             }
+            log.info("RagTool retrieved {} sources", resp.sources() != null ? resp.sources().size() : 0);
             return mapper.writeValueAsString(resp);
 
         } catch (JsonProcessingException e) {
@@ -82,6 +88,14 @@ public class RagTool implements AgentTool {
 
     /** Convenience: typed retrieval for Java callers */
     public RetrieverAgent.RagClient.RagResponse retrieve(String courseId, String query, String topic, int k) {
-        return ragClient.retrieve(courseId, query, topic, k, 0.4, 1);
+        log.info("RagTool.retrieve called - courseId: {}, query: '{}', k: {}, topic: {}", 
+            courseId, query, k, topic);
+        RetrieverAgent.RagClient.RagResponse resp = ragClient.retrieve(courseId, query, topic, k, 0.4, 1);
+        if (resp != null && resp.sources() != null) {
+            log.info("RagTool.retrieve returned {} sources", resp.sources().size());
+        } else {
+            log.warn("RagTool.retrieve returned null or empty sources");
+        }
+        return resp;
     }
 }

@@ -9,4 +9,6 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class ChatSendRequest {
     private String content;
+    /** Required for lazy session creation on first message. */
+    private String courseId;
 }

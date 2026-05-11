@@ -77,10 +77,6 @@ public class ChatServiceImpl implements ChatService {
     @Override
     @Transactional
     public ChatStartResponse startChat(String userId, ChatStartRequest request) {
-        // Resume logic (skip if forceNew):
-        // 1) Prefer an active (unanalyzed) session that already has messages
-        // 2) Fallback to the most recent non-empty session (even if analyzed)
-        // This prevents returning a newer empty session that would make history look "missing".
         if (!request.isForceNew()) {
             ProfileChat existing = findActiveSessionWithMessages(userId, request.getCourseId());
             if (existing == null) {
@@ -92,22 +88,20 @@ public class ChatServiceImpl implements ChatService {
             }
         }
 
-        // Create empty session — no opening message, user initiates
-        ProfileChat chat = new ProfileChat();
-        chat.setUserId(userId);
-        chat.setCourseId(request.getCourseId());
-        chat.setMessagesJson("[]");
-        profileChatMapper.insert(chat);
-
-        return buildStartResponse(chat.getId(), request.getCourseId(), List.of());
+        // Lazy creation: return a UUID without INSERT — DB record is created on first message
+        String newId = java.util.UUID.randomUUID().toString();
+        return buildStartResponse(newId, request.getCourseId(), List.of());
     }
 
     @Override
     @Transactional
     public ChatSendResponse sendMessage(String userId, String chatId, ChatSendRequest request) {
         ProfileChat chat = profileChatMapper.selectById(chatId);
-        if (chat == null || !chat.getUserId().equals(userId)) {
-            throw new RuntimeException("Chat session not found");
+        if (chat == null) {
+            chat = lazyCreateSession(chatId, userId, request.getCourseId());
+        } else if (!chat.getUserId().equals(userId)) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.NOT_FOUND, "Chat session not found");
         }
 
         List<Map<String, String>> messages = parseRawMessages(chat.getMessagesJson());
@@ -232,7 +226,8 @@ public class ChatServiceImpl implements ChatService {
     public List<ChatMessageDto> getMessages(String userId, String chatId) {
         ProfileChat chat = profileChatMapper.selectById(chatId);
         if (chat == null || !chat.getUserId().equals(userId)) {
-            throw new RuntimeException("Chat session not found");
+            throw new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.NOT_FOUND, "Chat session not found");
         }
         return parseMessages(chat.getMessagesJson());
     }
@@ -279,7 +274,8 @@ public class ChatServiceImpl implements ChatService {
     public void deleteSession(String userId, String chatId) {
         ProfileChat chat = profileChatMapper.selectById(chatId);
         if (chat == null || !chat.getUserId().equals(userId)) {
-            throw new RuntimeException("Chat session not found");
+            throw new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.NOT_FOUND, "Chat session not found");
         }
         profileChatMapper.deleteById(chatId);
     }
@@ -289,7 +285,8 @@ public class ChatServiceImpl implements ChatService {
     public ProfileSummaryDto analyzeProfile(String userId, String chatId) {
         ProfileChat chat = profileChatMapper.selectById(chatId);
         if (chat == null || !chat.getUserId().equals(userId)) {
-            throw new RuntimeException("Chat session not found");
+            throw new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.NOT_FOUND, "Chat session not found");
         }
 
         List<Map<String, String>> messages = parseRawMessages(chat.getMessagesJson());
@@ -395,155 +392,170 @@ public class ChatServiceImpl implements ChatService {
     @Override
     public Flux<String> streamMessage(String userId, String chatId, ChatSendRequest request) {
         ProfileChat chat = profileChatMapper.selectById(chatId);
-        if (chat == null || !chat.getUserId().equals(userId)) {
-            return Flux.error(new RuntimeException("Chat session not found"));
+        if (chat == null) {
+            chat = lazyCreateSession(chatId, userId, request.getCourseId());
+        } else if (!chat.getUserId().equals(userId)) {
+            log.warn("Chat session not found or access denied: chatId={}, userId={}", chatId, userId);
+            return Flux.error(new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.NOT_FOUND, "Chat session not found"));
         }
+        final ProfileChat session = chat;
 
-        List<Map<String, String>> messages = parseRawMessages(chat.getMessagesJson());
+        List<Map<String, String>> messages = parseRawMessages(session.getMessagesJson());
         String now = LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME);
         messages.add(Map.of("role", "user", "content", request.getContent(), "at", now));
 
-        // Save user message immediately
         chat.setMessagesJson(toJson(messages));
         profileChatMapper.updateById(chat);
 
-        List<Message> chatMessages = buildChatMessages(messages, userId, chat.getCourseId());
-        ChatClient client = chatClientBuilder.build();
+        int roundNum = messages.size() / 2 + 1;
 
+        // ── Gather real context data before the LLM call ──
+        String courseName = getCourseName(chat.getCourseId());
+        int profileCovered = getProfileCoveredCount(userId, chat.getCourseId());
+
+        String knowledgeContext = null;
+        int ragHitCount = 0;
+        if (chat.getCourseId() != null) {
+            knowledgeContext = buildKnowledgeContext(messages, chat.getCourseId());
+            if (knowledgeContext != null) {
+                var m = java.util.regex.Pattern.compile("\\*\\*\\d+\\.")
+                    .matcher(knowledgeContext);
+                while (m.find()) ragHitCount++;
+            }
+        }
+
+        List<Message> chatMessages = buildChatMessages(messages, userId, chat.getCourseId(), knowledgeContext);
+        ChatClient client = chatClientBuilder.build();
         StringBuilder fullResponse = new StringBuilder();
 
-        // v3.1: Prepend thinking chain event (PLAN phase) before streaming reply
-        String planThought = toSseEvent("agent.thought", Map.of(
+        // ── CONTEXT event (always, with real data) ──
+        String contextObs = (courseName != null ? "课程: " + courseName : "课程已选择")
+            + (profileCovered > 0 ? "，画像已覆盖 " + profileCovered + "/7 维度" : "，画像尚未建立");
+        String contextThought = profileCovered >= 4
+            ? "已充分了解学生背景，结合画像深入理解问题"
+            : "画像信息有限，从对话中尽力理解学生需求";
+
+        List<String> preEvents = new java.util.ArrayList<>();
+        preEvents.add(toSseEvent("agent.thought", Map.of(
             "agentName", "ConversationAgent",
             "agentRole", "conversation",
-            "phase", "PLAN",
-            "context", "第" + (messages.size() / 2 + 1) + "轮对话，正在分析用户回复",
-            "observation", "用户消息: " + (request.getContent().length() > 50 ?
-                request.getContent().substring(0, 50) + "..." : request.getContent()),
-            "thought", "分析用户回复，评估画像覆盖度变化...",
+            "phase", "CONTEXT",
+            "context", "第" + roundNum + "轮对话",
+            "observation", contextObs,
+            "thought", contextThought,
             "decision", "",
-            "confidenceLevel", "medium",
+            "confidenceLevel", profileCovered >= 4 ? "high" : "medium",
             "timestamp", Instant.now().toString()
-        ));
+        )));
 
-        return Flux.just(planThought)
+        // ── RETRIEVE event (only if RAG actually triggered and returned results) ──
+        final int finalRagHitCount = ragHitCount;
+        if (knowledgeContext != null && ragHitCount > 0) {
+            preEvents.add(toSseEvent("agent.thought", Map.of(
+                "agentName", "ConversationAgent",
+                "agentRole", "conversation",
+                "phase", "RETRIEVE",
+                "context", "检测到知识问题，检索课程知识库",
+                "observation", "检索到 " + ragHitCount + " 条相关资料",
+                "thought", "将知识库资料作为回答参考依据",
+                "decision", "",
+                "confidenceLevel", "high",
+                "timestamp", Instant.now().toString()
+            )));
+        }
+
+        return Flux.fromIterable(preEvents)
             .concatWith(client.prompt().messages(chatMessages).stream().content()
             .doOnNext(fullResponse::append))
             .concatWith(Flux.defer(() -> {
-                // After stream completes, save to DB and check profile
                 String aiResponse = fullResponse.toString();
                 String aiAt = LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME);
 
-                // Build assistant message with thinking data persisted (so history shows it)
                 Map<String, String> asstMsg = new LinkedHashMap<>();
                 asstMsg.put("role", "assistant");
                 asstMsg.put("content", aiResponse);
                 asstMsg.put("at", aiAt);
-                // thinking will be set below after sufficiency evaluation
                 messages.add(asstMsg);
                 int asstMsgIdx = messages.size() - 1;
-                chat.setMessagesJson(toJson(messages));
-                profileChatMapper.updateById(chat);
+                session.setMessagesJson(toJson(messages));
+                profileChatMapper.updateById(session);
 
-                // v3.1: Structured sufficiency evaluation + generation offer
-                ConversationAgent.SufficiencyResult sufficiency =
-                    conversationAgent.evaluateSufficiency(messages);
-                boolean profileReady = sufficiency.sufficient();
-                String profileVersionId = null;
-                boolean generationReady = false;
+                // ── Async: sufficiency evaluation + thinking persistence (don't block the SSE stream) ──
+                final String fChatId = chatId;
+                final String fUserId = userId;
+                final int fAsstMsgIdx = asstMsgIdx;
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        ConversationAgent.SufficiencyResult sufficiency =
+                            conversationAgent.evaluateSufficiency(messages);
 
-                // === Always emit REFLECT thinking chain event (v3.1 fix) ===
-                java.util.List<String> thoughtEvents = new java.util.ArrayList<>();
+                        if (persistenceService != null) {
+                            persistenceService.recordThinkingTrace(
+                                fChatId, "ConversationAgent", "conversation",
+                                "CONVERSATION",
+                                "对话第" + (messages.size() / 2) + "轮，评估信息覆盖度",
+                                "已覆盖 " + sufficiency.coveredCount() + "/7 维度，置信度 " +
+                                    String.format("%.0f%%", sufficiency.overallConfidence() * 100),
+                                sufficiency.sufficient() ?
+                                    "SUFFICIENT — 画像充足" : "CONTINUE — 继续收集画像信息",
+                                sufficiency.coveredCount() >= 4 ? "medium" : "low");
+                        }
 
-                // Record thinking trace to MySQL (always)
-                if (persistenceService != null) {
-                    persistenceService.recordThinkingTrace(
-                        chatId, "ConversationAgent", "conversation",
-                        "CONVERSATION",
-                        "对话第" + (messages.size() / 2) + "轮，评估信息覆盖度",
-                        "已覆盖 " + sufficiency.coveredCount() + "/7 维度，置信度 " +
-                            String.format("%.0f%%", sufficiency.overallConfidence() * 100),
-                        sufficiency.sufficient() ?
-                            "SUFFICIENT — 画像充足" : "CONTINUE — 继续收集画像信息",
-                        sufficiency.coveredCount() >= 4 ? "medium" : "low");
-                }
+                        String missingInfo = sufficiency.missingDimensions() != null &&
+                            !sufficiency.missingDimensions().isEmpty()
+                            ? "，还缺" + sufficiency.missingDimensions().size() + "个维度"
+                            : "";
 
-                // REFLECT event (always sent — not just when profileReady)
-                String reflectThought = toSseEvent("agent.thought", Map.of(
-                    "agentName", "ConversationAgent",
-                    "agentRole", "conversation",
-                    "phase", "REFLECT",
-                    "context", "评估第" + (messages.size() / 2) + "轮对话后的画像覆盖度",
-                    "observation", "已覆盖 " + sufficiency.coveredCount() + "/7 维度",
-                    "thought", sufficiency.coveredCount() >= 6 ?
-                        "画像已充分覆盖核心维度" :
-                        "还缺" + (sufficiency.missingDimensions() != null ?
-                            sufficiency.missingDimensions().size() : 0) + "个维度，继续收集信息",
-                    "decision", sufficiency.sufficient() ?
-                        "SUFFICIENT — 可生成资源" : "CONTINUE — 继续对话",
-                    "confidenceLevel", sufficiency.coveredCount() >= 4 ? "medium" : "low",
-                    "timestamp", Instant.now().toString()
-                ));
-                thoughtEvents.add(reflectThought);
+                        java.util.List<Map<String, String>> steps = new java.util.ArrayList<>();
+                        steps.add(Map.of(
+                            "label", "理解上下文",
+                            "icon", "📋",
+                            "done", "true",
+                            "detail", contextObs
+                        ));
+                        if (finalRagHitCount > 0) {
+                            steps.add(Map.of(
+                                "label", "检索知识库",
+                                "icon", "🔗",
+                                "done", "true",
+                                "detail", "检索到 " + finalRagHitCount + " 条相关资料"
+                            ));
+                        }
+                        steps.add(Map.of(
+                            "label", "评估画像覆盖度",
+                            "icon", "🎯",
+                            "done", "true",
+                            "detail", "已覆盖 " + sufficiency.coveredCount() + "/7 维度" + missingInfo
+                        ));
+                        String thinkingJson = objectMapper.writeValueAsString(Map.of(
+                            "steps", steps,
+                            "expanded", false
+                        ));
+                        messages.get(fAsstMsgIdx).put("thinking", thinkingJson);
+                        session.setMessagesJson(toJson(messages));
+                        profileChatMapper.updateById(session);
 
-                // Persist thinking data into the assistant message for history display
-                try {
-                    java.util.List<Map<String, String>> steps = new java.util.ArrayList<>();
-                    steps.add(Map.of(
-                        "label", "评估画像覆盖度",
-                        "icon", "🎯",
-                        "done", "true",
-                        "detail", "已覆盖 " + sufficiency.coveredCount() + "/7 维度"
-                    ));
-                    String decisionLabel = sufficiency.sufficient() ? "SUFFICIENT — 可生成资源" : "CONTINUE — 继续对话";
-                    String decisionDetail = sufficiency.coveredCount() >= 6 ?
-                        "画像已充分覆盖核心维度" :
-                        "还缺" + (sufficiency.missingDimensions() != null ? sufficiency.missingDimensions().size() : 0) + "个维度，继续收集信息";
-                    steps.add(Map.of(
-                        "label", decisionLabel,
-                        "icon", "💡",
-                        "done", "true",
-                        "detail", decisionDetail
-                    ));
-                    String thinkingJson = objectMapper.writeValueAsString(Map.of(
-                        "steps", steps,
-                        "expanded", false
-                    ));
-                    messages.get(asstMsgIdx).put("thinking", thinkingJson);
-                    chat.setMessagesJson(toJson(messages));
-                    profileChatMapper.updateById(chat);
-                } catch (Exception e) {
-                    log.warn("Failed to persist thinking data: {}", e.getMessage());
-                }
-
-                if (profileReady) {
-                    // Async profile analysis
-                    String finalChatId2 = chatId;
-                    String finalUserId2 = userId;
-                    CompletableFuture.runAsync(() -> {
-                        try {
-                            ProfileSummaryDto summary = analyzeProfile(finalUserId2, finalChatId2);
-                            ProfileChat pc = profileChatMapper.selectById(finalChatId2);
+                        if (sufficiency.sufficient()) {
+                            ProfileSummaryDto summary = analyzeProfile(fUserId, fChatId);
+                            ProfileChat pc = profileChatMapper.selectById(fChatId);
                             if (pc != null) {
                                 pc.setProfileVersionId(summary.getProfileVersionId());
                                 profileChatMapper.updateById(pc);
                             }
-                        } catch (Exception e) {
-                            log.error("Async profile analysis failed: {}", e.getMessage());
+                            log.info("Async profile analysis complete: chatId={}", fChatId);
                         }
-                    }, profileAnalysisExecutor);
-                    generationReady = true;
-                }
+                    } catch (Exception e) {
+                        log.warn("Async sufficiency evaluation failed: {}", e.getMessage());
+                    }
+                }, profileAnalysisExecutor);
 
-                String finalEvent = toSseEvent("done", Map.of(
-                    "profileReady", profileReady,
-                    "profileVersionId", profileVersionId != null ? profileVersionId : "",
-                    "generationReady", generationReady
-                ));
-
-                java.util.List<String> allEvents = new java.util.ArrayList<>(thoughtEvents);
-                allEvents.add(finalEvent);
-                return Flux.fromIterable(allEvents);
+                // ── Done event sent immediately, no blocking wait for evaluation ──
+                return Flux.just(toSseEvent("done", Map.of(
+                    "profileReady", false,
+                    "profileVersionId", "",
+                    "generationReady", false
+                )));
             }));
     }
 
@@ -555,6 +567,74 @@ public class ChatServiceImpl implements ChatService {
 
     private List<Message> buildChatMessages(List<Map<String, String>> messages) {
         return buildChatMessages(messages, null, null);
+    }
+
+    // ── buildChatMessages with pre-built knowledge context ──
+    private List<Message> buildChatMessages(List<Map<String, String>> messages, String userId,
+                                            String courseId, String knowledgeContext) {
+        List<Message> chatMessages = new ArrayList<>();
+        String template = promptLoader.get("chat/profile_chat");
+        String courseContext = buildCourseContext(userId, courseId);
+        String profileContext = buildProfileContext(userId, courseId);
+        String systemPrompt = template
+            .replace("{course_context}", courseContext)
+            .replace("{profile_context}", profileContext);
+        if (knowledgeContext != null) {
+            systemPrompt = systemPrompt + knowledgeContext;
+        }
+        chatMessages.add(new SystemMessage(systemPrompt));
+        for (var msg : messages) {
+            String role = msg.get("role");
+            String content = msg.get("content");
+            if ("user".equals(role)) {
+                chatMessages.add(new UserMessage(content));
+            } else if ("assistant".equals(role) || "system".equals(role)) {
+                chatMessages.add(new AssistantMessage(content));
+            }
+        }
+        return chatMessages;
+    }
+
+    private List<Message> buildChatMessages(List<Map<String, String>> messages, String userId, String courseId) {
+        String knowledgeContext = null;
+        if (courseId != null) {
+            knowledgeContext = buildKnowledgeContext(messages, courseId);
+        }
+        return buildChatMessages(messages, userId, courseId, knowledgeContext);
+    }
+
+    private String getCourseName(String courseId) {
+        if (courseId == null) return null;
+        try {
+            var course = courseMapper.selectById(courseId);
+            return course != null ? course.getName() : null;
+        } catch (Exception e) { return null; }
+    }
+
+    private int getProfileCoveredCount(String userId, String courseId) {
+        if (userId == null || courseId == null) return 0;
+        try {
+            Profile profile = profileMapper.selectOne(
+                new LambdaQueryWrapper<Profile>()
+                    .eq(Profile::getUserId, userId).eq(Profile::getCourseId, courseId));
+            if (profile == null || profile.getCurrentVersion() == null || profile.getCurrentVersion() == 0) return 0;
+            ProfileVersion pv = profileVersionMapper.selectOne(
+                new LambdaQueryWrapper<ProfileVersion>()
+                    .eq(ProfileVersion::getUserId, userId).eq(ProfileVersion::getCourseId, courseId)
+                    .eq(ProfileVersion::getVersion, profile.getCurrentVersion()));
+            if (pv == null || pv.getDimensionsJson() == null) return 0;
+            Map<String, Object> dims = objectMapper.readValue(pv.getDimensionsJson(), new TypeReference<>() {});
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> dimList = (List<Map<String, Object>>) dims.get("dimensions");
+            if (dimList == null) return 0;
+            int covered = 0;
+            for (var dim : dimList) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> value = (Map<String, Object>) dim.get("value");
+                if (value != null && !value.isEmpty()) covered++;
+            }
+            return covered;
+        } catch (Exception e) { return 0; }
     }
 
     /** Extract course context from courses table + profile version */
@@ -669,39 +749,15 @@ public class ChatServiceImpl implements ChatService {
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "…";
     }
 
-    private List<Message> buildChatMessages(List<Map<String, String>> messages, String userId, String courseId) {
-        List<Message> chatMessages = new ArrayList<>();
-
-        // Build system prompt with dynamic course + profile context
-        String template = promptLoader.get("chat/profile_chat");
-
-        // Inject course context from profile
-        String courseContext = buildCourseContext(userId, courseId);
-        String profileContext = buildProfileContext(userId, courseId);
-
-        String systemPrompt = template
-            .replace("{course_context}", courseContext)
-            .replace("{profile_context}", profileContext);
-
-        // Append RAG knowledge context when user asks knowledge questions
-        if (courseId != null) {
-            String knowledgeContext = buildKnowledgeContext(messages, courseId);
-            if (knowledgeContext != null) {
-                systemPrompt = systemPrompt + knowledgeContext;
-            }
-        }
-        chatMessages.add(new SystemMessage(systemPrompt));
-
-        for (var msg : messages) {
-            String role = msg.get("role");
-            String content = msg.get("content");
-            if ("user".equals(role)) {
-                chatMessages.add(new UserMessage(content));
-            } else if ("assistant".equals(role) || "system".equals(role)) {
-                chatMessages.add(new AssistantMessage(content));
-            }
-        }
-        return chatMessages;
+    private ProfileChat lazyCreateSession(String chatId, String userId, String courseId) {
+        ProfileChat chat = new ProfileChat();
+        chat.setId(chatId);
+        chat.setUserId(userId);
+        chat.setCourseId(courseId != null ? courseId : "");
+        chat.setMessagesJson("[]");
+        profileChatMapper.insert(chat);
+        log.info("Lazy-created chat session: chatId={}, userId={}, courseId={}", chatId, userId, courseId);
+        return chat;
     }
 
     private ProfileChat findActiveSession(String userId, String courseId) {
@@ -775,10 +831,12 @@ public class ChatServiceImpl implements ChatService {
     }
 
     /** Serialize a thinking chain or event as an SSE event line */
+    /** Emit a structured SSE event via the internal prefix format.
+     *  The ChatController.sendSse() method parses this and builds a proper SseEmitter event. */
     private String toSseEvent(String eventType, Map<String, Object> data) {
         try {
             String json = objectMapper.writeValueAsString(data);
-            return "event:" + eventType + "\ndata:" + json + "\n\n";
+            return "__sse:" + eventType + "\n" + json;
         } catch (Exception e) {
             log.error("Failed to serialize SSE event: {}", e.getMessage());
             return "";

@@ -122,8 +122,12 @@ public class ChatController {
 
     private void sendSse(SseEmitter emitter, String chunk) {
         try {
-            if (chunk.startsWith("\n{")) {
-                emitter.send(SseEmitter.event().name("done").data(chunk.replaceFirst("^\n", "")));
+            if (chunk.startsWith("__sse:")) {
+                // Internal event format: "__sse:<eventName>\n<data>"
+                int nl = chunk.indexOf('\n');
+                String eventName = chunk.substring(6, nl);
+                String data = chunk.substring(nl + 1);
+                emitter.send(SseEmitter.event().name(eventName).data(data));
             } else {
                 emitter.send(SseEmitter.event().name("chunk").data(chunk));
             }
