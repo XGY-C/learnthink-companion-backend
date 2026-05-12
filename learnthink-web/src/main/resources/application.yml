@@ -80,6 +80,11 @@ learnthink:
       temperature: 0.8
       thinking-enabled: false
 
+server:
+  tomcat:
+    # 减小 socket 缓冲区，配合 SSE 实时 flush
+    buffer-size: 1024
+
 rag:
   service:
     url: http://localhost:19531

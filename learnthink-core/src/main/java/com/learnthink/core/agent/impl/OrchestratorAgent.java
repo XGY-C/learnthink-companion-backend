@@ -36,6 +36,7 @@ public class OrchestratorAgent implements Agent<ResourceGenerationState, Resourc
 
     @Override
     public AgentResult<ResourceGenerationState> execute(ResourceGenerationState state, AgentContext ctx) {
+        log.info("=== OrchestratorAgent START === stage={}, status={}", state.stage, state.status);
         Instant start = Instant.now();
 
         ctx.observation().onPrompt(name(), "Route decision for stage=" + state.stage,
@@ -46,6 +47,7 @@ public class OrchestratorAgent implements Agent<ResourceGenerationState, Resourc
         // This agent exists to make the routing logic visible and traceable.
 
         String decision = determineNextPhase(state, ctx);
+        log.info("Routing decision: {} -> {}", state.stage, decision);
         ctx.observation().onDecision(name(), decision,
             "Routing from " + state.stage + " based on state conditions");
 
@@ -53,7 +55,8 @@ public class OrchestratorAgent implements Agent<ResourceGenerationState, Resourc
         ctx.put("orchestrator_decision", decision);
         ctx.put("orchestrator_timestamp", Instant.now().toString());
 
-        log.info("OrchestratorAgent: stage={} status={} decision={}", state.stage, state.status, decision);
+        log.info("OrchestratorAgent: stage={} status={} decision={} (took {}ms)", 
+                state.stage, state.status, decision, elapsed);
 
         return AgentResult.of(state, AgentResult.TokenUsage.ZERO, elapsed,
             Map.of("agent", name(), "decision", decision, "stage", state.stage));

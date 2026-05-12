@@ -56,6 +56,8 @@ public class ReviewerAgent {
         boolean forceLowConfidence,
         AgentContext ctx) {
 
+        log.info("=== ReviewerAgent START === type={}, sources={}, forceLowConfidence={}", 
+                resourceType, sources.size(), forceLowConfidence);
         Instant start = Instant.now();
         String systemPrompt = promptLoader.get("agent/reviewer");
         ctx.observation().onPrompt("ReviewerAgent", systemPrompt,
@@ -65,6 +67,7 @@ public class ReviewerAgent {
         try {
             // Pre-filter: rule-based safety check (before LLM call)
             if (new ContentSafetyFilter().isBlocked(content.content())) {
+                log.warn("Content blocked by safety filter for type: {}", resourceType);
                 var result = new ResourceGenerationState.ReviewResult(
                     ResourceGenerationState.ReviewStatus.REJECTED,
                     "low", "Content blocked by safety filter",
@@ -78,6 +81,7 @@ public class ReviewerAgent {
             // For reading/mindmap with no sources, skip R1
             boolean exemptR1 = "reading".equals(resourceType) || "mindmap".equals(resourceType);
             if (exemptR1 && sources.isEmpty()) {
+                log.info("Exempt from R1 check for type: {} with no sources", resourceType);
                 var result = new ResourceGenerationState.ReviewResult(
                     ResourceGenerationState.ReviewStatus.APPROVED,
                     "low", "No sources available for " + resourceType + " (exempt from R1)",
@@ -89,8 +93,10 @@ public class ReviewerAgent {
             }
 
             // v3.1: Extract factual claims and verify via independent RAG
+            log.info("Extracting factual claims from content");
             String contentExcerpt = content.content().substring(0, Math.min(2000, content.content().length()));
             List<Claim> claims = extractClaims(contentExcerpt);
+            log.info("Extracted {} claims", claims.size());
             Map<String, String> claimVerification = verifyClaims(claims, sources, ctx);
 
             int backedCount = (int) claimVerification.values().stream()
@@ -98,6 +104,7 @@ public class ReviewerAgent {
             int totalClaims = claims.isEmpty() ? 1 : claims.size();
             double backedRatio = (double) backedCount / totalClaims;
 
+            log.info("Claim verification: {}/{} backed ({:.0f}%)", backedCount, totalClaims, backedRatio * 100);
             ctx.observation().onDecision("ReviewerAgent",
                 "CLAIMS_VERIFIED",
                 backedCount + "/" + totalClaims + " claims backed (ratio=" +
@@ -123,24 +130,29 @@ public class ReviewerAgent {
                 backedCount, totalClaims, backedRatio * 100,
                 forceLowConfidence);
 
+            log.info("Calling LLM for review");
             String response = chatClient.prompt()
                 .messages(new SystemMessage(systemPrompt), new UserMessage(userMsg))
                 .call()
                 .content();
 
             long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
+            log.info("LLM call completed in {}ms", elapsed);
             ctx.observation().onResponse("ReviewerAgent", response, elapsed, AgentResult.TokenUsage.ZERO);
 
             var result = parseReview(response);
+            log.info("Review result: action={}, confidence={}, coverage={}", 
+                    result.action(), result.confidence(), result.citationCoverage());
             ctx.observation().onDecision("ReviewerAgent",
                 result.action().name(),
                 result.reviewSummary());
 
+            log.info("ReviewerAgent completed successfully");
             return AgentResult.of(result, AgentResult.TokenUsage.ZERO, elapsed,
                 Map.of("agent", "ReviewerAgent", "coverage", result.citationCoverage()));
 
         } catch (Exception e) {
-            log.error("ReviewerAgent failed: {}", e.getMessage());
+            log.error("ReviewerAgent failed: {}", e.getMessage(), e);
             ctx.observation().onError("ReviewerAgent", e);
             return AgentResult.error("Review failed: " + e.getMessage());
         }

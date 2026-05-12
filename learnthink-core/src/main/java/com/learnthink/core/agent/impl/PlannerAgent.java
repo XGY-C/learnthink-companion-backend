@@ -43,6 +43,8 @@ public class PlannerAgent {
         String feedback,
         AgentContext ctx) {
 
+        log.info("=== PlannerAgent START === topic={}, types={}, feedback={}", 
+                topic, resourceTypes, feedback != null ? "with feedback" : "initial");
         Instant start = Instant.now();
         String contextInfo = feedback != null
             ? "REPLANNING with feedback: " + feedback
@@ -54,7 +56,9 @@ public class PlannerAgent {
 
         try {
             String sourcesSummary = buildSourcesSummary(mergedSources);
+            log.info("Sources summary: {}", sourcesSummary.substring(0, Math.min(100, sourcesSummary.length())));
             String profileJson = mapper.writeValueAsString(profile);
+            log.info("Profile JSON prepared");
 
             String prompt = String.format("""
                 {profile_summary}: %s
@@ -69,25 +73,30 @@ public class PlannerAgent {
                 feedback != null ? feedback : "N/A (initial plan)",
                 contextInfo);
 
+            log.info("Calling LLM for planning");
             String response = chatClient.prompt()
                 .messages(new SystemMessage(systemPrompt), new UserMessage(prompt))
                 .call()
                 .content();
 
             long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
+            log.info("LLM call completed in {}ms", elapsed);
             ctx.observation().onResponse("PlannerAgent", response, elapsed,
                 AgentResult.TokenUsage.ZERO);
 
             var plan = parsePlan(response);
+            log.info("Plan parsed successfully. Items: {}, Outline sections: {}", 
+                    plan.items().size(), countOutlineSections(plan.topicOutline()));
             ctx.observation().onDecision("PlannerAgent", "plan_created",
                 plan.items().size() + " items, outline sections: " + countOutlineSections(plan.topicOutline()));
 
+            log.info("PlannerAgent completed successfully");
             return AgentResult.of(plan, AgentResult.TokenUsage.ZERO, elapsed,
                 Map.of("agent", "PlannerAgent", "itemCount", plan.items().size(),
                        "replan", feedback != null));
 
         } catch (Exception e) {
-            log.error("PlannerAgent failed: {}", e.getMessage());
+            log.error("PlannerAgent failed: {}", e.getMessage(), e);
             ctx.observation().onError("PlannerAgent", e);
             return AgentResult.error("Plan generation failed: " + e.getMessage());
         }

@@ -20,7 +20,7 @@ public class ResourceItem {
     private String taskId;
 
     /**
-     * document/mindmap/exercise/reading/code/video_script
+    * doc/mindmap/quiz/reading/code/video_script
      */
     private String type;
 

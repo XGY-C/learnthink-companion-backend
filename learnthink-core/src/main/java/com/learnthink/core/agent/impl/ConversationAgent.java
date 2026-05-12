@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import reactor.core.publisher.Flux;
 
 /**
  * Conversation agent for profile-building dialogue.
@@ -65,7 +66,9 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
             Map.of("courseId", input.courseId(), "historySize", input.conversationHistory().size()));
 
         // Step 1: Generate reply
-        String systemPrompt = promptLoader.get("agent/conversation");
+        String systemPrompt = input.systemPromptOverride() != null && !input.systemPromptOverride().isBlank()
+            ? input.systemPromptOverride()
+            : promptLoader.get("agent/conversation");
         List<Message> messages = buildMessages(systemPrompt, input.conversationHistory());
         String reply = chatClient.prompt().messages(messages).call().content();
 
@@ -96,6 +99,22 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
         return AgentResult.of(output, AgentResult.TokenUsage.ZERO, elapsed,
             Map.of("agent", name(), "sufficient", sufficiency.sufficient(),
                    "coveredCount", sufficiency.coveredCount()));
+    }
+
+    // ================================================================
+    // Streaming reply (true streaming, returns Flux<String>)
+    // ================================================================
+
+    /**
+     * Stream the LLM reply token-by-token. Does NOT evaluate sufficiency —
+     * that happens post-stream in ChatServiceImpl.
+     */
+    public Flux<String> streamReply(ConversationInput input) {
+        String systemPrompt = input.systemPromptOverride() != null && !input.systemPromptOverride().isBlank()
+            ? input.systemPromptOverride()
+            : promptLoader.get("agent/conversation");
+        List<Message> messages = buildMessages(systemPrompt, input.conversationHistory());
+        return chatClient.prompt().messages(messages).stream().content();
     }
 
     // ================================================================
@@ -221,8 +240,8 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
 
         // Detect resource types mentioned
         java.util.List<String> requestedTypes = new java.util.ArrayList<>();
-        if (message.contains("文档") || message.contains("讲解") || message.contains("讲义")) requestedTypes.add("document");
-        if (message.contains("题") || message.contains("练习") || message.contains("习题")) requestedTypes.add("exercise");
+        if (message.contains("文档") || message.contains("讲解") || message.contains("讲义")) requestedTypes.add("doc");
+        if (message.contains("题") || message.contains("练习") || message.contains("习题")) requestedTypes.add("quiz");
         if (message.contains("导图") || message.contains("思维导图") || message.contains("脑图")) requestedTypes.add("mindmap");
         if (message.contains("代码") || message.contains("编程") || message.contains("实操")) requestedTypes.add("code");
         if (message.contains("阅读") || message.contains("拓展") || message.contains("资料")) requestedTypes.add("reading");
@@ -322,7 +341,8 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
     public record ConversationInput(
         String courseId,
         List<Map<String, String>> conversationHistory,
-        int roundNumber
+        int roundNumber,
+        String systemPromptOverride
     ) {}
 
     public record ConversationOutput(

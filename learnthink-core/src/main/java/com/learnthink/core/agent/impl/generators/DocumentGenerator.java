@@ -28,7 +28,7 @@ public class DocumentGenerator implements TypeGenerator {
     }
 
     @Override
-    public String type() { return "document"; }
+    public String type() { return "doc"; }
 
     @Override
     public ResourceGenerationState.GeneratedContent generate(

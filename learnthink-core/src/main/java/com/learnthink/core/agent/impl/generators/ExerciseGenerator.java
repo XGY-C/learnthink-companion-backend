@@ -28,7 +28,7 @@ public class ExerciseGenerator implements TypeGenerator {
     }
 
     @Override
-    public String type() { return "exercise"; }
+    public String type() { return "quiz"; }
 
     @Override
     public ResourceGenerationState.GeneratedContent generate(

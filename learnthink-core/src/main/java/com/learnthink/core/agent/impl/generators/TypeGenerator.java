@@ -5,7 +5,7 @@ import java.util.List;
 
 /**
  * Contract for type-specialized content generators.
- * Each resource type (document, exercise, reading, code, mindmap) has its own implementation
+ * Each resource type (doc, quiz, reading, code, mindmap) has its own implementation
  * with specialized prompt templates, temperature, and output format handling.
  */
 public interface TypeGenerator {

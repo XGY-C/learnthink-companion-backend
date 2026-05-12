@@ -4,10 +4,13 @@ import com.learnthink.common.dto.chat.*;
 import com.learnthink.common.result.Result;
 import com.learnthink.common.util.UserContextUtil;
 import com.learnthink.core.service.ChatService;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
@@ -55,6 +58,12 @@ public class ChatController {
         log.info("Stream send: userId={}, chatId={}", userId, chatId);
 
         SseEmitter emitter = new SseEmitter(120000L);
+
+        // 减小 SSE 响应缓冲区，确保每个 token 立即 flush
+        try {
+            HttpServletResponse resp = ((ServletRequestAttributes) RequestContextHolder.getRequestAttributes()).getResponse();
+            if (resp != null) resp.setBufferSize(512);
+        } catch (Exception ignored) {}
 
         chatService.streamMessage(userId, chatId, request)
             .subscribe(
