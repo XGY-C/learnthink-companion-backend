@@ -1,11 +1,13 @@
 package com.learnthink.core.agent.impl.generators;
 
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.config.PromptLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -17,23 +19,12 @@ public class DocumentGenerator implements TypeGenerator {
 
     private static final Logger log = LoggerFactory.getLogger(DocumentGenerator.class);
     private final ChatClient chatClient;
+    private final PromptLoader promptLoader;
 
-    private static final String SYSTEM_PROMPT = """
-        You are an expert educational content writer for LearnThink Companion.
-        Write a clear, well-structured explanatory document based on provided sources.
-
-        ## Rules
-        - Write in Markdown format
-        - Use ## headings for sections, ### for sub-sections
-        - Include inline citations: after each factual claim, add [source: doc_id]
-        - Difficulty: {difficulty} — adjust language and depth accordingly
-        - Add a "Key Takeaways" section at the end
-        - If sources are insufficient, add a note at the top: "Note: This content was generated with limited source material."
-        - Personalization: {personalization_note}
-        """;
-
-    public DocumentGenerator(ChatClient.Builder chatClientBuilder) {
+    public DocumentGenerator(@Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
+                             PromptLoader promptLoader) {
         this.chatClient = chatClientBuilder.build();
+        this.promptLoader = promptLoader;
     }
 
     @Override
@@ -51,12 +42,12 @@ public class DocumentGenerator implements TypeGenerator {
             .map(s -> String.format("[doc:%s] %s — %s", s.docId(), s.quote(), s.locator()))
             .collect(Collectors.joining("\n"));
 
-        String prompt = SYSTEM_PROMPT
+        String systemPrompt = promptLoader.get("generator/document")
             .replace("{difficulty}", item.difficulty())
             .replace("{personalization_note}", item.personalizationNote());
 
         if (reviewFeedback != null) {
-            prompt += "\n\nIMPORTANT: Previous version was rejected. Fix these issues: " + reviewFeedback;
+            systemPrompt += "\n\nIMPORTANT: Previous version was rejected. Fix these issues: " + reviewFeedback;
         }
 
         String userMsg = String.format("""
@@ -70,7 +61,7 @@ public class DocumentGenerator implements TypeGenerator {
             sourcesText.isEmpty() ? "(no sources available — use general knowledge with disclaimers)" : sourcesText);
 
         String content = chatClient.prompt()
-            .messages(new SystemMessage(prompt), new UserMessage(userMsg))
+            .messages(new SystemMessage(systemPrompt), new UserMessage(userMsg))
             .call()
             .content();
 

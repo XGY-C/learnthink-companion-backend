@@ -11,4 +11,5 @@ public class ChatMessageDto {
     private String role;
     private String content;
     private String at;
+    private Object thinking;
 }

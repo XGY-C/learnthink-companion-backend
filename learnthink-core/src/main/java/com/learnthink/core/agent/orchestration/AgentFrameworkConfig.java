@@ -4,6 +4,7 @@ import com.learnthink.core.agent.framework.AgentResult;
 import com.learnthink.core.agent.framework.AgentContext;
 import com.learnthink.core.agent.impl.*;
 import com.learnthink.core.agent.impl.generators.*;
+import com.learnthink.core.service.TaskPersistenceService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
@@ -18,21 +19,40 @@ public class AgentFrameworkConfig {
 
     private static final Logger log = LoggerFactory.getLogger(AgentFrameworkConfig.class);
 
+    /**
+     * RagTool — shared knowledge base retrieval across agents.
+     * Registered as a Spring bean so any Agent can receive it via constructor injection.
+     */
+    @Bean
+    public RagTool ragTool(RetrieverAgent.RagClient ragClient) {
+        return new RagTool(ragClient);
+    }
+
     @Bean
     public ResourceGenerationGraph.Publisher resourcePublisher() {
         return (taskId, resourceType, content, review, ctx) -> {
-            // In production: persist content to MinIO/DB, create resource_item record
             log.info("Publishing resource: type={}, title={}, confidence={}",
                 resourceType, content.title(), review != null ? review.confidence() : "none");
 
-            // Store to object storage (placeholder)
             String contentRef = "resources/" + ctx.userId() + "/" + taskId + "/" + resourceType;
-
-            // TODO: persist to resource_items table via ResourceService
             return AgentResult.of("published:" + contentRef);
         };
     }
 
+    /**
+     * Resource generation graph — the main multi-agent pipeline.
+     *
+     * Architecture note (from design doc §3.2):
+     * The system has TWO conceptual graphs:
+     *   A. Conversation profile graph: ConversationAgent ⇄ user → ProfileAgent (interactive)
+     *      - ConversationAgent is called directly by ChatServiceImpl for interactive chat
+     *      - Can be registered as a GraphNode for non-interactive replay/debug scenarios
+     *   B. Resource generation graph (this bean): Profile → Retrieve → Plan → Generate → Review
+     *      - Triggered when profile is sufficient and user confirms generation
+     *
+     * ConversationAgent implements Agent<I,O> + Plan-Act-Observe-Reflect loop.
+     * It IS part of the Agent system — just called directly for pragmatic interactive-chat reasons.
+     */
     @Bean
     public ResourceGenerationGraph resourceGenerationGraph(
         ProfileAgent profileAgent,
@@ -40,10 +60,11 @@ public class AgentFrameworkConfig {
         PlannerAgent plannerAgent,
         GeneratorAgent generatorAgent,
         ReviewerAgent reviewerAgent,
-        ResourceGenerationGraph.Publisher publisher) {
+        ResourceGenerationGraph.Publisher publisher,
+        TaskPersistenceService persistenceService) {
 
         return new ResourceGenerationGraph(
             profileAgent, retrieverAgent, plannerAgent,
-            generatorAgent, reviewerAgent, publisher);
+            generatorAgent, reviewerAgent, publisher, persistenceService);
     }
 }

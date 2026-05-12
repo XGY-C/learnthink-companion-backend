@@ -1,11 +1,13 @@
 package com.learnthink.core.agent.impl.generators;
 
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.config.PromptLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -17,36 +19,12 @@ public class CodeGenerator implements TypeGenerator {
 
     private static final Logger log = LoggerFactory.getLogger(CodeGenerator.class);
     private final ChatClient chatClient;
+    private final PromptLoader promptLoader;
 
-    private static final String SYSTEM_PROMPT = """
-        You are a coding instructor for LearnThink Companion.
-        Create a hands-on code walkthrough based on the topic and sources.
-
-        ## Output format (Markdown with code blocks):
-        ### Problem Statement
-        Brief description of what we're implementing.
-
-        ### Step-by-Step Implementation
-        For each step:
-        - Explanation of the approach
-        - Code block with syntax highlighting (```python or ```java)
-        - Inline comments explaining key lines
-
-        ### Expected Output
-        What the student should see when running the code.
-
-        ### Extension Ideas
-        1-2 ways to extend the code.
-
-        ## Rules
-        - Default to Python unless topic suggests otherwise
-        - Code MUST be runnable as-is
-        - Explain WHY, not just WHAT
-        - Personalization: {personalization_note}
-        """;
-
-    public CodeGenerator(ChatClient.Builder chatClientBuilder) {
+    public CodeGenerator(@Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
+                         PromptLoader promptLoader) {
         this.chatClient = chatClientBuilder.build();
+        this.promptLoader = promptLoader;
     }
 
     @Override
@@ -64,15 +42,15 @@ public class CodeGenerator implements TypeGenerator {
             .map(s -> String.format("[%s] %s", s.docId(), s.quote()))
             .collect(Collectors.joining("\n"));
 
-        String prompt = SYSTEM_PROMPT
+        String systemPrompt = promptLoader.get("generator/code")
             .replace("{personalization_note}", item.personalizationNote());
 
         if (reviewFeedback != null) {
-            prompt += "\n\nFIX REQUIRED: " + reviewFeedback;
+            systemPrompt += "\n\nFIX REQUIRED: " + reviewFeedback;
         }
 
         String content = chatClient.prompt()
-            .messages(new SystemMessage(prompt),
+            .messages(new SystemMessage(systemPrompt),
                 new UserMessage(String.format("Topic: %s\nKey points: %s\nReference sources:\n%s",
                     item.title(), String.join(", ", item.keyPoints()), sourcesText)))
             .call()

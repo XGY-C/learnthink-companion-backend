@@ -5,6 +5,7 @@ import com.learnthink.core.agent.framework.AgentResult;
 import com.learnthink.core.agent.graph.StateGraph;
 import com.learnthink.core.agent.graph.GraphRunner;
 import com.learnthink.core.agent.impl.*;
+import com.learnthink.core.service.TaskPersistenceService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,6 +49,7 @@ public class ResourceGenerationGraph {
     private final GeneratorAgent generatorAgent;
     private final ReviewerAgent reviewerAgent;
     private final Publisher publisher;
+    private final TaskPersistenceService persistenceService;
 
     public ResourceGenerationGraph(
         ProfileAgent profileAgent,
@@ -55,7 +57,8 @@ public class ResourceGenerationGraph {
         PlannerAgent plannerAgent,
         GeneratorAgent generatorAgent,
         ReviewerAgent reviewerAgent,
-        Publisher publisher
+        Publisher publisher,
+        TaskPersistenceService persistenceService
     ) {
         this.profileAgent = profileAgent;
         this.retrieverAgent = retrieverAgent;
@@ -63,6 +66,7 @@ public class ResourceGenerationGraph {
         this.generatorAgent = generatorAgent;
         this.reviewerAgent = reviewerAgent;
         this.publisher = publisher;
+        this.persistenceService = persistenceService;
     }
 
     /**
@@ -261,6 +265,26 @@ public class ResourceGenerationGraph {
                 }
             }
 
+            // Persist review record to MySQL
+            if (persistenceService != null) {
+                try {
+                    persistenceService.recordReviewFlag(s.taskId, type,
+                        result.output().action().name(),
+                        result.output().confidence(),
+                        result.output().citationCoverage());
+                    // Determine resourceItemId from artifacts or use type as fallback
+                    String resourceItemId = content.title() != null ? content.title() : type;
+                    persistenceService.recordReview(
+                        resourceItemId, s.packId != null ? s.packId : s.taskId,
+                        s.taskId,
+                        result.output().action() == ResourceGenerationState.ReviewAction.PUBLISH ? "approved" : "rejected",
+                        result.output().reviewSummary(),
+                        result.output().citationCoverage());
+                } catch (Exception e) {
+                    log.warn("Failed to persist review record: {}", e.getMessage());
+                }
+            }
+
             reviewCompleted++;
         }
 
@@ -416,6 +440,16 @@ public class ResourceGenerationGraph {
         s.message = message;
         s.status = "RUNNING";
 
+        // Persist to MySQL for traceability
+        if (persistenceService != null) {
+            try {
+                persistenceService.updateTaskStage(s.taskId, stage, percent, "RUNNING");
+                persistenceService.recordStageEvent(s.taskId, stage, percent, message, null);
+            } catch (Exception e) {
+                log.warn("Failed to persist stage event: {}", e.getMessage());
+            }
+        }
+
         // Fire real-time progress via the hook (wired by TaskGraphObserver)
         if (s.progressHook != null) {
             s.progressHook.onProgress(stage, percent, message, java.util.Map.of("timestamp", System.currentTimeMillis()));
@@ -426,6 +460,10 @@ public class ResourceGenerationGraph {
     private void resourceReady(ResourceGenerationState s, String type, String title, String confidence, int sourceCount) {
         if (s.eventBroadcaster != null) {
             s.eventBroadcaster.resourceReady(s.taskId, type, title, confidence, sourceCount);
+        }
+        // Persist to MySQL
+        if (persistenceService != null) {
+            persistenceService.recordResourceReady(s.taskId, type, title, confidence, sourceCount);
         }
     }
 
