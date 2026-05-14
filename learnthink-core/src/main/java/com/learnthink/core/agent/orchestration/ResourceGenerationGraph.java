@@ -50,6 +50,7 @@ public class ResourceGenerationGraph {
     private final ReviewerAgent reviewerAgent;
     private final Publisher publisher;
     private final TaskPersistenceService persistenceService;
+    private final java.util.concurrent.ExecutorService generatorPool = java.util.concurrent.Executors.newFixedThreadPool(5);
 
     public ResourceGenerationGraph(
         ProfileAgent profileAgent,
@@ -211,35 +212,42 @@ public class ResourceGenerationGraph {
             return s;
         }
 
-        int genCompleted = 0;
+        advance(s, "GENERATING", 55, "Generating " + itemsToGenerate.size() + " resources in parallel...");
+        java.util.List<java.util.concurrent.CompletableFuture<Void>> futures = new java.util.ArrayList<>();
         for (ResourceGenerationState.ResourcePlanItem item : itemsToGenerate) {
-            log.info("Generating resource type: {}, title: {}", item.type(), item.title());
-            advance(s, "GENERATING",
-                55 + (genCompleted * 30 / itemsToGenerate.size()),
-                "Generating: " + item.title());
-
-            // Delegate to type-specialized sub-agent via GeneratorAgent
-            var typeSources = s.evidenceByType != null
-                ? s.evidenceByType.getOrDefault(item.type(), List.of())
-                : List.<ResourceGenerationState.SourceItem>of();
-            String reviewFeedback = s.reviewFeedbackByType != null
-                ? s.reviewFeedbackByType.get(item.type()) : null;
-
-            var result = generatorAgent.generate(item, typeSources, s.profileSummary,
-                s.forceLowConfidence, reviewFeedback, ctx);
-            if (result.success()) {
-                s.artifacts.put(item.type(), result.output());
-                log.info("Successfully generated resource type: {}", item.type());
-                // Fire resource-level ready event so frontend can update individual cards
-                resourceReady(s, item.type(), result.output().title(),
-                    result.output().confidence(),
-                    result.output().sources() != null ? result.output().sources().size() : 0);
-            } else {
-                log.warn("Generation failed for type={}: {}", item.type(), result.errorMessage());
-                s.failedTypes.add(item.type());
-            }
-            genCompleted++;
+            futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                log.info("Generating resource type: {}, title: {}", item.type(), item.title());
+                var typeSources = s.evidenceByType != null
+                    ? s.evidenceByType.getOrDefault(item.type(), List.of())
+                    : List.<ResourceGenerationState.SourceItem>of();
+                String reviewFeedback = s.reviewFeedbackByType != null
+                    ? s.reviewFeedbackByType.get(item.type()) : null;
+                try {
+                    var result = generatorAgent.generate(item, typeSources, s.profileSummary,
+                        s.forceLowConfidence, reviewFeedback, ctx);
+                    if (result.success()) {
+                        synchronized (s) {
+                            s.artifacts.put(item.type(), result.output());
+                        }
+                        resourceReady(s, item.type(), result.output().title(),
+                            result.output().confidence(),
+                            result.output().sources() != null ? result.output().sources().size() : 0);
+                        log.info("Successfully generated resource type: {}", item.type());
+                    } else {
+                        synchronized (s) {
+                            s.failedTypes.add(item.type());
+                        }
+                        log.warn("Generation failed for type={}: {}", item.type(), result.errorMessage());
+                    }
+                } catch (Exception e) {
+                    synchronized (s) {
+                        s.failedTypes.add(item.type());
+                    }
+                    log.error("Generation error for type={}: {}", item.type(), e.getMessage());
+                }
+            }, generatorPool));
         }
+        java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
 
         log.info("Generation completed. Successful: {}, Failed: {}", s.artifacts.size(), s.failedTypes.size());
         advance(s, "GENERATING", 85,
@@ -488,7 +496,14 @@ public class ResourceGenerationGraph {
 
         // Fire real-time progress via the hook (wired by TaskGraphObserver)
         if (s.progressHook != null) {
-            s.progressHook.onProgress(stage, percent, message, java.util.Map.of("timestamp", System.currentTimeMillis()));
+            java.util.Map<String, Object> extra = new java.util.HashMap<>();
+            extra.put("timestamp", System.currentTimeMillis());
+            // Include resourceTypes once Planner has decided them
+            if (s.resourcePlan != null && s.resourcePlan.items() != null && !s.resourcePlan.items().isEmpty()) {
+                extra.put("resourceTypes", s.resourcePlan.items().stream()
+                    .map(ResourceGenerationState.ResourcePlanItem::type).toList());
+            }
+            s.progressHook.onProgress(stage, percent, message, extra);
         }
     }
 

@@ -43,9 +43,10 @@ public class TaskPersistenceService {
     // ================================================================
 
     @Transactional
-    public Task createTask(String userId, String courseId, String taskType,
+    public Task createTask(String taskId, String userId, String courseId, String taskType,
                            String topic, String resourceTypesJson, Integer profileVersion) {
         Task task = new Task();
+        task.setId(taskId);
         task.setUserId(userId);
         task.setCourseId(courseId);
         task.setTaskType(taskType);

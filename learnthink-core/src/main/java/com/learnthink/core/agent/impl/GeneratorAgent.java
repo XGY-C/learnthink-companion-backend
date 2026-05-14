@@ -94,4 +94,30 @@ public class GeneratorAgent {
             return AgentResult.error(type + " generation failed: " + e.getMessage());
         }
     }
+
+    /**
+     * Targeted revision based on review feedback. Delegates to the specialized sub-agent's revise().
+     */
+    public AgentResult<ResourceGenerationState.GeneratedContent> revise(
+        ResourceGenerationState.ResourcePlanItem planItem,
+        List<ResourceGenerationState.SourceItem> typeSources,
+        ResourceGenerationState.ProfileSummary profile,
+        boolean forceLowConfidence,
+        String reviewFeedback,
+        ResourceGenerationState.GeneratedContent original,
+        AgentContext ctx) {
+
+        String type = planItem.type();
+        TypeGenerator gen = generators.get(type);
+        if (gen == null) {
+            return AgentResult.error("No generator for type: " + type);
+        }
+        try {
+            var content = gen.revise(planItem, typeSources, profile, forceLowConfidence, reviewFeedback, original);
+            return AgentResult.of(content, AgentResult.TokenUsage.ZERO, 0,
+                Map.of("agent", "GeneratorAgent", "subAgent", gen.getClass().getSimpleName(), "revised", true));
+        } catch (Exception e) {
+            return AgentResult.error(type + " revision failed: " + e.getMessage());
+        }
+    }
 }

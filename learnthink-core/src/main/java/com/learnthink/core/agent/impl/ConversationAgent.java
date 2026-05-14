@@ -107,14 +107,25 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
 
     /**
      * Stream the LLM reply token-by-token. Does NOT evaluate sufficiency —
-     * that happens post-stream in ChatServiceImpl.
+     * that happens post-stream in ChatServiceImpl. Accepts AgentContext
+     * to emit observation events (prompt/response/decision).
      */
-    public Flux<String> streamReply(ConversationInput input) {
+    public Flux<String> streamReply(ConversationInput input, AgentContext ctx) {
         String systemPrompt = input.systemPromptOverride() != null && !input.systemPromptOverride().isBlank()
             ? input.systemPromptOverride()
             : promptLoader.get("agent/conversation");
         List<Message> messages = buildMessages(systemPrompt, input.conversationHistory());
-        return chatClient.prompt().messages(messages).stream().content();
+
+        long start = System.currentTimeMillis();
+        ctx.observation().onPrompt(name(), "Streaming reply generation (round " + input.roundNumber() + ")",
+            Map.of("courseId", input.courseId(), "historySize", input.conversationHistory().size()));
+
+        return chatClient.prompt().messages(messages).stream().content()
+            .doFinally(signalType -> {
+                long elapsed = System.currentTimeMillis() - start;
+                ctx.observation().onResponse(name(),
+                    "Stream complete (" + elapsed + "ms)", elapsed, AgentResult.TokenUsage.ZERO);
+            });
     }
 
     // ================================================================

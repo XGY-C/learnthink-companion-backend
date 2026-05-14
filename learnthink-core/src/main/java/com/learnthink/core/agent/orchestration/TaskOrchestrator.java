@@ -110,7 +110,7 @@ public class TaskOrchestrator {
         // Persist task to MySQL
         try {
             String resourceTypesJson = objectMapper.writeValueAsString(state.resourceTypes);
-            persistenceService.createTask(userId, req.courseId(), "resource_generate",
+            persistenceService.createTask(taskId, userId, req.courseId(), "resource_generate",
                 req.topic(), resourceTypesJson, req.profileVersion());
         } catch (JsonProcessingException e) {
             log.warn("Failed to serialize resourceTypes", e);

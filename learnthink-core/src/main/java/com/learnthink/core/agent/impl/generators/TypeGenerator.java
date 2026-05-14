@@ -21,4 +21,18 @@ public interface TypeGenerator {
         boolean forceLowConfidence,
         String reviewFeedback
     );
+
+    /**
+     * Targeted revision based on review feedback.
+     * Unlike generate() which creates from scratch, revise() modifies specific sections
+     * identified by the reviewer, preserving approved sections.
+     */
+    ResourceGenerationState.GeneratedContent revise(
+        ResourceGenerationState.ResourcePlanItem planItem,
+        List<ResourceGenerationState.SourceItem> typeSources,
+        ResourceGenerationState.ProfileSummary profile,
+        boolean forceLowConfidence,
+        String reviewFeedback,
+        ResourceGenerationState.GeneratedContent original
+    );
 }
