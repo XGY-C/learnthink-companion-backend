@@ -1,6 +1,7 @@
 package com.learnthink.core.agent.impl.generators;
 
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import com.learnthink.core.config.PromptLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,7 +23,7 @@ public class MindmapGenerator implements TypeGenerator {
 
     public MindmapGenerator(@Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
                             PromptLoader promptLoader) {
-        this.chatClient = chatClientBuilder.build();
+        this.chatClient = chatClientBuilder.defaultOptions(OpenAiChatOptions.builder().temperature(0.3).build()).build();
         this.promptLoader = promptLoader;
     }
 
@@ -37,9 +38,11 @@ public class MindmapGenerator implements TypeGenerator {
         boolean forceLowConfidence,
         String reviewFeedback) {
 
-        String systemPrompt = promptLoader.get("generator/mindmap");
+        String systemPrompt = promptLoader.get("generator/mindmap")
+            .replace("{difficulty}", item.difficulty())
+            .replace("{personalization_note}", item.personalizationNote());
         if (reviewFeedback != null) {
-            systemPrompt += "\n\nCORRECTION: " + reviewFeedback;
+            systemPrompt += "\n\n修正要求：" + reviewFeedback;
         }
 
         String content = chatClient.prompt()
@@ -53,6 +56,34 @@ public class MindmapGenerator implements TypeGenerator {
             item.title(), content, "application/json", sources,
             "medium",
             Map.of("generator", "MindmapGenerator")
+        );
+    }
+
+    @Override
+    public ResourceGenerationState.GeneratedContent revise(
+        ResourceGenerationState.ResourcePlanItem item,
+        List<ResourceGenerationState.SourceItem> sources,
+        ResourceGenerationState.ProfileSummary profile,
+        boolean forceLowConfidence,
+        String reviewFeedback,
+        ResourceGenerationState.GeneratedContent original) {
+
+        String systemPrompt = promptLoader.get("generator/mindmap")
+            .replace("{difficulty}", item.difficulty())
+            .replace("{personalization_note}", item.personalizationNote());
+        systemPrompt += "\n\n## 修改要求\n" + reviewFeedback;
+
+        String userMsg = "需修改的思维导图 JSON：\n" + (original.content() != null ? original.content().substring(0, Math.min(2000, original.content().length())) : "");
+
+        String content = chatClient.prompt()
+            .messages(new SystemMessage(systemPrompt), new UserMessage(userMsg))
+            .call()
+            .content();
+
+        return new ResourceGenerationState.GeneratedContent(
+            item.title(), content, "application/json", sources,
+            "medium",
+            Map.of("generator", "MindmapGenerator", "revised", true)
         );
     }
 }

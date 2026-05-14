@@ -5,6 +5,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learnthink.common.dto.chat.*;
 import com.learnthink.core.agent.framework.AgentContext;
+import com.learnthink.core.agent.framework.AgentObservation;
+import com.learnthink.core.agent.framework.AgentResult;
 import com.learnthink.core.agent.impl.ConversationAgent;
 import com.learnthink.core.agent.impl.RagTool;
 import com.learnthink.core.agent.impl.RetrieverAgent;
@@ -151,7 +153,7 @@ public class ChatServiceImpl implements ChatService {
             String clarifying = conversationAgent.generateClarifyingQuestion(genIntent, sufficiency);
             if (clarifying != null) {
                 aiResponse = aiResponse + "\n\n" + clarifying;
-                generationReady = false;
+                generationReady = true;
                 generationMeta = Map.of("stage", "clarifying", "preferences", genIntent.preferences());
             } else {
                 generationReady = true;
@@ -294,36 +296,37 @@ public class ChatServiceImpl implements ChatService {
 
     @Override
     @Transactional
-    public synchronized ProfileSummaryDto analyzeProfile(String userId, String chatId) {
+    public ProfileSummaryDto analyzeProfile(String userId, String chatId) {
         ProfileChat chat = profileChatMapper.selectById(chatId);
         if (chat == null || !chat.getUserId().equals(userId)) {
             throw new org.springframework.web.server.ResponseStatusException(
                 org.springframework.http.HttpStatus.NOT_FOUND, "Chat session not found");
         }
-
-        List<Map<String, String>> messages = parseRawMessages(chat.getMessagesJson());
-
-        // Build conversation transcript for analysis
-        StringBuilder transcript = new StringBuilder();
-        for (var msg : messages) {
-            String role = msg.get("role");
-            if ("user".equals(role) || "assistant".equals(role) || "system".equals(role)) {
-                transcript.append(role).append(": ").append(msg.get("content")).append("\n");
-            }
-        }
-
-        // Call LLM for profile extraction
-        ChatClient client = chatClientBuilder.build();
-        String response = client.prompt()
-            .messages(
-                new SystemMessage(promptLoader.get("chat/profile_analysis")),
-                new UserMessage("对话记录：\n" + transcript)
-            )
-            .call()
-            .content();
-
-        // Parse the JSON response
+        var lock = ProfileServiceImpl.getProfileLock(userId, chat.getCourseId());
+        lock.lock();
         try {
+            List<Map<String, String>> messages = parseRawMessages(chat.getMessagesJson());
+
+            // Build conversation transcript for analysis
+            StringBuilder transcript = new StringBuilder();
+            for (var msg : messages) {
+                String role = msg.get("role");
+                if ("user".equals(role) || "assistant".equals(role) || "system".equals(role)) {
+                    transcript.append(role).append(": ").append(msg.get("content")).append("\n");
+                }
+            }
+
+            // Call LLM for profile extraction
+            ChatClient client = chatClientBuilder.build();
+            String response = client.prompt()
+                .messages(
+                    new SystemMessage(promptLoader.get("chat/profile_analysis")),
+                    new UserMessage("对话记录：\n" + transcript)
+                )
+                .call()
+                .content();
+
+            // Parse the JSON response
             String json = response;
             if (json.contains("```json")) {
                 json = json.substring(json.indexOf("```json") + 7, json.lastIndexOf("```"));
@@ -338,13 +341,42 @@ public class ChatServiceImpl implements ChatService {
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> dimensions = (List<Map<String, Object>>) analysis.get("dimensions");
 
-            @SuppressWarnings("unchecked")
-            Map<String, Object> summary = (Map<String, Object>) analysis.get("summary");
-
-            Profile profile = profileMapper.selectOne(
+            // Validate: don't overwrite a good profile with a worse analysis
+            int newMeaningfulCount = countMeaningfulDimensions(dimensions);
+            Profile existingProfile = profileMapper.selectOne(
                 new LambdaQueryWrapper<Profile>()
                     .eq(Profile::getUserId, userId)
                     .eq(Profile::getCourseId, chat.getCourseId()));
+            if (existingProfile != null && existingProfile.getCurrentVersion() != null && existingProfile.getCurrentVersion() > 0) {
+                ProfileVersion currentPv = profileVersionMapper.selectOne(
+                    new LambdaQueryWrapper<ProfileVersion>()
+                        .eq(ProfileVersion::getUserId, userId)
+                        .eq(ProfileVersion::getCourseId, chat.getCourseId())
+                        .eq(ProfileVersion::getVersion, existingProfile.getCurrentVersion()));
+                if (currentPv != null && currentPv.getDimensionsJson() != null) {
+                    try {
+                        List<Map<String, Object>> currentDims = objectMapper.readValue(
+                            currentPv.getDimensionsJson(),
+                            new TypeReference<List<Map<String, Object>>>() {});
+                        int currentMeaningfulCount = countMeaningfulDimensions(currentDims);
+                        if (newMeaningfulCount < currentMeaningfulCount) {
+                            log.warn("跳过画像更新：新分析覆盖 {} 个有效维度，当前版本覆盖 {} 个",
+                                newMeaningfulCount, currentMeaningfulCount);
+                            return new ProfileSummaryDto(currentPv.getId(),
+                                existingProfile.getCurrentVersion(),
+                                objectMapper.readValue(currentPv.getSummaryJson(), Map.class),
+                                Map.of("dimensions", currentDims));
+                        }
+                    } catch (Exception e) {
+                        log.warn("无法解析当前画像版本，进行覆盖: {}", e.getMessage());
+                    }
+                }
+            }
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> summary = (Map<String, Object>) analysis.get("summary");
+
+            Profile profile = existingProfile;
 
             int newVersion;
             if (profile == null) {
@@ -394,14 +426,16 @@ public class ChatServiceImpl implements ChatService {
         } catch (Exception e) {
             log.error("Profile analysis failed for userId={}, chatId={}: {}", userId, chatId, e.getMessage());
             throw new RuntimeException("Profile analysis failed", e);
+        } finally {
+            lock.unlock();
         }
     }
 
     @Override
-    public Flux<String> streamMessage(String userId, String chatId, ChatSendRequest request) {
-        log.info("=== 流式对话开始 === userId={}, chatId={}, content={}", 
+    public Flux<SseEvent> streamMessage(String userId, String chatId, ChatSendRequest request) {
+        log.info("=== 流式对话开始 === userId={}, chatId={}, content={}",
                 userId, chatId, request.getContent().length() > 100 ? request.getContent().substring(0, 100) + "..." : request.getContent());
-        
+
         ProfileChat chat = profileChatMapper.selectById(chatId);
         if (chat == null) {
             log.info("懒创建会话: chatId={}, userId={}, courseId={}", chatId, userId, request.getCourseId());
@@ -442,6 +476,102 @@ public class ChatServiceImpl implements ChatService {
         }
 
         String systemPrompt = buildConversationSystemPrompt(userId, chat.getCourseId(), knowledgeContext);
+        final int finalRagHitCount = ragHitCount;
+
+        // ── Build AgentContext with observation hook bridging to SSE ──
+        class CollectingObservation implements AgentObservation {
+            final List<SseEvent> sseEvents = new ArrayList<>();
+
+            @Override
+            public void onPrompt(String agentName, String prompt, Map<String, Object> params) {
+                // Internal — not emitted as agent.thought events
+            }
+
+            @Override
+            public void onResponse(String agentName, String rawResponse, long elapsedMs, AgentResult.TokenUsage tokens) {
+                sseEvents.add(toSseEvent("agent.thought", Map.of(
+                    "agentName", agentName,
+                    "agentRole", "conversation",
+                    "phase", "DECISION",
+                    "context", "LLM 回复生成完成",
+                    "observation", "LLM 回复生成完成，耗时 " + elapsedMs + "ms",
+                    "thought", rawResponse != null ? rawResponse : "流式生成正常",
+                    "decision", "",
+                    "confidenceLevel", "high",
+                    "timestamp", Instant.now().toString()
+                )));
+            }
+
+            @Override
+            public void onDecision(String agentName, String decision, String reason) {
+                String phase;
+                if (decision == null) phase = "DECISION";
+                else if (decision.startsWith("CONTEXT")) phase = "CONTEXT";
+                else if (decision.startsWith("RETRIEVE")) phase = "RETRIEVE";
+                else if (decision.startsWith("RAG")) phase = "RAG";
+                else phase = "DECISION";
+
+                // Derive confidenceLevel from actual data, not hardcoded
+                String confidenceLevel = deriveConfidence(phase);
+                // Build context string with real data
+                String context = buildContext(phase);
+
+                boolean isRealDecision = "DECISION".equals(phase);
+                sseEvents.add(toSseEvent("agent.thought", Map.of(
+                    "agentName", agentName,
+                    "agentRole", "conversation",
+                    "phase", phase,
+                    "context", context,
+                    "observation", reason != null ? reason : "",
+                    "thought", decision != null ? decision : "",
+                    "decision", isRealDecision && decision != null ? decision : "",
+                    "confidenceLevel", confidenceLevel,
+                    "timestamp", Instant.now().toString()
+                )));
+            }
+
+            private String deriveConfidence(String phase) {
+                switch (phase) {
+                    case "CONTEXT":
+                        return profileCovered >= 4 ? "high" : "medium";
+                    case "RETRIEVE":
+                        return "high";
+                    case "RAG":
+                        return finalRagHitCount >= 3 ? "high" : "medium";
+                    case "DECISION":
+                        return "high";
+                    default:
+                        return "medium";
+                }
+            }
+
+            private String buildContext(String phase) {
+                switch (phase) {
+                    case "CONTEXT":
+                        return "第" + roundNum + "轮对话"
+                            + (courseName != null ? "，课程: " + courseName : "");
+                    case "RETRIEVE":
+                        return "检索课程知识库，命中 " + finalRagHitCount + " 条资料";
+                    case "RAG":
+                        return "RAG 资料分析，共 " + finalRagHitCount + " 条来源";
+                    case "DECISION":
+                        return "LLM 回复生成完成";
+                    default:
+                        return "";
+                }
+            }
+
+            @Override
+            public void onError(String agentName, Throwable error) {
+                // Not emitted as thought event
+            }
+        }
+
+        CollectingObservation chatObs = new CollectingObservation();
+        AgentContext ctx = AgentContext.builder(chatId, userId)
+            .courseId(chat.getCourseId())
+            .observation(chatObs)
+            .build();
 
         // ── Pre-stream: Detect generation intent (no LLM needed) ──
         ConversationAgent.GenerationIntent genIntent =
@@ -454,52 +584,66 @@ public class ChatServiceImpl implements ChatService {
             ? "已充分了解学生背景，结合画像深入理解问题"
             : "画像信息有限，从对话中尽力理解学生需求";
 
-        List<String> preEvents = new java.util.ArrayList<>();
-        preEvents.add(toSseEvent("agent.thought", Map.of(
-            "agentName", "ConversationAgent",
-            "agentRole", "conversation",
-            "phase", "CONTEXT",
-            "context", "第" + roundNum + "轮对话",
-            "observation", contextObs,
-            "thought", contextThought,
-            "decision", "",
-            "confidenceLevel", profileCovered >= 4 ? "high" : "medium",
-            "timestamp", Instant.now().toString()
-        )));
+        chatObs.onDecision("ConversationAgent",
+            "CONTEXT — 第" + roundNum + "轮对话，"
+                + (profileCovered >= 4 ? "画像充足（确信度高）" : "画像信息有限（继续收集）"),
+            contextObs);
 
-        final int finalRagHitCount = ragHitCount;
         if (knowledgeContext != null && ragHitCount > 0) {
-            preEvents.add(toSseEvent("agent.thought", Map.of(
-                "agentName", "ConversationAgent",
-                "agentRole", "conversation",
-                "phase", "RETRIEVE",
-                "context", "检测到知识问题，检索课程知识库",
-                "observation", "检索到 " + ragHitCount + " 条相关资料",
-                "thought", "将知识库资料作为回答参考依据",
-                "decision", "",
-                "confidenceLevel", "high",
-                "timestamp", Instant.now().toString()
-            )));
+            chatObs.onDecision("ConversationAgent",
+                "RETRIEVE — 检索到 " + ragHitCount + " 条相关资料",
+                "检测到知识问题，检索课程知识库。检索到 " + ragHitCount + " 条相关资料，将知识库资料作为回答参考依据");
+
+            // Extract source titles from knowledge context for richer RAG thought
+            java.util.List<String> sourceTitles = new java.util.ArrayList<>();
+            java.util.regex.Matcher titleMatcher =
+                java.util.regex.Pattern.compile("\\*\\*\\d+\\.\\s*([^\\*]+)\\*\\*")
+                    .matcher(knowledgeContext);
+            while (titleMatcher.find()) {
+                sourceTitles.add(titleMatcher.group(1).trim());
+            }
+            String latestUserMsg = "";
+            for (int i = messages.size() - 1; i >= 0; i--) {
+                if ("user".equals(messages.get(i).get("role"))) {
+                    latestUserMsg = messages.get(i).getOrDefault("content", "");
+                    break;
+                }
+            }
+            String sourcesSummary = sourceTitles.isEmpty()
+                ? "共 " + ragHitCount + " 条资料"
+                : String.join("、", sourceTitles.subList(0, Math.min(3, sourceTitles.size())))
+                    + (sourceTitles.size() > 3 ? "等" + sourceTitles.size() + "篇" : "");
+
+            chatObs.onDecision("ConversationAgent",
+                "RAG — 采纳检索结果",
+                "用户问题：「" + (latestUserMsg.length() > 30 ? latestUserMsg.substring(0, 30) + "…" : latestUserMsg) + "」→ "
+                    + "检索到相关来源：" + sourcesSummary + "，采纳作为回答参考依据");
         }
+
+        List<SseEvent> preEvents = new ArrayList<>(chatObs.sseEvents);
 
         // ── Buffer for collecting streamed LLM tokens ──
         StringBuilder replyBuffer = new StringBuilder();
 
-        // ── True streaming: call LLM and emit tokens as they arrive ──
+        // ── True streaming: call LLM via Agent framework with ctx ──
         ConversationAgent.ConversationInput streamInput =
             new ConversationAgent.ConversationInput(chat.getCourseId(), messages, roundNum, systemPrompt);
 
-        Flux<String> replyStream = conversationAgent.streamReply(streamInput)
-            .doOnNext(replyBuffer::append);
-        // Tokens are raw strings → ChatController.sendSse sends each as "chunk" SSE event
+        Flux<SseEvent> replyStream = conversationAgent.streamReply(streamInput, ctx)
+            .doOnNext(replyBuffer::append)
+            .map(SseEvent::chunk);
 
         // ── Post-stream: evaluate sufficiency, handle genIntent, save, emit done ──
-        Flux<String> postStream = Flux.defer(() -> {
+        Flux<SseEvent> postStream = Flux.defer(() -> {
             String fullReply = replyBuffer.length() > 0
                 ? replyBuffer.toString()
                 : "抱歉，我现在无法生成回复，请稍后再试。";
 
             log.info("流式回复完成，长度: {} 字符", fullReply.length());
+
+            // Collect post-stream observations (from onResponse's doFinally, which ran before this defer)
+            List<SseEvent> postThoughtEvents = new ArrayList<>(chatObs.sseEvents);
+            chatObs.sseEvents.clear();
 
             // Evaluate sufficiency (blocking LLM call, runs after stream completes)
             ConversationAgent.SufficiencyResult sufficiency;
@@ -521,14 +665,20 @@ public class ChatServiceImpl implements ChatService {
 
             if (genIntent != null && genIntent.wantsGeneration()) {
                 log.info("用户需要资源生成: chatId={}, prefs={}", chatId, genIntent.preferences());
+                // Resolve topic regardless of clarifying path
+                String topic = conversationAgent.resolveTopic(
+                    courseName != null ? courseName : "当前课程", messages, null);
+                java.util.Map<String, Object> prefsWithTopic =
+                    new java.util.LinkedHashMap<>(genIntent.preferences());
+                prefsWithTopic.put("topic", topic);
                 String clarifying = conversationAgent.generateClarifyingQuestion(genIntent, sufficiency);
                 if (clarifying != null) {
                     extraText.append("\n\n").append(clarifying);
-                    generationReady = false;
-                    generationMeta = Map.of("stage", "clarifying", "preferences", genIntent.preferences());
+                    generationReady = true;
+                    generationMeta = Map.of("stage", "clarifying", "preferences", prefsWithTopic);
                 } else {
                     generationReady = true;
-                    generationMeta = Map.of("stage", "ready", "preferences", genIntent.preferences());
+                    generationMeta = Map.of("stage", "ready", "preferences", prefsWithTopic);
                 }
             }
 
@@ -553,10 +703,32 @@ public class ChatServiceImpl implements ChatService {
             session.setMessagesJson(toJson(messages));
             profileChatMapper.updateById(session);
 
-            // Build post-stream items: extra text (if any) + done event
-            java.util.List<String> postItems = new java.util.ArrayList<>();
+            // Build post-stream items: buffered observations + REFLECT event + extra text + done
+            java.util.List<SseEvent> postItems = new java.util.ArrayList<>(postThoughtEvents);
+
+            // REFLECT event with sufficiency result (aligned with CONTEXT baseline)
+            int effectiveCovered = Math.max(profileCovered, sufficiency.coveredCount());
+            int effectiveMissing = Math.max(0, 7 - effectiveCovered);
+            String reflectMissing = effectiveMissing > 0 ? "，还缺" + effectiveMissing + "个维度" : "";
+            String reflectObs = "已覆盖 " + effectiveCovered + "/7 维度" + reflectMissing;
+            String reflectDecision = sufficiency.sufficient()
+                ? "SUFFICIENT — 画像充足"
+                : "CONTINUE — 继续收集画像信息";
+            postItems.add(toSseEvent("agent.thought", Map.of(
+                "agentName", "ConversationAgent",
+                "agentRole", "conversation",
+                "phase", "REFLECT",
+                "context", "画像覆盖度评估，已覆盖 " + effectiveCovered + "/7 维度",
+                "observation", reflectObs,
+                "thought", "覆盖度 " + effectiveCovered
+                    + "/7，置信度 " + String.format("%.0f%%", sufficiency.overallConfidence() * 100),
+                "decision", reflectDecision,
+                "confidenceLevel", effectiveCovered >= 4 ? "high" : "medium",
+                "timestamp", Instant.now().toString()
+            )));
+
             if (extraText.length() > 0) {
-                postItems.add(extraText.toString());
+                postItems.add(SseEvent.chunk(extraText.toString()));
             }
             postItems.add(toSseEvent("done", Map.of(
                 "profileReady", false,
@@ -589,9 +761,9 @@ public class ChatServiceImpl implements ChatService {
                             fSufficiency.coveredCount() >= 4 ? "medium" : "low");
                     }
 
-                    String missingInfo = fSufficiency.missingDimensions() != null &&
-                        !fSufficiency.missingDimensions().isEmpty()
-                        ? "，还缺" + fSufficiency.missingDimensions().size() + "个维度"
+                    int asyncEffective = Math.max(profileCovered, fSufficiency.coveredCount());
+                    String missingInfo = asyncEffective < 7
+                        ? "，还缺" + (7 - asyncEffective) + "个维度"
                         : "";
 
                     java.util.List<Map<String, String>> steps = new java.util.ArrayList<>();
@@ -613,7 +785,7 @@ public class ChatServiceImpl implements ChatService {
                         "label", "评估画像覆盖度",
                         "icon", "🎯",
                         "done", "true",
-                        "detail", "已覆盖 " + fSufficiency.coveredCount() + "/7 维度" + missingInfo
+                        "detail", "已覆盖 " + asyncEffective + "/7 维度" + missingInfo
                     ));
                     String thinkingJson = objectMapper.writeValueAsString(Map.of(
                         "steps", steps,
@@ -880,14 +1052,14 @@ private ProfileChat lazyCreateSession(String chatId, String userId, String cours
         }
     }
 
-    /** Emit a structured SSE event via the internal prefix format. */
-    private String toSseEvent(String eventType, Map<String, Object> data) {
+    /** Create a named SSE event with JSON data. */
+    private SseEvent toSseEvent(String eventType, Map<String, Object> data) {
         try {
             String json = objectMapper.writeValueAsString(data);
-            return "__sse:" + eventType + "\n" + json;
+            return SseEvent.named(eventType, json);
         } catch (Exception e) {
             log.error("Failed to serialize SSE event: {}", e.getMessage());
-            return "";
+            return SseEvent.named(eventType, "{}");
         }
     }
 
@@ -949,5 +1121,24 @@ private ProfileChat lazyCreateSession(String chatId, String userId, String cours
         return new ChatStartResponse(chatId, courseId, messages,
             chat != null && chat.getProfileVersionId() != null,
             chat != null ? chat.getProfileVersionId() : null);
+    }
+
+    /** Count dimensions that contain at least one non-empty value field. */
+    private int countMeaningfulDimensions(List<Map<String, Object>> dimensions) {
+        if (dimensions == null) return 0;
+        int count = 0;
+        for (var dim : dimensions) {
+            Object value = dim.get("value");
+            if (!(value instanceof Map<?, ?> dimValue)) continue;
+            boolean hasMeaningful = false;
+            for (Object fieldVal : dimValue.values()) {
+                if (fieldVal == null) continue;
+                if (fieldVal instanceof String s && !s.isBlank()) { hasMeaningful = true; break; }
+                if (fieldVal instanceof List<?> l && !l.isEmpty()) { hasMeaningful = true; break; }
+                if (fieldVal instanceof Number) { hasMeaningful = true; break; }
+            }
+            if (hasMeaningful) count++;
+        }
+        return count;
     }
 }

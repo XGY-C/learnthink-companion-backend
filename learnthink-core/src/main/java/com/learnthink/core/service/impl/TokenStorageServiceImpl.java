@@ -30,8 +30,8 @@ public class TokenStorageServiceImpl implements TokenStorageService {
         this.objectMapper = objectMapper;
     }
     
-    // Access Token TTL: 15分钟
-    private static final Duration ACCESS_TOKEN_TTL = Duration.ofMinutes(15);
+    // Access Token TTL: 2小时
+    private static final Duration ACCESS_TOKEN_TTL = Duration.ofHours(2);
     // Refresh Token TTL: 7天
     private static final Duration REFRESH_TOKEN_TTL = Duration.ofDays(7);
     

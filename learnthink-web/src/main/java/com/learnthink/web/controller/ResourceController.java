@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learnthink.common.result.Result;
+import com.learnthink.common.util.UserContextUtil;
 import com.learnthink.core.domain.entity.ResourceItem;
 import com.learnthink.core.domain.entity.ResourcePack;
 import com.learnthink.core.repository.ResourceItemMapper;
@@ -22,6 +23,25 @@ public class ResourceController {
     private final ResourcePackMapper resourcePackMapper;
     private final ResourceItemMapper resourceItemMapper;
     private final ObjectMapper objectMapper;
+
+    @GetMapping("/resources/packs")
+    public Result<List<Map<String, Object>>> listPacks(@RequestParam String courseId) {
+        String userId = UserContextUtil.getCurrentUserId();
+        List<ResourcePack> packs = resourcePackMapper.selectList(
+            new LambdaQueryWrapper<ResourcePack>()
+                .eq(ResourcePack::getUserId, userId)
+                .eq(ResourcePack::getCourseId, courseId)
+                .orderByDesc(ResourcePack::getCreatedAt));
+        return Result.success(packs.stream().map(p -> {
+            Map<String, Object> dto = new HashMap<>();
+            dto.put("pack_id", p.getId());
+            dto.put("topic", p.getTopic());
+            dto.put("created_at", p.getCreatedAt());
+            dto.put("task_id", p.getTaskId());
+            dto.put("profile_version_id", p.getGeneratedFromProfileVersionId());
+            return dto;
+        }).toList());
+    }
 
     @GetMapping("/resource-packs/{packId}")
     public Result<Map<String, Object>> getPack(@PathVariable String packId) {
@@ -79,6 +99,9 @@ public class ResourceController {
                 Map<String, Object> meta = objectMapper.readValue(item.getMetadataJson(),
                     new TypeReference<Map<String, Object>>() {});
                 dto.put("qualityScore", meta.getOrDefault("quality_score", 75));
+                if (meta.containsKey("content")) {
+                    dto.put("content", meta.get("content"));
+                }
             }
         } catch (Exception e) {
             dto.put("sources", List.of());

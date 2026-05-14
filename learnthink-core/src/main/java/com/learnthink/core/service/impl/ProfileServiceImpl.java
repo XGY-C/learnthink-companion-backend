@@ -29,6 +29,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -75,6 +76,14 @@ public class ProfileServiceImpl implements ProfileService {
     private final PromptLoader promptLoader;
     private final ConversationAgent conversationAgent;
     private final ExecutorService profileUpdateExecutor = Executors.newFixedThreadPool(2);
+
+    /** Per-(user+course) lock for safe concurrent profile writes. */
+    private static final ConcurrentHashMap<String, java.util.concurrent.locks.ReentrantLock> PROFILE_LOCKS = new ConcurrentHashMap<>();
+
+    public static java.util.concurrent.locks.ReentrantLock getProfileLock(String userId, String courseId) {
+        return PROFILE_LOCKS.computeIfAbsent(userId + "::" + courseId,
+            k -> new java.util.concurrent.locks.ReentrantLock());
+    }
 
     public ProfileServiceImpl(ProfileChatMapper profileChatMapper,
                               ProfileMapper profileMapper,
@@ -154,6 +163,8 @@ public class ProfileServiceImpl implements ProfileService {
 
         log.info("启动异步画像更新线程");
         CompletableFuture.runAsync(() -> {
+            java.util.concurrent.locks.ReentrantLock lock = getProfileLock(userId, courseId);
+            lock.lock();
             try {
                 log.info("[异步] 开始提取画像增量 - chatId={}", chatId);
                 String profileJson = buildCurrentProfileJson(userId, courseId);
@@ -181,6 +192,8 @@ public class ProfileServiceImpl implements ProfileService {
                 log.info("[异步] === 画像更新成功 === 新版本: {}, chatId={}", newVersion, chatId);
             } catch (Exception e) {
                 log.error("[异步] 画像更新失败 - chatId={}: {}", chatId, e.getMessage(), e);
+            } finally {
+                lock.unlock();
             }
         }, profileUpdateExecutor);
 
@@ -190,24 +203,30 @@ public class ProfileServiceImpl implements ProfileService {
 
     @Override
     public Map<String, Object> updateProfileDelta(String userId, String courseId, List<Map<String, String>> messages, String chatId) {
-        String profileJson = buildCurrentProfileJson(userId, courseId);
-        String recentHistory = buildRecentHistory(messages);
-        Map<String, Object> delta = extractProfileDelta(profileJson, recentHistory);
-        if (!hasMeaningfulDelta(delta)) {
-            return Map.of();
+        java.util.concurrent.locks.ReentrantLock lock = getProfileLock(userId, courseId);
+        lock.lock();
+        try {
+            String profileJson = buildCurrentProfileJson(userId, courseId);
+            String recentHistory = buildRecentHistory(messages);
+            Map<String, Object> delta = extractProfileDelta(profileJson, recentHistory);
+            if (!hasMeaningfulDelta(delta)) {
+                return Map.of();
+            }
+            Map<String, Object> latestProfile = getProfile(userId, courseId);
+            Map<String, Object> merged = mergeProfile(latestProfile, delta);
+            ProfileChat chat = profileChatMapper.selectById(chatId);
+            if (chat == null) {
+                chat = new ProfileChat();
+                chat.setId(chatId);
+                chat.setUserId(userId);
+                chat.setCourseId(courseId);
+                chat.setMessagesJson("[]");
+            }
+            persistProfileVersion(userId, courseId, merged, chat);
+            return getProfile(userId, courseId);
+        } finally {
+            lock.unlock();
         }
-        Map<String, Object> latestProfile = getProfile(userId, courseId);
-        Map<String, Object> merged = mergeProfile(latestProfile, delta);
-        ProfileChat chat = profileChatMapper.selectById(chatId);
-        if (chat == null) {
-            chat = new ProfileChat();
-            chat.setId(chatId);
-            chat.setUserId(userId);
-            chat.setCourseId(courseId);
-            chat.setMessagesJson("[]");
-        }
-        persistProfileVersion(userId, courseId, merged, chat);
-        return getProfile(userId, courseId);
     }
 
     @Override
@@ -296,9 +315,25 @@ public class ProfileServiceImpl implements ProfileService {
     private boolean hasMeaningfulDelta(Map<String, Object> delta) {
         if (delta == null || delta.isEmpty()) return false;
         for (Object val : delta.values()) {
-            if (!isEmptyValue(val)) return true;
+            if (hasMeaningfulContent(val)) return true;
         }
         return false;
+    }
+
+    /** Recursively check if a value contains actual useful data (not just null/empty wrappers). */
+    private boolean hasMeaningfulContent(Object val) {
+        if (val == null) return false;
+        if (val instanceof String s) return !s.isBlank();
+        if (val instanceof List<?> l) return !l.isEmpty();
+        if (val instanceof Map<?, ?> m) {
+            if (m.isEmpty()) return false;
+            for (Object entryVal : m.values()) {
+                if (hasMeaningfulContent(entryVal)) return true;
+            }
+            return false;
+        }
+        if (val instanceof Number) return true;
+        return true;
     }
 
     private Map<String, Object> mergeProfile(Map<String, Object> profileFull, Map<String, Object> delta) {

@@ -3,6 +3,7 @@ package com.learnthink.core.agent.impl;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learnthink.core.agent.framework.*;
+import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import com.learnthink.core.config.PromptLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -107,14 +108,25 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
 
     /**
      * Stream the LLM reply token-by-token. Does NOT evaluate sufficiency —
-     * that happens post-stream in ChatServiceImpl.
+     * that happens post-stream in ChatServiceImpl. Accepts AgentContext
+     * to emit observation events (prompt/response/decision).
      */
-    public Flux<String> streamReply(ConversationInput input) {
+    public Flux<String> streamReply(ConversationInput input, AgentContext ctx) {
         String systemPrompt = input.systemPromptOverride() != null && !input.systemPromptOverride().isBlank()
             ? input.systemPromptOverride()
             : promptLoader.get("agent/conversation");
         List<Message> messages = buildMessages(systemPrompt, input.conversationHistory());
-        return chatClient.prompt().messages(messages).stream().content();
+
+        long start = System.currentTimeMillis();
+        ctx.observation().onPrompt(name(), "Streaming reply generation (round " + input.roundNumber() + ")",
+            Map.of("courseId", input.courseId(), "historySize", input.conversationHistory().size()));
+
+        return chatClient.prompt().messages(messages).stream().content()
+            .doFinally(signalType -> {
+                long elapsed = System.currentTimeMillis() - start;
+                ctx.observation().onResponse(name(),
+                    "Stream complete (" + elapsed + "ms)", elapsed, AgentResult.TokenUsage.ZERO);
+            });
     }
 
     // ================================================================
@@ -169,14 +181,26 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
                 .messages(new SystemMessage(evalPrompt), new UserMessage(transcript.toString()))
                 .call().content();
 
-            // Parse structured JSON
+            // Parse structured JSON — strip markdown code fences robustly
             String json = response;
-            if (json.contains("```json")) {
-                json = json.substring(json.indexOf("```json") + 7, json.lastIndexOf("```"));
-            } else if (json.contains("```")) {
-                json = json.substring(json.indexOf("```") + 3, json.lastIndexOf("```"));
+            int fenceStart = json.indexOf("```");
+            if (fenceStart >= 0) {
+                // Skip the opening ``` and optional language tag (e.g. ```json, ```python)
+                int contentStart = json.indexOf('\n', fenceStart);
+                if (contentStart < 0) contentStart = fenceStart + 3;
+                else contentStart = contentStart + 1;
+                int fenceEnd = json.lastIndexOf("```");
+                if (fenceEnd > contentStart) {
+                    json = json.substring(contentStart, fenceEnd);
+                }
             }
             json = json.trim();
+            // If response is wrapped in text, isolate the JSON object
+            int braceStart = json.indexOf('{');
+            int braceEnd = json.lastIndexOf('}');
+            if (braceStart >= 0 && braceEnd > braceStart) {
+                json = json.substring(braceStart, braceEnd + 1);
+            }
 
             Map<String, Object> result = mapper.readValue(json, new TypeReference<>() {});
 
@@ -307,6 +331,90 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
 
         // Requirements are clear enough — confirm and trigger
         return null; // null means "ready to trigger"
+    }
+
+    // ================================================================
+    // Topic resolution — intent → concrete topic
+    // ================================================================
+
+    /**
+     * Resolve user's vague generation intent into a specific, retrievable topic.
+     * Uses conversation history + course name + profile dimensions to determine
+     * the actual knowledge topic (not the user's verbatim phrase).
+     */
+    public String resolveTopic(String courseName,
+                                List<Map<String, String>> conversationHistory,
+                                Map<String, Object> profileDimensions) {
+        // Build conversation summary (last few exchanges, if any)
+        boolean hasConversation = conversationHistory != null && conversationHistory.size() >= 2;
+        String convo;
+        if (hasConversation) {
+            StringBuilder sb = new StringBuilder();
+            int start = Math.max(0, conversationHistory.size() - 6);
+            for (int i = start; i < conversationHistory.size(); i++) {
+                var m = conversationHistory.get(i);
+                sb.append(m.getOrDefault("role", "")).append(": ")
+                    .append(m.getOrDefault("content", "")).append("\n");
+            }
+            convo = "Recent conversation:\n" + sb.toString();
+        } else {
+            convo = "The student requested resource generation for their course: " + courseName;
+        }
+
+        // Handle empty conversation: skip LLM call and use course-based fallback
+        if (!hasConversation && (profileDimensions == null || profileDimensions.isEmpty())) {
+            log.info("Topic resolution skipped (new chat, no profile) → defaulting to course name");
+            return courseName + "核心知识点";
+        }
+
+        String profileInfo = "";
+        if (profileDimensions != null && !profileDimensions.isEmpty()) {
+            // Extract key profile fields
+            StringBuilder pi = new StringBuilder("Profile: ");
+            if (profileDimensions.containsKey("weak_top")) pi.append("weak areas: ").append(profileDimensions.get("weak_top")).append("; ");
+            if (profileDimensions.containsKey("goal")) pi.append("goal: ").append(profileDimensions.get("goal")).append("; ");
+            if (profileDimensions.containsKey("current_chapter")) pi.append("chapter: ").append(profileDimensions.get("current_chapter")).append("; ");
+            profileInfo = pi.toString();
+        }
+
+        // Skip LLM call if no conversation AND no profile — use course name directly
+        if (!hasConversation && profileInfo.isEmpty()) {
+            log.info("No conversation or profile data → default topic: {}核心知识点", courseName);
+            return courseName + "核心知识点";
+        }
+
+        String prompt = String.format("""
+            The student is taking course: %s
+
+            %s
+            %s
+
+            The student wants to generate learning resources. Determine the MOST SPECIFIC
+            topic that should be generated:
+            - Output ONLY the topic (2-20 Chinese characters)
+            - Be as specific as possible (concept or chapter, not course name)
+            - Never output meta-words like "学习资源", "该课程", "资源", "课程"
+            - If no clear topic can be determined, output the most likely chapter topic for this course
+            Topic:""",
+            courseName, convo, profileInfo);
+
+        try {
+            String topic = chatClient.prompt()
+                .messages(new SystemMessage(
+                    "Extract the specific knowledge topic the student wants to study. Output topic only, no explanation."),
+                    new UserMessage(prompt))
+                .call().content();
+            topic = topic != null ? topic.trim() : "";
+            if (topic.length() > 40) topic = topic.substring(0, 40);
+            if (topic.isEmpty() || topic.contains("学习资源") || topic.contains("该课程")) {
+                return courseName + "核心知识点";
+            }
+            log.info("Topic resolved → \"{}\"", topic);
+            return topic;
+        } catch (Exception e) {
+            log.warn("Topic resolution failed: {}", e.getMessage());
+            return courseName + "核心知识点";
+        }
     }
 
     // ================================================================

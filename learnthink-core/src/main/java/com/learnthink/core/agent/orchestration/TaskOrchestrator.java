@@ -110,7 +110,7 @@ public class TaskOrchestrator {
         // Persist task to MySQL
         try {
             String resourceTypesJson = objectMapper.writeValueAsString(state.resourceTypes);
-            persistenceService.createTask(userId, req.courseId(), "resource_generate",
+            persistenceService.createTask(taskId, userId, req.courseId(), "resource_generate",
                 req.topic(), resourceTypesJson, req.profileVersion());
         } catch (JsonProcessingException e) {
             log.warn("Failed to serialize resourceTypes", e);
@@ -167,17 +167,22 @@ public class TaskOrchestrator {
             ResourceGenerationState result = runner.execute(state);
 
             long totalMs = Duration.between(start, Instant.now()).toMillis();
+            // Normalize final status: if graph finished but status is still RUNNING,
+            // treat as SUCCEEDED (PUBLISHING should have set this). Only FAILED
+            // explicitly set by routeAfterGenerating/routeAfterReviewing is final.
+            String finalStatus = ("SUCCEEDED".equals(result.status)
+                || "RUNNING".equals(result.status)) ? "SUCCEEDED" : result.status;
             log.info("Graph execution completed in {}ms", totalMs);
-            log.info("Final state: status={}, artifacts={}, failedTypes={}", 
+            log.info("Final state: status={}, artifacts={}, failedTypes={}",
                     result.status, result.artifacts.size(), result.failedTypes.size());
             persistenceService.updateTaskStage(state.taskId, "PUBLISHING", 100,
-                "SUCCEEDED".equals(result.status) ? "SUCCEEDED" : "FAILED");
-            persistenceService.recordTaskDone(state.taskId, result.status, result.packId, result.artifacts.size());
-            broadcaster.taskDone(state.taskId, result.status,
+                finalStatus);
+            persistenceService.recordTaskDone(state.taskId, finalStatus, result.packId, result.artifacts.size());
+            broadcaster.taskDone(state.taskId, finalStatus,
                 result.packId, result.artifacts.size(), result.failedTypes);
 
             log.info("=== Task {} COMPLETED === status={}, resources={}, failed={}, time={}ms",
-                state.taskId, result.status, result.artifacts.size(), result.failedTypes.size(), totalMs);
+                state.taskId, finalStatus, result.artifacts.size(), result.failedTypes.size(), totalMs);
 
         } catch (Exception e) {
             log.error("Task {} failed unexpectedly: {}", state.taskId, e.getMessage(), e);

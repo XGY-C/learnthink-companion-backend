@@ -117,6 +117,14 @@ public class PlannerAgent {
                 mapper.convertValue(node.get("items"),
                     mapper.getTypeFactory().constructCollectionType(List.class,
                         ResourceGenerationState.ResourcePlanItem.class));
+            // Normalize type names: LLM may output "document" instead of "doc"
+            items = items.stream()
+                .map(item -> "document".equals(item.type())
+                    ? new ResourceGenerationState.ResourcePlanItem(
+                        "doc", item.title(), item.difficulty(), item.estimatedMinutes(),
+                        item.format(), item.keyPoints(), item.personalizationNote())
+                    : item)
+                .toList();
             return new ResourceGenerationState.ResourcePlan(
                 node.get("topicOutline").asText(),
                 items,

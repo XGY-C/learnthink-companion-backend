@@ -1,6 +1,7 @@
 package com.learnthink.core.agent.impl.generators;
 
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import com.learnthink.core.config.PromptLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,7 +24,7 @@ public class CodeGenerator implements TypeGenerator {
 
     public CodeGenerator(@Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
                          PromptLoader promptLoader) {
-        this.chatClient = chatClientBuilder.build();
+        this.chatClient = chatClientBuilder.defaultOptions(OpenAiChatOptions.builder().temperature(0.2).build()).build();
         this.promptLoader = promptLoader;
     }
 
@@ -43,7 +44,8 @@ public class CodeGenerator implements TypeGenerator {
             .collect(Collectors.joining("\n"));
 
         String systemPrompt = promptLoader.get("generator/code")
-            .replace("{personalization_note}", item.personalizationNote());
+            .replace("{personalization_note}", item.personalizationNote())
+            .replace("{difficulty}", item.difficulty());
 
         if (reviewFeedback != null) {
             systemPrompt += "\n\nFIX REQUIRED: " + reviewFeedback;
@@ -60,6 +62,34 @@ public class CodeGenerator implements TypeGenerator {
             item.title(), content, "text/markdown", sources,
             forceLowConfidence ? "low" : "high",
             Map.of("generator", "CodeGenerator", "sourceCount", sources.size())
+        );
+    }
+
+    @Override
+    public ResourceGenerationState.GeneratedContent revise(
+        ResourceGenerationState.ResourcePlanItem item,
+        List<ResourceGenerationState.SourceItem> sources,
+        ResourceGenerationState.ProfileSummary profile,
+        boolean forceLowConfidence,
+        String reviewFeedback,
+        ResourceGenerationState.GeneratedContent original) {
+
+        String systemPrompt = promptLoader.get("generator/code")
+            .replace("{personalization_note}", item.personalizationNote())
+            .replace("{difficulty}", item.difficulty());
+        systemPrompt += "\n\n## 修改要求\n" + reviewFeedback;
+
+        String userMsg = "需修改的代码：\n" + (original.content() != null ? original.content().substring(0, Math.min(2000, original.content().length())) : "");
+
+        String content = chatClient.prompt()
+            .messages(new SystemMessage(systemPrompt), new UserMessage(userMsg))
+            .call()
+            .content();
+
+        return new ResourceGenerationState.GeneratedContent(
+            item.title(), content, "text/markdown", sources,
+            forceLowConfidence ? "low" : "high",
+            Map.of("generator", "CodeGenerator", "revised", true)
         );
     }
 }

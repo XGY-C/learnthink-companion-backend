@@ -52,9 +52,14 @@ public class ResourceItem {
     private String sourcesJson;
 
     /**
-     * high/medium/low
+     * high/medium/low（与DB confidence varchar同步，不做decimal转换）
      */
     private String confidence;
+
+    /**
+     * 质量评分 0.00~100.00
+     */
+    private Double qualityScore;
 
     /**
      * approved/rejected/pending

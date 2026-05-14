@@ -11,8 +11,8 @@ public interface ChatService {
 
     ChatSendResponse sendMessage(String userId, String chatId, ChatSendRequest request);
 
-    /** Streaming send: returns SSE event strings. Final event is JSON with profileReady flag. */
-    Flux<String> streamMessage(String userId, String chatId, ChatSendRequest request);
+    /** Streaming send: returns SSE event stream. Read SseEvent.isNamed() to distinguish events from chunks. */
+    Flux<SseEvent> streamMessage(String userId, String chatId, ChatSendRequest request);
 
     List<ChatMessageDto> getMessages(String userId, String chatId);
 

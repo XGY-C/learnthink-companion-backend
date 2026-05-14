@@ -67,7 +67,7 @@ public class ChatController {
 
         chatService.streamMessage(userId, chatId, request)
             .subscribe(
-                chunk -> sendSse(emitter, chunk),
+                event -> sendSse(emitter, event),
                 error -> {
                     log.error("Stream error", error);
                     try {
@@ -129,16 +129,12 @@ public class ChatController {
         return Result.success(result, "画像分析完成");
     }
 
-    private void sendSse(SseEmitter emitter, String chunk) {
+    private void sendSse(SseEmitter emitter, SseEvent event) {
         try {
-            if (chunk.startsWith("__sse:")) {
-                // Internal event format: "__sse:<eventName>\n<data>"
-                int nl = chunk.indexOf('\n');
-                String eventName = chunk.substring(6, nl);
-                String data = chunk.substring(nl + 1);
-                emitter.send(SseEmitter.event().name(eventName).data(data));
+            if (event.isNamed()) {
+                emitter.send(SseEmitter.event().name(event.getEventName()).data(event.getData()));
             } else {
-                emitter.send(SseEmitter.event().name("chunk").data(chunk));
+                emitter.send(SseEmitter.event().name("chunk").data(event.getData()));
             }
         } catch (IOException e) {
             // Client disconnected — ignore

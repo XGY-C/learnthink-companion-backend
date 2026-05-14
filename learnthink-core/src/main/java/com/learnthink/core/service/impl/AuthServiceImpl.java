@@ -213,7 +213,7 @@ public class AuthServiceImpl implements AuthService {
         return LoginResponse.builder()
             .accessToken(accessToken)
             .refreshToken(refreshToken)
-            .expiresIn(900) // 15分钟
+            .expiresIn(7200) // 2小时（与ACCESS_TOKEN_TTL保持一致）
             .user(userInfo)
             .build();
     }
