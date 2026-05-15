@@ -14,7 +14,7 @@ public class ResourceGenerationState {
     public String userId;
     public String courseId;
     public String topic;
-    public List<String> resourceTypes = List.of("document", "exercise", "reading", "code", "mindmap");
+    public List<String> resourceTypes = List.of("doc", "quiz", "reading", "code", "mindmap");
     public int profileVersion;
 
     // -- Pipeline control --

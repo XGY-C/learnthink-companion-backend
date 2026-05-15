@@ -56,6 +56,7 @@ public class GraphRunner<S> {
         List<String> path = new ArrayList<>();
 
         log.info("Graph execution started. Entry: {}", currentNode);
+        log.debug("Initial state type: {}", initialState.getClass().getSimpleName());
 
         while (currentNode != null) {
             if (cancelled) {
@@ -82,6 +83,7 @@ public class GraphRunner<S> {
             log.debug("Executing node: {} (visit #{})", currentNode, visits);
             path.add(currentNode);
             notifyNodeStart(currentNode, state, visits);
+            log.info("Entering node: {} (visit #{})", currentNode, visits);
 
             try {
                 Instant nodeStart = Instant.now();
@@ -89,7 +91,7 @@ public class GraphRunner<S> {
                 long elapsed = Duration.between(nodeStart, Instant.now()).toMillis();
                 notifyNodeComplete(currentNode, state, elapsed);
 
-                log.debug("Node '{}' completed in {}ms", currentNode, elapsed);
+                log.info("Node '{}' completed in {}ms", currentNode, elapsed);
             } catch (Exception e) {
                 log.error("Node '{}' failed: {}", currentNode, e.getMessage());
                 notifyError(currentNode, state, e);

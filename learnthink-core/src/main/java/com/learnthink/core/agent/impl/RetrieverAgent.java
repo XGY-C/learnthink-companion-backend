@@ -48,31 +48,39 @@ public class RetrieverAgent {
     public AgentResult<List<ResourceGenerationState.SourceItem>> retrieve(
         String courseId, String topic, String resourceType, AgentContext ctx) {
 
+        log.info("=== RetrieverAgent START === courseId={}, topic={}, type={}", courseId, topic, resourceType);
         Instant start = Instant.now();
 
         // Step 1: Build base query
         String baseQuery = buildBaseQuery(topic, resourceType);
+        log.info("Base query: {}", baseQuery);
         ctx.observation().onPrompt("RetrieverAgent", "base query: " + baseQuery,
             Map.of("courseId", courseId, "type", resourceType));
 
         // Step 2: Query rewriting pipeline
         String rewrittenQuery = rewriteQuery(baseQuery, ctx);
+        log.info("Rewritten query: {}", rewrittenQuery);
 
         // Step 3: Multi-hop decision (rule-based)
         boolean isMultiHop = needsMultiHop(baseQuery);
+        log.info("Multi-hop detection: {}", isMultiHop ? "YES" : "NO");
         int totalSources = 0;
         List<ResourceGenerationState.SourceItem> allSources = new ArrayList<>();
 
         try {
             if (isMultiHop) {
+                log.info("Executing multi-hop retrieval");
                 // First hop: retrieve base concepts
                 RagClient.RagResponse hop1 = ragClient.retrieve(courseId, rewrittenQuery, topic, 8, 0.4, 2);
                 if (hop1 != null && hop1.sources() != null) {
+                    log.info("First hop retrieved {} sources", hop1.sources().size());
                     allSources.addAll(hop1.sources().stream().map(this::toSourceItem).toList());
                     // Extract key entities from first hop for second query
                     String secondQuery = buildMultiHopQuery(hop1, topic);
+                    log.info("Second hop query: {}", secondQuery);
                     RagClient.RagResponse hop2 = ragClient.retrieve(courseId, secondQuery, topic, 8, 0.4, 2);
                     if (hop2 != null && hop2.sources() != null) {
+                        log.info("Second hop retrieved {} sources", hop2.sources().size());
                         allSources.addAll(hop2.sources().stream().map(this::toSourceItem).toList());
                     }
                     // Deduplicate
@@ -82,32 +90,38 @@ public class RetrieverAgent {
                         "MULTI_HOP", "2-hop retrieval: " + totalSources + " total sources");
                 }
             } else {
+                log.info("Executing single-hop retrieval");
                 RagClient.RagResponse ragResp = ragClient.retrieve(courseId, rewrittenQuery, topic, 8, 0.4, 2);
                 if (ragResp == null) {
+                    log.warn("RAG response is null - KB not ready");
                     return AgentResult.error("KB_NOT_READY");
                 }
+                log.info("Retrieved {} sources from RAG", ragResp.sources().size());
                 allSources = ragResp.sources().stream().map(this::toSourceItem).toList();
                 totalSources = allSources.size();
             }
 
             long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
+            log.info("Retrieval completed in {}ms with {} sources", elapsed, totalSources);
             ctx.observation().onResponse("RetrieverAgent",
                 "sources=" + totalSources + " (query: " + rewrittenQuery.substring(0, Math.min(80, rewrittenQuery.length())) + "...)",
                 elapsed, AgentResult.TokenUsage.ZERO);
 
             boolean lowConfidence = totalSources < 3;
             if (lowConfidence) {
+                log.warn("Low confidence: only {} sources found for {}", totalSources, resourceType);
                 ctx.observation().onDecision("RetrieverAgent",
                     "LOW_CONFIDENCE", "Only " + totalSources + " sources found for " + resourceType);
                 ctx.put("forceLowConfidence", true);
             }
 
+            log.info("RetrieverAgent completed successfully");
             return AgentResult.of(allSources, AgentResult.TokenUsage.ZERO, elapsed,
                 Map.of("agent", "RetrieverAgent", "sourceCount", totalSources,
                        "multiHop", isMultiHop, "lowConfidence", lowConfidence));
 
         } catch (Exception e) {
-            log.error("RetrieverAgent failed for type={}: {}", resourceType, e.getMessage());
+            log.error("RetrieverAgent failed for type={}: {}", resourceType, e.getMessage(), e);
             ctx.observation().onError("RetrieverAgent", e);
             return AgentResult.error(e.getMessage());
         }
@@ -120,12 +134,12 @@ public class RetrieverAgent {
     /** Step 0: Base type-specific query template */
     String buildBaseQuery(String topic, String resourceType) {
         return switch (resourceType) {
-            case "document" -> topic + " 概念定义 核心原理 应用场景";
-            case "exercise" -> topic + " 习题 例题 练习 测试题";
-            case "reading"  -> topic + " 扩展阅读 前沿进展 相关领域";
-            case "code"     -> topic + " 代码实现 算法 编程示例";
-            case "mindmap"  -> topic + " 知识结构 概念关系 思维导图";
-            default         -> topic;
+            case "doc"     -> topic + " 概念定义 核心原理 应用场景";
+            case "quiz"    -> topic + " 习题 例题 练习 测试题";
+            case "reading" -> topic + " 扩展阅读 前沿进展 相关领域";
+            case "code"    -> topic + " 代码实现 算法 编程示例";
+            case "mindmap" -> topic + " 知识结构 概念关系 思维导图";
+            default        -> topic;
         };
     }
 

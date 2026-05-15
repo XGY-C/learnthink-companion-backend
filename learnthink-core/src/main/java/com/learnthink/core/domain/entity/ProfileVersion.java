@@ -22,7 +22,7 @@ public class ProfileVersion {
     private Integer version;
 
     /**
-     * 8维画像数据
+     * 7维画像数据
      */
     private String dimensionsJson;
 

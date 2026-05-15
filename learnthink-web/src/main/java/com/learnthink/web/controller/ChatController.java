@@ -4,10 +4,13 @@ import com.learnthink.common.dto.chat.*;
 import com.learnthink.common.result.Result;
 import com.learnthink.common.util.UserContextUtil;
 import com.learnthink.core.service.ChatService;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
@@ -56,9 +59,15 @@ public class ChatController {
 
         SseEmitter emitter = new SseEmitter(120000L);
 
+        // 减小 SSE 响应缓冲区，确保每个 token 立即 flush
+        try {
+            HttpServletResponse resp = ((ServletRequestAttributes) RequestContextHolder.getRequestAttributes()).getResponse();
+            if (resp != null) resp.setBufferSize(512);
+        } catch (Exception ignored) {}
+
         chatService.streamMessage(userId, chatId, request)
             .subscribe(
-                chunk -> sendSse(emitter, chunk),
+                event -> sendSse(emitter, event),
                 error -> {
                     log.error("Stream error", error);
                     try {
@@ -120,16 +129,12 @@ public class ChatController {
         return Result.success(result, "画像分析完成");
     }
 
-    private void sendSse(SseEmitter emitter, String chunk) {
+    private void sendSse(SseEmitter emitter, SseEvent event) {
         try {
-            if (chunk.startsWith("__sse:")) {
-                // Internal event format: "__sse:<eventName>\n<data>"
-                int nl = chunk.indexOf('\n');
-                String eventName = chunk.substring(6, nl);
-                String data = chunk.substring(nl + 1);
-                emitter.send(SseEmitter.event().name(eventName).data(data));
+            if (event.isNamed()) {
+                emitter.send(SseEmitter.event().name(event.getEventName()).data(event.getData()));
             } else {
-                emitter.send(SseEmitter.event().name("chunk").data(chunk));
+                emitter.send(SseEmitter.event().name("chunk").data(event.getData()));
             }
         } catch (IOException e) {
             // Client disconnected — ignore

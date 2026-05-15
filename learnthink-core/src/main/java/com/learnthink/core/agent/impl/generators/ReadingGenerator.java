@@ -1,6 +1,7 @@
 package com.learnthink.core.agent.impl.generators;
 
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import com.learnthink.core.config.PromptLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,7 +23,7 @@ public class ReadingGenerator implements TypeGenerator {
 
     public ReadingGenerator(@Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
                             PromptLoader promptLoader) {
-        this.chatClient = chatClientBuilder.build();
+        this.chatClient = chatClientBuilder.defaultOptions(OpenAiChatOptions.builder().temperature(0.5).build()).build();
         this.promptLoader = promptLoader;
     }
 
@@ -38,10 +39,11 @@ public class ReadingGenerator implements TypeGenerator {
         String reviewFeedback) {
 
         String systemPrompt = promptLoader.get("generator/reading")
-            .replace("{personalization_note}", item.personalizationNote());
+            .replace("{personalization_note}", item.personalizationNote())
+            .replace("{style}", profile != null ? String.join("、", profile.style()) : "");
 
         if (reviewFeedback != null) {
-            systemPrompt += "\n\nCORRECTION: " + reviewFeedback;
+            systemPrompt += "\n\n修正要求：" + reviewFeedback;
         }
 
         String content = chatClient.prompt()
@@ -56,6 +58,34 @@ public class ReadingGenerator implements TypeGenerator {
             item.title(), content, "text/markdown", sources,
             "medium",
             Map.of("generator", "ReadingGenerator", "sourceCount", sources.size())
+        );
+    }
+
+    @Override
+    public ResourceGenerationState.GeneratedContent revise(
+        ResourceGenerationState.ResourcePlanItem item,
+        List<ResourceGenerationState.SourceItem> sources,
+        ResourceGenerationState.ProfileSummary profile,
+        boolean forceLowConfidence,
+        String reviewFeedback,
+        ResourceGenerationState.GeneratedContent original) {
+
+        String systemPrompt = promptLoader.get("generator/reading")
+            .replace("{personalization_note}", item.personalizationNote())
+            .replace("{style}", profile != null ? String.join("、", profile.style()) : "");
+        systemPrompt += "\n\n## 修改要求\n" + reviewFeedback;
+
+        String userMsg = "需修改的阅读推荐：\n" + (original.content() != null ? original.content().substring(0, Math.min(2000, original.content().length())) : "");
+
+        String content = chatClient.prompt()
+            .messages(new SystemMessage(systemPrompt), new UserMessage(userMsg))
+            .call()
+            .content();
+
+        return new ResourceGenerationState.GeneratedContent(
+            item.title(), content, "text/markdown", sources,
+            "medium",
+            Map.of("generator", "ReadingGenerator", "revised", true)
         );
     }
 }

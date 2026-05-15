@@ -50,6 +50,7 @@ public class ResourceGenerationGraph {
     private final ReviewerAgent reviewerAgent;
     private final Publisher publisher;
     private final TaskPersistenceService persistenceService;
+    private final java.util.concurrent.ExecutorService generatorPool = java.util.concurrent.Executors.newFixedThreadPool(5);
 
     public ResourceGenerationGraph(
         ProfileAgent profileAgent,
@@ -101,20 +102,24 @@ public class ResourceGenerationGraph {
     // === Node implementations ===
 
     private ResourceGenerationState doProfiling(ResourceGenerationState s) {
+        log.info("=== PROFILING NODE START === taskId={}, userId={}, courseId={}", s.taskId, s.userId, s.courseId);
         advance(s, "PROFILING", 0, "Analyzing learning profile...");
         AgentContext ctx = buildContext(s);
 
         var result = profileAgent.summarize(s.userId, s.courseId, s.profileVersion, ctx);
         if (!result.success()) {
+            log.error("Profiling failed: {}", result.errorMessage());
             fail(s, "PROFILE_NOT_READY", result.errorMessage(), false);
             return s;
         }
         s.profileSummary = result.output();
+        log.info("Profiling completed successfully. Dimensions: {}", s.profileSummary.dimensionCount());
         advance(s, "PROFILING", 15, "Profile analysis complete (" + s.profileSummary.dimensionCount() + " dimensions)");
         return s;
     }
 
     private ResourceGenerationState doRetrieving(ResourceGenerationState s) {
+        log.info("=== RETRIEVING NODE START === topic={}, resourceTypes={}", s.topic, s.resourceTypes);
         advance(s, "RETRIEVING", 15, "Retrieving course evidence...");
         AgentContext ctx = buildContext(s);
 
@@ -124,10 +129,13 @@ public class ResourceGenerationGraph {
         int totalSources = 0;
 
         for (String resourceType : s.resourceTypes) {
+            log.info("Retrieving evidence for type: {}", resourceType);
             var result = retrieverAgent.retrieve(
                 s.courseId, s.topic, resourceType, ctx);
             if (!result.success()) {
+                log.warn("Retrieval failed for type {}: {}", resourceType, result.errorMessage());
                 if ("KB_NOT_READY".equals(s.errorCode)) {
+                    log.info("Knowledge base not ready, routing to FALLBACK");
                     return s; // router will send to FALLBACK
                 }
                 s.forceLowConfidence = true;
@@ -138,6 +146,7 @@ public class ResourceGenerationGraph {
                 evidenceByType.put(resourceType, pack);
                 merged.addAll(pack);
                 totalSources += pack.size();
+                log.info("Retrieved {} sources for type {}", pack.size(), resourceType);
             }
             completed++;
             int pct = 15 + (completed * 20 / s.resourceTypes.size());
@@ -151,11 +160,13 @@ public class ResourceGenerationGraph {
             .collect(Collectors.toList());
         s.evidenceByType = evidenceByType;
         s.totalSources = totalSources;
+        log.info("Retrieval completed. Total sources: {}, Evidence by type: {}", totalSources, evidenceByType.keySet());
         advance(s, "RETRIEVING", 35, "Retrieved " + s.totalSources + " evidence chunks");
         return s;
     }
 
     private ResourceGenerationState doPlanning(ResourceGenerationState s) {
+        log.info("=== PLANNING NODE START === topic={}, feedback={}", s.topic, s.planFeedback != null ? "with feedback" : "initial");
         advance(s, "PLANNING", 35, "Planning resource pack...");
         AgentContext ctx = buildContext(s);
 
@@ -164,17 +175,20 @@ public class ResourceGenerationGraph {
         var result = plannerAgent.plan(
             s.profileSummary, s.mergedSources, s.topic, s.resourceTypes, feedback, ctx);
         if (!result.success()) {
+            log.error("Planning failed: {}", result.errorMessage());
             fail(s, "PLAN_ERROR", result.errorMessage(), false);
             return s;
         }
         s.resourcePlan = result.output();
         s.planRetryCount++;
+        log.info("Planning completed. Generated {} resource plan items", s.resourcePlan.items().size());
         advance(s, "PLANNING", 55,
             "Planned " + s.resourcePlan.items().size() + " resources");
         return s;
     }
 
     private ResourceGenerationState doGenerating(ResourceGenerationState s) {
+        log.info("=== GENERATING NODE START === artifacts={}, failedTypes={}", s.artifacts.size(), s.failedTypes.size());
         AgentContext ctx = buildContext(s);
         ctx.put("forceLowConfidence", s.forceLowConfidence);
 
@@ -189,47 +203,60 @@ public class ResourceGenerationGraph {
             log.info("Regenerating {} types: {}", s.regenerateTypes.size(), s.regenerateTypes);
         } else {
             itemsToGenerate = s.resourcePlan.items();
+            log.info("Generating all {} resource types from plan", itemsToGenerate.size());
         }
 
         if (itemsToGenerate.isEmpty()) {
+            log.info("No resources to generate in this pass");
             advance(s, "GENERATING", 85, "No resources to generate");
             return s;
         }
 
-        int genCompleted = 0;
+        advance(s, "GENERATING", 55, "Generating " + itemsToGenerate.size() + " resources in parallel...");
+        java.util.List<java.util.concurrent.CompletableFuture<Void>> futures = new java.util.ArrayList<>();
         for (ResourceGenerationState.ResourcePlanItem item : itemsToGenerate) {
-            advance(s, "GENERATING",
-                55 + (genCompleted * 30 / itemsToGenerate.size()),
-                "Generating: " + item.title());
-
-            // Delegate to type-specialized sub-agent via GeneratorAgent
-            var typeSources = s.evidenceByType != null
-                ? s.evidenceByType.getOrDefault(item.type(), List.of())
-                : List.<ResourceGenerationState.SourceItem>of();
-            String reviewFeedback = s.reviewFeedbackByType != null
-                ? s.reviewFeedbackByType.get(item.type()) : null;
-
-            var result = generatorAgent.generate(item, typeSources, s.profileSummary,
-                s.forceLowConfidence, reviewFeedback, ctx);
-            if (result.success()) {
-                s.artifacts.put(item.type(), result.output());
-                // Fire resource-level ready event so frontend can update individual cards
-                resourceReady(s, item.type(), result.output().title(),
-                    result.output().confidence(),
-                    result.output().sources() != null ? result.output().sources().size() : 0);
-            } else {
-                log.warn("Generation failed for type={}: {}", item.type(), result.errorMessage());
-                s.failedTypes.add(item.type());
-            }
-            genCompleted++;
+            futures.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                log.info("Generating resource type: {}, title: {}", item.type(), item.title());
+                var typeSources = s.evidenceByType != null
+                    ? s.evidenceByType.getOrDefault(item.type(), List.of())
+                    : List.<ResourceGenerationState.SourceItem>of();
+                String reviewFeedback = s.reviewFeedbackByType != null
+                    ? s.reviewFeedbackByType.get(item.type()) : null;
+                try {
+                    var result = generatorAgent.generate(item, typeSources, s.profileSummary,
+                        s.forceLowConfidence, reviewFeedback, ctx);
+                    if (result.success()) {
+                        synchronized (s) {
+                            s.artifacts.put(item.type(), result.output());
+                        }
+                        resourceReady(s, item.type(), result.output().title(),
+                            result.output().confidence(),
+                            result.output().sources() != null ? result.output().sources().size() : 0);
+                        log.info("Successfully generated resource type: {}", item.type());
+                    } else {
+                        synchronized (s) {
+                            s.failedTypes.add(item.type());
+                        }
+                        log.warn("Generation failed for type={}: {}", item.type(), result.errorMessage());
+                    }
+                } catch (Exception e) {
+                    synchronized (s) {
+                        s.failedTypes.add(item.type());
+                    }
+                    log.error("Generation error for type={}: {}", item.type(), e.getMessage());
+                }
+            }, generatorPool));
         }
+        java.util.concurrent.CompletableFuture.allOf(futures.toArray(new java.util.concurrent.CompletableFuture[0])).join();
 
+        log.info("Generation completed. Successful: {}, Failed: {}", s.artifacts.size(), s.failedTypes.size());
         advance(s, "GENERATING", 85,
             "Resources generated (" + s.artifacts.size() + "/" + itemsToGenerate.size() + " successful)");
         return s;
     }
 
     private ResourceGenerationState doReviewing(ResourceGenerationState s) {
+        log.info("=== REVIEWING NODE START === artifacts to review: {}", s.artifacts.size());
         advance(s, "REVIEWING", 85, "Reviewing generated content...");
         AgentContext ctx = buildContext(s);
 
@@ -244,6 +271,7 @@ public class ResourceGenerationGraph {
                 ? s.evidenceByType.getOrDefault(type, List.of())
                 : List.<ResourceGenerationState.SourceItem>of();
 
+            log.info("Reviewing resource type: {}", type);
             advance(s, "REVIEWING", 85 + (reviewCompleted * 10 / totalToReview),
                 "Reviewing: " + type);
 
@@ -251,12 +279,16 @@ public class ResourceGenerationGraph {
             s.reviewResults.put(type, result.output());
 
             // Log decision and broadcast review result
+            log.info("Review result for {}: action={}, confidence={}", 
+                    type, result.output().action(), result.output().confidence());
             ctx.observation().onDecision("ReviewerAgent",
                 result.output().action().name(),
                 result.output().reviewSummary());
 
             // Fire review-flag event as a dedicated SSE event type if not approved
             if (result.output().action() != ResourceGenerationState.ReviewAction.PUBLISH) {
+                log.info("Review flagged issue for {}: action={}, summary={}", 
+                        type, result.output().action(), result.output().reviewSummary());
                 if (s.eventBroadcaster != null) {
                     s.eventBroadcaster.reviewFlag(s.taskId, type,
                         result.output().action().name(),
@@ -289,11 +321,13 @@ public class ResourceGenerationGraph {
         }
 
         s.reviewRetryCount++;
+        log.info("Reviewing completed. Reviewed {} resources", totalToReview);
         advance(s, "REVIEWING", 95, "Review complete (" + totalToReview + " resources)");
         return s;
     }
 
     private ResourceGenerationState doPublishing(ResourceGenerationState s) {
+        log.info("=== PUBLISHING NODE START === publishedTypes={}, failedTypes={}", s.publishedTypes.size(), s.failedTypes.size());
         advance(s, "PUBLISHING", 95, "Publishing resources...");
         AgentContext ctx = buildContext(s);
 
@@ -303,14 +337,18 @@ public class ResourceGenerationGraph {
             var review = s.reviewResults.get(type);
 
             if (review != null && review.action() == ResourceGenerationState.ReviewAction.REJECT_PERMANENT) {
+                log.info("Skipping permanently rejected resource type: {}", type);
                 s.failedTypes.add(type);
                 continue;
             }
 
+            log.info("Publishing resource type: {}", type);
             var result = publisher.publish(s.taskId, type, content, review, ctx);
             if (result.success()) {
                 s.publishedTypes.add(type);
+                log.info("Successfully published resource type: {}", type);
             } else {
+                log.warn("Failed to publish resource type: {}", type);
                 s.failedTypes.add(type);
             }
         }
@@ -321,6 +359,7 @@ public class ResourceGenerationGraph {
 
         s.status = "SUCCEEDED";
         s.finishedAt = java.time.Instant.now();
+        log.info("Publishing completed. Published: {}, Failed: {}", s.publishedTypes.size(), s.failedTypes.size());
         advance(s, "PUBLISHING", 100,
             "Published " + s.publishedTypes.size() + " resources" +
             (s.failedTypes.isEmpty() ? "" : ", " + s.failedTypes.size() + " failed"));
@@ -328,6 +367,7 @@ public class ResourceGenerationGraph {
     }
 
     private ResourceGenerationState doFallback(ResourceGenerationState s) {
+        log.info("=== FALLBACK NODE START === KB unavailable, using limited guidance");
         advance(s, "FALLBACK", 35, "Knowledge base unavailable — generating with limited guidance...");
         s.forceLowConfidence = true;
         s.mergedSources = List.of();
@@ -345,6 +385,7 @@ public class ResourceGenerationGraph {
             List.of()
         );
 
+        log.info("Fallback plan created for {} resource types", s.resourceTypes.size());
         s._nextRoute = "GENERATING";
         return s;
     }
@@ -356,16 +397,18 @@ public class ResourceGenerationGraph {
             log.info("KB not ready — routing to FALLBACK");
             return "FALLBACK";
         }
+        log.info("Routing from RETRIEVING to PLANNING");
         return "PLANNING";
     }
 
     private String routeAfterGenerating(ResourceGenerationState s) {
         if (s.artifacts.isEmpty() && !s.failedTypes.isEmpty()) {
-            log.error("All generation failed");
+            log.error("All generation failed - terminating task");
             s.status = "FAILED";
             s.errorCode = "GENERATE_ALL_FAILED";
             return null; // terminal
         }
+        log.info("Routing from GENERATING to REVIEWING");
         return "REVIEWING";
     }
 
@@ -392,6 +435,7 @@ public class ResourceGenerationGraph {
 
         if (rejectedTypes.isEmpty()) {
             // All approved → continue to publishing
+            log.info("All resources approved - routing to PUBLISHING");
             return "PUBLISHING";
         }
 
@@ -401,7 +445,7 @@ public class ResourceGenerationGraph {
         // Decision: replan or regenerate?
         if (rejectedTypes.size() >= REPLAN_THRESHOLD && s.planRetryCount <= MAX_REPLAN) {
             // Too many rejections — replan with feedback
-            log.info("Replanning due to {} rejected types", rejectedTypes.size());
+            log.info("Replanning due to {} rejected types (threshold: {})", rejectedTypes.size(), REPLAN_THRESHOLD);
             s.planFeedback = "Previous plan had issues: " + feedback +
                 ". Please restructure the outline and adjust difficulty/scope for the rejected types.";
             // Clear regeneration state since we're replanning
@@ -452,7 +496,14 @@ public class ResourceGenerationGraph {
 
         // Fire real-time progress via the hook (wired by TaskGraphObserver)
         if (s.progressHook != null) {
-            s.progressHook.onProgress(stage, percent, message, java.util.Map.of("timestamp", System.currentTimeMillis()));
+            java.util.Map<String, Object> extra = new java.util.HashMap<>();
+            extra.put("timestamp", System.currentTimeMillis());
+            // Include resourceTypes once Planner has decided them
+            if (s.resourcePlan != null && s.resourcePlan.items() != null && !s.resourcePlan.items().isEmpty()) {
+                extra.put("resourceTypes", s.resourcePlan.items().stream()
+                    .map(ResourceGenerationState.ResourcePlanItem::type).toList());
+            }
+            s.progressHook.onProgress(stage, percent, message, extra);
         }
     }
 

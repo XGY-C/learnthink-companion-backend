@@ -42,8 +42,8 @@ public class GeneratorAgent {
         MindmapGenerator mapGen
     ) {
         this.generators = Map.of(
-            "document", docGen,
-            "exercise", exGen,
+            "doc", docGen,
+            "quiz", exGen,
             "reading",  readGen,
             "code",     codeGen,
             "mindmap",  mapGen
@@ -63,29 +63,61 @@ public class GeneratorAgent {
         String reviewFeedback,
         AgentContext ctx) {
 
+        log.info("=== GeneratorAgent START === type={}, title={}, feedback={}", 
+                planItem.type(), planItem.title(), reviewFeedback != null ? "with feedback" : "initial");
         Instant start = Instant.now();
         String type = planItem.type();
 
         TypeGenerator gen = generators.get(type);
         if (gen == null) {
+            log.error("No generator found for type: {}", type);
             return AgentResult.error("No generator for type: " + type);
         }
 
+        log.info("Delegating to sub-generator: {}", gen.getClass().getSimpleName());
         ctx.observation().onDecision("GeneratorAgent", "delegate",
             "Delegating to " + gen.getClass().getSimpleName());
 
         try {
             var content = gen.generate(planItem, typeSources, profile, forceLowConfidence, reviewFeedback);
             long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
+            log.info("Sub-generator completed in {}ms", elapsed);
 
+            log.info("GeneratorAgent completed successfully for type: {}", type);
             return AgentResult.of(content, AgentResult.TokenUsage.ZERO, elapsed,
                 Map.of("agent", "GeneratorAgent", "subAgent", gen.getClass().getSimpleName(),
                        "type", type, "regeneration", reviewFeedback != null));
 
         } catch (Exception e) {
-            log.error("Generator failed for type={}: {}", type, e.getMessage());
+            log.error("Generator failed for type={}: {}", type, e.getMessage(), e);
             ctx.observation().onError("GeneratorAgent/" + type, e);
             return AgentResult.error(type + " generation failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Targeted revision based on review feedback. Delegates to the specialized sub-agent's revise().
+     */
+    public AgentResult<ResourceGenerationState.GeneratedContent> revise(
+        ResourceGenerationState.ResourcePlanItem planItem,
+        List<ResourceGenerationState.SourceItem> typeSources,
+        ResourceGenerationState.ProfileSummary profile,
+        boolean forceLowConfidence,
+        String reviewFeedback,
+        ResourceGenerationState.GeneratedContent original,
+        AgentContext ctx) {
+
+        String type = planItem.type();
+        TypeGenerator gen = generators.get(type);
+        if (gen == null) {
+            return AgentResult.error("No generator for type: " + type);
+        }
+        try {
+            var content = gen.revise(planItem, typeSources, profile, forceLowConfidence, reviewFeedback, original);
+            return AgentResult.of(content, AgentResult.TokenUsage.ZERO, 0,
+                Map.of("agent", "GeneratorAgent", "subAgent", gen.getClass().getSimpleName(), "revised", true));
+        } catch (Exception e) {
+            return AgentResult.error(type + " revision failed: " + e.getMessage());
         }
     }
 }

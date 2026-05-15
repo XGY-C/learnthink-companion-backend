@@ -38,6 +38,7 @@ public class ProfileAgent {
     public AgentResult<ResourceGenerationState.ProfileSummary> summarize(
         String userId, String courseId, int profileVersion, AgentContext ctx) {
 
+        log.info("=== ProfileAgent START === userId={}, courseId={}, version={}", userId, courseId, profileVersion);
         Instant start = Instant.now();
         String systemPrompt = promptLoader.get("agent/profile");
         ctx.observation().onPrompt(this.getClass().getSimpleName(), systemPrompt,
@@ -45,6 +46,7 @@ public class ProfileAgent {
 
         try {
             String profilesJson = loadProfileJson(userId, courseId, profileVersion);
+            log.info("Loaded profile JSON (length: {} chars)", profilesJson.length());
 
             String response = chatClient.prompt()
                 .messages(
@@ -55,20 +57,23 @@ public class ProfileAgent {
                 .content();
 
             long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
+            log.info("LLM call completed in {}ms", elapsed);
             ctx.observation().onResponse(this.getClass().getSimpleName(), response, elapsed,
                 AgentResult.TokenUsage.ZERO);
 
             // Parse response
             var summary = parseSummary(response);
             if (summary.dimensionCount() < 6) {
+                log.warn("Profile has fewer than 6 dimensions populated: {}", summary.dimensionCount());
                 return AgentResult.error("Profile has fewer than 6 dimensions populated");
             }
 
+            log.info("ProfileAgent completed successfully. Dimensions: {}", summary.dimensionCount());
             return AgentResult.of(summary, AgentResult.TokenUsage.ZERO, elapsed,
                 Map.of("agent", "ProfileAgent", "version", profileVersion));
 
         } catch (Exception e) {
-            log.error("ProfileAgent failed: {}", e.getMessage());
+            log.error("ProfileAgent failed: {}", e.getMessage(), e);
             ctx.observation().onError(this.getClass().getSimpleName(), e);
             return AgentResult.error("Profile analysis failed: " + e.getMessage());
         }

@@ -100,7 +100,7 @@ public class TaskOrchestrator {
         state.courseId = req.courseId();
         state.topic = req.topic();
         state.resourceTypes = req.resourceTypes() != null ? req.resourceTypes()
-            : List.of("document", "exercise", "reading", "code", "mindmap");
+            : List.of("doc", "quiz", "reading", "code", "mindmap");
         state.profileVersion = req.profileVersion();
         state.status = "PENDING";
         state.stage = "PENDING";
@@ -110,7 +110,7 @@ public class TaskOrchestrator {
         // Persist task to MySQL
         try {
             String resourceTypesJson = objectMapper.writeValueAsString(state.resourceTypes);
-            persistenceService.createTask(userId, req.courseId(), "resource_generate",
+            persistenceService.createTask(taskId, userId, req.courseId(), "resource_generate",
                 req.topic(), resourceTypesJson, req.profileVersion());
         } catch (JsonProcessingException e) {
             log.warn("Failed to serialize resourceTypes", e);
@@ -124,6 +124,8 @@ public class TaskOrchestrator {
         taskExecutor.submit(() -> executeTask(state));
 
         log.info("Task created: {} for user: {} topic: {}", taskId, userId, req.topic());
+        log.info("Task details: courseId={}, resourceTypes={}, profileVersion={}", 
+                req.courseId(), state.resourceTypes, req.profileVersion());
         return taskId;
     }
 
@@ -147,27 +149,34 @@ public class TaskOrchestrator {
 
     private void executeTask(ResourceGenerationState state) {
         Instant start = Instant.now();
-        log.info("Executing task: {} ({})", state.taskId, state.topic);
+        log.info("=== Executing task: {} ({}) ===", state.taskId, state.topic);
+        log.info("Task configuration: userId={}, courseId={}, resourceTypes={}, profileVersion={}",
+                state.userId, state.courseId, state.resourceTypes, state.profileVersion);
 
         try {
             // Build graph with observability
+            log.info("Building StateGraph for task: {}", state.taskId);
             GraphObserver<ResourceGenerationState> observer = new TaskGraphObserver(state, broadcaster, redis);
             GraphRunner<ResourceGenerationState> runner = pipelineGraph.build();
             runner.withObserver(observer)
                   .withNodeTimeout(Duration.ofMinutes(3));
 
             activeRunners.put(state.taskId, runner);
+            log.info("Starting graph execution for task: {}", state.taskId);
 
             ResourceGenerationState result = runner.execute(state);
 
             long totalMs = Duration.between(start, Instant.now()).toMillis();
+            log.info("Graph execution completed in {}ms", totalMs);
+            log.info("Final state: status={}, artifacts={}, failedTypes={}", 
+                    result.status, result.artifacts.size(), result.failedTypes.size());
             persistenceService.updateTaskStage(state.taskId, "PUBLISHING", 100,
                 "SUCCEEDED".equals(result.status) ? "SUCCEEDED" : "FAILED");
             persistenceService.recordTaskDone(state.taskId, result.status, result.packId, result.artifacts.size());
             broadcaster.taskDone(state.taskId, result.status,
                 result.packId, result.artifacts.size(), result.failedTypes);
 
-            log.info("Task {} completed: status={}, resources={}, failed={}, time={}ms",
+            log.info("=== Task {} COMPLETED === status={}, resources={}, failed={}, time={}ms",
                 state.taskId, result.status, result.artifacts.size(), result.failedTypes.size(), totalMs);
 
         } catch (Exception e) {

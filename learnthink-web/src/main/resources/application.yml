@@ -80,8 +80,27 @@ learnthink:
       temperature: 0.8
       thinking-enabled: false
 
+server:
+  tomcat:
+    # 减小 socket 缓冲区，配合 SSE 实时 flush
+    buffer-size: 1024
+
 rag:
   service:
     url: http://localhost:19531
     connect-timeout: 5s
     read-timeout: 30s
+
+# 阿里云OSS配置
+aliyun:
+  #oss云服务
+  oss:
+    endpoint: https://oss-cn-beijing.aliyuncs.com
+    accessKeyId: ${aliyun_oss_id}
+    accessKeySecret: ${aliyun_oss_key}
+    bucketName: learn-think
+  #tts
+  tts:
+    appKey: ${aliyun_tts_app_key}
+    url: https://nls-gateway-cn-shanghai.aliyuncs.com/rest/v1/tts/async
+

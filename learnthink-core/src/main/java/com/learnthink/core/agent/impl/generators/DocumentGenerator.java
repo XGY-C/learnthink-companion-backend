@@ -2,6 +2,7 @@ package com.learnthink.core.agent.impl.generators;
 
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import com.learnthink.core.config.PromptLoader;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -23,12 +24,12 @@ public class DocumentGenerator implements TypeGenerator {
 
     public DocumentGenerator(@Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
                              PromptLoader promptLoader) {
-        this.chatClient = chatClientBuilder.build();
+        this.chatClient = chatClientBuilder.defaultOptions(OpenAiChatOptions.builder().temperature(0.5).build()).build();
         this.promptLoader = promptLoader;
     }
 
     @Override
-    public String type() { return "document"; }
+    public String type() { return "doc"; }
 
     @Override
     public ResourceGenerationState.GeneratedContent generate(
@@ -44,7 +45,9 @@ public class DocumentGenerator implements TypeGenerator {
 
         String systemPrompt = promptLoader.get("generator/document")
             .replace("{difficulty}", item.difficulty())
-            .replace("{personalization_note}", item.personalizationNote());
+            .replace("{personalization_note}", item.personalizationNote())
+            .replace("{style}", profile != null ? String.join("、", profile.style()) : "")
+            .replace("{weakTop}", profile != null ? String.join("、", profile.weakTop()) : "");
 
         if (reviewFeedback != null) {
             systemPrompt += "\n\nIMPORTANT: Previous version was rejected. Fix these issues: " + reviewFeedback;
@@ -73,6 +76,36 @@ public class DocumentGenerator implements TypeGenerator {
             item.title(), content, "text/markdown", sources,
             forceLowConfidence ? "low" : "medium",
             Map.of("generator", "DocumentGenerator", "sourceCount", sources.size())
+        );
+    }
+
+    @Override
+    public ResourceGenerationState.GeneratedContent revise(
+        ResourceGenerationState.ResourcePlanItem item,
+        List<ResourceGenerationState.SourceItem> sources,
+        ResourceGenerationState.ProfileSummary profile,
+        boolean forceLowConfidence,
+        String reviewFeedback,
+        ResourceGenerationState.GeneratedContent original) {
+
+        String systemPrompt = promptLoader.get("generator/document")
+            .replace("{difficulty}", item.difficulty())
+            .replace("{personalization_note}", item.personalizationNote())
+            .replace("{style}", profile != null ? String.join("、", profile.style()) : "")
+            .replace("{weakTop}", profile != null ? String.join("、", profile.weakTop()) : "");
+        systemPrompt += "\n\n## 定向修改要求\n以下是根据审校意见需要修改的部分。请保留未提及的章节不变，仅修改被指出的段落。" + reviewFeedback;
+
+        String userMsg = "需修改的内容：\n" + (original.content() != null ? original.content().substring(0, Math.min(2000, original.content().length())) : "");
+
+        String content = chatClient.prompt()
+            .messages(new SystemMessage(systemPrompt), new UserMessage(userMsg))
+            .call()
+            .content();
+
+        return new ResourceGenerationState.GeneratedContent(
+            item.title(), content, "text/markdown", sources,
+            forceLowConfidence ? "low" : "medium",
+            Map.of("generator", "DocumentGenerator", "revised", true)
         );
     }
 }

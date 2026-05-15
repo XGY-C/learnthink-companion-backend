@@ -5,7 +5,7 @@ import java.util.List;
 
 /**
  * Contract for type-specialized content generators.
- * Each resource type (document, exercise, reading, code, mindmap) has its own implementation
+ * Each resource type (doc, quiz, reading, code, mindmap) has its own implementation
  * with specialized prompt templates, temperature, and output format handling.
  */
 public interface TypeGenerator {
@@ -20,5 +20,19 @@ public interface TypeGenerator {
         ResourceGenerationState.ProfileSummary profile,
         boolean forceLowConfidence,
         String reviewFeedback
+    );
+
+    /**
+     * Targeted revision based on review feedback.
+     * Unlike generate() which creates from scratch, revise() modifies specific sections
+     * identified by the reviewer, preserving approved sections.
+     */
+    ResourceGenerationState.GeneratedContent revise(
+        ResourceGenerationState.ResourcePlanItem planItem,
+        List<ResourceGenerationState.SourceItem> typeSources,
+        ResourceGenerationState.ProfileSummary profile,
+        boolean forceLowConfidence,
+        String reviewFeedback,
+        ResourceGenerationState.GeneratedContent original
     );
 }
