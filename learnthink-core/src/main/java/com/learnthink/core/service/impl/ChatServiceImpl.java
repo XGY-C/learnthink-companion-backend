@@ -731,8 +731,9 @@ public class ChatServiceImpl implements ChatService {
                 postItems.add(SseEvent.chunk(extraText.toString()));
             }
             postItems.add(toSseEvent("done", Map.of(
-                "profileReady", false,
+                "profileReady", effectiveCovered >= 4,
                 "profileVersionId", "",
+                "coveredCount", effectiveCovered,
                 "generationReady", generationReady,
                 "generationMeta", generationMeta != null ? generationMeta : Map.of()
             )));
