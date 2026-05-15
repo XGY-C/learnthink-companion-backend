@@ -346,8 +346,8 @@ CREATE TABLE `resource_items`  (
   `status` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT 'pending' COMMENT 'pending/ready/failed',
   `content_ref` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '对象存储key',
   `content_mime` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'text/markdown, application/json',
-  `confidence_score` decimal(3, 2) NULL DEFAULT NULL COMMENT '缃?俊搴?0.00~1.00',
-  `quality_score` decimal(3, 2) NULL DEFAULT NULL COMMENT '璐ㄩ噺璇勫垎 0.00~100.00',
+  `confidence` varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'high / medium / low',
+  `quality_score` decimal(3, 2) NULL DEFAULT NULL COMMENT 'quality score 0.00~100.00',
   `metadata_json` json NULL COMMENT '难度、标签、估时、quality_score',
   `sources_json` json NULL COMMENT '证据列表（doc_id,title,chunk_id,quote,locator,relevance）',
   `review_status` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT 'pending' COMMENT 'approved/rejected/pending',
@@ -404,8 +404,8 @@ INSERT INTO `resource_packs` VALUES ('pack-001', 'user-test-001', 'course-ai-001
 DROP TABLE IF EXISTS `review_records`;
 CREATE TABLE `review_records`  (
   `id` char(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL,
-  `resource_item_id` char(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL,
-  `resource_pack_id` char(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '鍐椾綑瀛楁?锛屼究浜庢寜鍖呮煡璇㈠?鏍＄粨鏋',
+  `resource_item_id` char(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'nullable ? review before publish, backfilled by doPublishing',
+  `resource_pack_id` char(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'nullable ? review before publish, backfilled by doPublishing',
   `task_id` char(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL,
   `result` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'approved / rejected',
   `reasons_json` json NULL COMMENT '结构化驳回原因（missing_sources, 不一致, 敏感内容）',
@@ -415,9 +415,9 @@ CREATE TABLE `review_records`  (
   INDEX `idx_rr_resource`(`resource_item_id` ASC) USING BTREE,
   INDEX `idx_rr_task`(`task_id` ASC) USING BTREE,
   INDEX `idx_rr_pack`(`resource_pack_id` ASC) USING BTREE,
-  CONSTRAINT `review_records_ibfk_1` FOREIGN KEY (`resource_item_id`) REFERENCES `resource_items` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT,
-  CONSTRAINT `review_records_ibfk_2` FOREIGN KEY (`resource_pack_id`) REFERENCES `resource_packs` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT,
-  CONSTRAINT `review_records_ibfk_3` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
+  CONSTRAINT `review_records_item_fk` FOREIGN KEY (`resource_item_id`) REFERENCES `resource_items` (`id`) ON DELETE SET NULL ON UPDATE RESTRICT,
+  CONSTRAINT `review_records_pack_fk` FOREIGN KEY (`resource_pack_id`) REFERENCES `resource_packs` (`id`) ON DELETE SET NULL ON UPDATE RESTRICT,
+  CONSTRAINT `review_records_task_fk` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci ROW_FORMAT = Dynamic;
 
 -- ----------------------------

@@ -38,7 +38,7 @@ public class ResourceController {
             dto.put("topic", p.getTopic());
             dto.put("created_at", p.getCreatedAt());
             dto.put("task_id", p.getTaskId());
-            dto.put("profile_version", p.getGeneratedFromProfileVersion());
+            dto.put("profile_version_id", p.getGeneratedFromProfileVersionId());
             return dto;
         }).toList());
     }
@@ -99,6 +99,9 @@ public class ResourceController {
                 Map<String, Object> meta = objectMapper.readValue(item.getMetadataJson(),
                     new TypeReference<Map<String, Object>>() {});
                 dto.put("qualityScore", meta.getOrDefault("quality_score", 75));
+                if (meta.containsKey("content")) {
+                    dto.put("content", meta.get("content"));
+                }
             }
         } catch (Exception e) {
             dto.put("sources", List.of());

@@ -1,6 +1,7 @@
 package com.learnthink.core.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
@@ -21,7 +22,11 @@ public class ResourcePack {
 
     private String topic;
 
-    private Integer generatedFromProfileVersion;
+    /**
+     * profile_versions.id（UUID），非版本号数字
+     */
+    @TableField("generated_from_profile_version_id")
+    private String generatedFromProfileVersionId;
 
     private String taskId;
 

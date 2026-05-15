@@ -124,6 +124,10 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
                     emitter.send(SseEmitter.event().name(eventType).id(eventId).data(payload));
                 } catch (IOException e) {
                     removeSubscriber(taskId, emitter);
+                } catch (Exception e) {
+                    // Defensive: unexpected SseEmitter errors must never propagate
+                    log.warn("SseEmitter send failed for task {} (removed): {}", taskId, e.getMessage());
+                    removeSubscriber(taskId, emitter);
                 }
             }
         }

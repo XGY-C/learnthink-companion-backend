@@ -13,7 +13,7 @@ Your job: plan a personalized set of learning resources for a student.
   "topicOutline": "## 1. Concept\\n## 2. Core Principles\\n## 3. Examples\\n## 4. Common Pitfalls\\n## 5. Summary",
   "items": [
     {
-      "type": "document",
+      "type": "doc",
       "title": "Resource title",
       "difficulty": "easy|medium|hard",
       "estimatedMinutes": 15,

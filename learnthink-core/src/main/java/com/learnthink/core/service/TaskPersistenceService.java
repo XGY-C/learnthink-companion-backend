@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -36,6 +37,8 @@ public class TaskPersistenceService {
     private final AgentMessageMapper agentMessageMapper;
     private final ReviewRecordMapper reviewRecordMapper;
     private final ProfileVersionMapper profileVersionMapper;
+    private final ResourcePackMapper resourcePackMapper;
+    private final ResourceItemMapper resourceItemMapper;
     private final ObjectMapper objectMapper;
 
     // ================================================================
@@ -220,21 +223,93 @@ public class TaskPersistenceService {
 
     @Transactional
     public ReviewRecord recordReview(String resourceItemId, String resourcePackId, String taskId,
-                                      String result, String reasonsJson, double citationCoverage) {
+                                      String result, String reviewSummary, double citationCoverage) {
         ReviewRecord record = new ReviewRecord();
         record.setResourceItemId(resourceItemId);
         record.setResourcePackId(resourcePackId);
         record.setTaskId(taskId);
         record.setResult(result);
-        record.setReasonsJson(reasonsJson);
+        // reviewSummary is raw text; serialize to JSON string for MySQL JSON column
+        record.setReasonsJson(toJson(reviewSummary));
         record.setCitationCoverage(java.math.BigDecimal.valueOf(citationCoverage));
         reviewRecordMapper.insert(record);
         return record;
     }
 
     // ================================================================
+    // Resource pack persistence
+    // ================================================================
+
+    @Transactional
+    public String saveResourcePack(String packId, String userId, String courseId, String topic,
+                                    String taskId, String profileVersionId, List<String> pushReasons) {
+        ResourcePack pack = new ResourcePack();
+        pack.setId(packId);
+        pack.setUserId(userId);
+        pack.setCourseId(courseId);
+        pack.setTopic(topic);
+        pack.setTaskId(taskId);
+        pack.setGeneratedFromProfileVersionId(profileVersionId);
+        pack.setPushReasonJson(toJson(pushReasons));
+        pack.setCreatedAt(LocalDateTime.now());
+        resourcePackMapper.insert(pack);
+        log.info("Resource pack saved: id={}, topic={}", packId, topic);
+        return packId;
+    }
+
+    @Transactional
+    public String saveResourceItem(String itemId, String packId, String taskId,
+                                    String type, String title, String content,
+                                    String mimeType, String confidence,
+                                    List<Map<String, Object>> sources,
+                                    String reviewStatus, String reviewSummary) {
+        ResourceItem item = new ResourceItem();
+        item.setId(itemId);
+        item.setPackId(packId);
+        item.setTaskId(taskId);
+        item.setType(type);
+        item.setTitle(title);
+        item.setStatus("ready");
+        // content_ref is an object storage key; store full content in metadata_json
+        String contentRef = "resources/" + taskId + "/" + type;
+        item.setContentRef(contentRef);
+        item.setContentMime(mimeType);
+        item.setConfidence(confidence);
+        item.setSourcesJson(toJson(sources));
+        item.setReviewStatus(reviewStatus);
+        item.setReviewSummary(reviewSummary);
+        // Store full content in metadata_json (content_ref is only a path key, max 500 chars)
+        Map<String, String> meta = new java.util.HashMap<>();
+        meta.put("content", content.length() > 10000 ? content.substring(0, 10000) : content);
+        item.setMetadataJson(toJson(meta));
+        item.setCreatedAt(LocalDateTime.now());
+        item.setUpdatedAt(LocalDateTime.now());
+        resourceItemMapper.insert(item);
+        log.info("Resource item saved: type={}, title={}, confidence={}", type, title, confidence);
+        return itemId;
+    }
+
+    // ================================================================
     // helpers
     // ================================================================
+
+    /**
+     * Resolve profile version UUID from version number.
+     */
+    public String resolveProfileVersionId(String userId, String courseId, int profileVersion) {
+        try {
+            ProfileVersion pv = profileVersionMapper.selectOne(
+                new LambdaQueryWrapper<ProfileVersion>()
+                    .eq(ProfileVersion::getUserId, userId)
+                    .eq(ProfileVersion::getCourseId, courseId)
+                    .eq(ProfileVersion::getVersion, profileVersion));
+            return pv != null ? pv.getId() : null;
+        } catch (Exception e) {
+            log.warn("Failed to resolve profile version: userId={}, courseId={}, version={}",
+                userId, courseId, profileVersion, e);
+            return null;
+        }
+    }
 
     private String toJson(Object obj) {
         if (obj == null) return null;

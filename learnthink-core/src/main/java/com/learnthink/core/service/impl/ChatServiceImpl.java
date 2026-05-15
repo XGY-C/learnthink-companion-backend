@@ -665,14 +665,20 @@ public class ChatServiceImpl implements ChatService {
 
             if (genIntent != null && genIntent.wantsGeneration()) {
                 log.info("用户需要资源生成: chatId={}, prefs={}", chatId, genIntent.preferences());
+                // Resolve topic regardless of clarifying path
+                String topic = conversationAgent.resolveTopic(
+                    courseName != null ? courseName : "当前课程", messages, null);
+                java.util.Map<String, Object> prefsWithTopic =
+                    new java.util.LinkedHashMap<>(genIntent.preferences());
+                prefsWithTopic.put("topic", topic);
                 String clarifying = conversationAgent.generateClarifyingQuestion(genIntent, sufficiency);
                 if (clarifying != null) {
                     extraText.append("\n\n").append(clarifying);
                     generationReady = true;
-                    generationMeta = Map.of("stage", "clarifying", "preferences", genIntent.preferences());
+                    generationMeta = Map.of("stage", "clarifying", "preferences", prefsWithTopic);
                 } else {
                     generationReady = true;
-                    generationMeta = Map.of("stage", "ready", "preferences", genIntent.preferences());
+                    generationMeta = Map.of("stage", "ready", "preferences", prefsWithTopic);
                 }
             }
 
@@ -725,8 +731,9 @@ public class ChatServiceImpl implements ChatService {
                 postItems.add(SseEvent.chunk(extraText.toString()));
             }
             postItems.add(toSseEvent("done", Map.of(
-                "profileReady", false,
+                "profileReady", effectiveCovered >= 4,
                 "profileVersionId", "",
+                "coveredCount", effectiveCovered,
                 "generationReady", generationReady,
                 "generationMeta", generationMeta != null ? generationMeta : Map.of()
             )));

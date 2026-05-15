@@ -78,6 +78,21 @@ public class ReviewerAgent {
                 return AgentResult.of(result);
             }
 
+            // FALLBACK/zero-source: skip review when no evidence exists to verify against.
+            // Re-reviewing content with no sources just wastes LLM calls — mark low confidence.
+            if (forceLowConfidence && sources.isEmpty()) {
+                log.info("Bypassing review (forceLowConfidence=true, no sources) for type: {}", resourceType);
+                var result = new ResourceGenerationState.ReviewResult(
+                    ResourceGenerationState.ReviewStatus.APPROVED,
+                    "low", "No knowledge base sources available — skipped review",
+                    List.of(new ResourceGenerationState.ReviewReason("R1", "warn", "Zero-source fallback")),
+                    0.0,
+                    ResourceGenerationState.ReviewAction.PUBLISH);
+                ctx.observation().onDecision("ReviewerAgent", "PUBLISH",
+                    "Zero-source fallback (forceLowConfidence) — " + resourceType);
+                return AgentResult.of(result);
+            }
+
             // For reading/mindmap with no sources, skip R1
             boolean exemptR1 = "reading".equals(resourceType) || "mindmap".equals(resourceType);
             if (exemptR1 && sources.isEmpty()) {

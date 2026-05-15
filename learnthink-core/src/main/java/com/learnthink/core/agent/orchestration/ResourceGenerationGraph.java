@@ -87,7 +87,7 @@ public class ResourceGenerationGraph {
             // -- Edges (unconditional) --
             .addEdge("PROFILING", "RETRIEVING")
             .addEdge("PLANNING", "GENERATING")
-            .addEdge("FALLBACK", "PUBLISHING")
+            .addConditionalEdge("FALLBACK", this::routeAfterFallback)
 
             // -- Conditional edges --
             .addConditionalEdge("RETRIEVING", this::routeAfterRetrieving)
@@ -113,7 +113,10 @@ public class ResourceGenerationGraph {
             return s;
         }
         s.profileSummary = result.output();
-        log.info("Profiling completed successfully. Dimensions: {}", s.profileSummary.dimensionCount());
+        // Resolve profile version UUID for later use (resource pack persistence)
+        s.profileVersionId = persistenceService.resolveProfileVersionId(s.userId, s.courseId, s.profileVersion);
+        log.info("Profiling completed successfully. Dimensions: {}, profileVersionId: {}",
+            s.profileSummary.dimensionCount(), s.profileVersionId);
         advance(s, "PROFILING", 15, "Profile analysis complete (" + s.profileSummary.dimensionCount() + " dimensions)");
         return s;
     }
@@ -160,6 +163,9 @@ public class ResourceGenerationGraph {
             .collect(Collectors.toList());
         s.evidenceByType = evidenceByType;
         s.totalSources = totalSources;
+        if (totalSources == 0) {
+            s.forceLowConfidence = true;
+        }
         log.info("Retrieval completed. Total sources: {}, Evidence by type: {}", totalSources, evidenceByType.keySet());
         advance(s, "RETRIEVING", 35, "Retrieved " + s.totalSources + " evidence chunks");
         return s;
@@ -297,23 +303,15 @@ public class ResourceGenerationGraph {
                 }
             }
 
-            // Persist review record to MySQL
+            // Persist review flag event (SSE-driven, no FK dependency)
             if (persistenceService != null) {
                 try {
                     persistenceService.recordReviewFlag(s.taskId, type,
                         result.output().action().name(),
                         result.output().confidence(),
                         result.output().citationCoverage());
-                    // Determine resourceItemId from artifacts or use type as fallback
-                    String resourceItemId = content.title() != null ? content.title() : type;
-                    persistenceService.recordReview(
-                        resourceItemId, s.packId != null ? s.packId : s.taskId,
-                        s.taskId,
-                        result.output().action() == ResourceGenerationState.ReviewAction.PUBLISH ? "approved" : "rejected",
-                        result.output().reviewSummary(),
-                        result.output().citationCoverage());
                 } catch (Exception e) {
-                    log.warn("Failed to persist review record: {}", e.getMessage());
+                    log.warn("Failed to persist review flag event: {}", e.getMessage());
                 }
             }
 
@@ -331,6 +329,18 @@ public class ResourceGenerationGraph {
         advance(s, "PUBLISHING", 95, "Publishing resources...");
         AgentContext ctx = buildContext(s);
 
+        String packId = s.packId != null ? s.packId : UUID.randomUUID().toString();
+        s.packId = packId;
+
+        // Persist resource_pack to MySQL
+        try {
+            List<String> pushReasons = s.resourcePlan != null ? s.resourcePlan.pushReason() : List.of();
+            persistenceService.saveResourcePack(packId, s.userId, s.courseId, s.topic,
+                s.taskId, s.profileVersionId, pushReasons);
+        } catch (Exception e) {
+            log.warn("Failed to save resource pack: {}", e.getMessage());
+        }
+
         for (var entry : s.artifacts.entrySet()) {
             String type = entry.getKey();
             var content = entry.getValue();
@@ -346,6 +356,40 @@ public class ResourceGenerationGraph {
             var result = publisher.publish(s.taskId, type, content, review, ctx);
             if (result.success()) {
                 s.publishedTypes.add(type);
+
+                // Persist resource_item to MySQL
+                try {
+                    String itemId = UUID.randomUUID().toString();
+                    String reviewStatus = review != null
+                        ? (review.action() == ResourceGenerationState.ReviewAction.PUBLISH ? "approved" : "rejected")
+                        : "pending";
+                    persistenceService.saveResourceItem(itemId, packId, s.taskId,
+                        type, content.title(), content.content(),
+                        content.contentMime(), content.confidence(),
+                        content.sources() != null
+                            ? content.sources().stream().map(src -> {
+                                java.util.Map<String, Object> sourceMap = new java.util.HashMap<>();
+                                sourceMap.put("doc_id", src.docId());
+                                sourceMap.put("title", src.title());
+                                sourceMap.put("quote", src.quote());
+                                sourceMap.put("locator", src.locator());
+                                return sourceMap;
+                            }).collect(java.util.stream.Collectors.toList())
+                            : List.of(),
+                        reviewStatus,
+                        review != null ? review.reviewSummary() : "");
+                    // Persist review record linking to the real resource_item
+                    if (review != null) {
+                        persistenceService.recordReview(
+                            itemId, packId, s.taskId,
+                            review.action() == ResourceGenerationState.ReviewAction.PUBLISH ? "approved" : "rejected",
+                            review.reviewSummary(),
+                            review.citationCoverage());
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to persist resource item for type {}: {}", type, e.getMessage());
+                }
+
                 log.info("Successfully published resource type: {}", type);
             } else {
                 log.warn("Failed to publish resource type: {}", type);
@@ -399,6 +443,11 @@ public class ResourceGenerationGraph {
         }
         log.info("Routing from RETRIEVING to PLANNING");
         return "PLANNING";
+    }
+
+    private String routeAfterFallback(ResourceGenerationState s) {
+        log.info("Routing from FALLBACK to GENERATING");
+        return "GENERATING";
     }
 
     private String routeAfterGenerating(ResourceGenerationState s) {
@@ -503,7 +552,11 @@ public class ResourceGenerationGraph {
                 extra.put("resourceTypes", s.resourcePlan.items().stream()
                     .map(ResourceGenerationState.ResourcePlanItem::type).toList());
             }
-            s.progressHook.onProgress(stage, percent, message, extra);
+            try {
+                s.progressHook.onProgress(stage, percent, message, extra);
+            } catch (Exception e) {
+                log.warn("SSE broadcast failed (client disconnected): {}", e.getMessage());
+            }
         }
     }
 

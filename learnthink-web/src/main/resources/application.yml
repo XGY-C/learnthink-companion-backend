@@ -90,17 +90,3 @@ rag:
     url: http://localhost:19531
     connect-timeout: 5s
     read-timeout: 30s
-
-# 阿里云OSS配置
-aliyun:
-  #oss云服务
-  oss:
-    endpoint: https://oss-cn-beijing.aliyuncs.com
-    accessKeyId: ${aliyun_oss_id}
-    accessKeySecret: ${aliyun_oss_key}
-    bucketName: learn-think
-  #tts
-  tts:
-    appKey: ${aliyun_tts_app_key}
-    url: https://nls-gateway-cn-shanghai.aliyuncs.com/rest/v1/tts/async
-

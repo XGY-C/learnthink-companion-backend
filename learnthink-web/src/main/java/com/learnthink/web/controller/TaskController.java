@@ -2,18 +2,31 @@ package com.learnthink.web.controller;
 
 import com.learnthink.web.event.DefaultTaskEventBroadcaster;
 import com.learnthink.core.agent.orchestration.TaskOrchestrator;
+import com.learnthink.core.domain.entity.Task;
+import com.learnthink.core.domain.entity.ResourcePack;
+import com.learnthink.core.domain.entity.ResourceItem;
+import com.learnthink.core.repository.TaskMapper;
+import com.learnthink.core.repository.ResourcePackMapper;
+import com.learnthink.core.repository.ResourceItemMapper;
 import com.learnthink.common.result.Result;
 import com.learnthink.common.util.UserContextUtil;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.util.Map;
+import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * 任务API — SSE流式传输 + 任务生命周期管理
  */
+@Slf4j
 @RestController
 @RequestMapping("/tasks")
 @RequiredArgsConstructor
@@ -21,6 +34,11 @@ public class TaskController {
 
     private final TaskOrchestrator orchestrator;
     private final DefaultTaskEventBroadcaster broadcaster;
+    private final TaskMapper taskMapper;
+    private final ResourcePackMapper resourcePackMapper;
+    private final ResourceItemMapper resourceItemMapper;
+    private final StringRedisTemplate redis;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     /** 创建并启动资源生成任务 */
     @PostMapping("/generate")
@@ -31,6 +49,87 @@ public class TaskController {
         String userId = UserContextUtil.getCurrentUserId();
         String taskId = orchestrator.createTask(userId, req, idempotencyKey);
         return Result.success(Map.of("taskId", taskId));
+    }
+
+    /** 查询当前用户的任务列表 */
+    @GetMapping
+    public Result<List<Map<String, Object>>> listTasks(
+        @RequestParam(required = false) String courseId) {
+
+        String userId = UserContextUtil.getCurrentUserId();
+        List<Task> tasks;
+        if (courseId != null && !courseId.isBlank()) {
+            tasks = taskMapper.findByUserIdAndCourseId(userId, courseId);
+        } else {
+            tasks = taskMapper.findByUserId(userId);
+        }
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Task task : tasks) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("taskId", task.getId());
+            item.put("topic", task.getTopic());
+            item.put("courseId", task.getCourseId());
+            item.put("taskType", task.getTaskType());
+            item.put("status", task.getStatus());
+            item.put("stage", task.getStage());
+            item.put("percent", task.getPercent());
+            item.put("errorMessage", task.getErrorMessage());
+            item.put("createdAt", task.getCreatedAt() != null ? task.getCreatedAt().toString() : null);
+            item.put("startedAt", task.getStartedAt() != null ? task.getStartedAt().toString() : null);
+            item.put("finishedAt", task.getFinishedAt() != null ? task.getFinishedAt().toString() : null);
+
+            // Parse resource types from requestedResourceTypes JSON
+            List<String> resourceTypes = parseResourceTypes(task.getRequestedResourceTypes());
+            item.put("resourceTypes", resourceTypes);
+
+            // Override stage/percent with Redis hot data for running tasks
+            if ("RUNNING".equals(task.getStatus())) {
+                Map<Object, Object> redisStatus = redis.opsForHash().entries("task:" + task.getId() + ":status");
+                if (!redisStatus.isEmpty()) {
+                    item.put("stage", redisStatus.getOrDefault("stage", task.getStage()));
+                    item.put("percent", redisStatus.getOrDefault("percent", task.getPercent()));
+                }
+            }
+
+            // Look up pack and resource counts for completed tasks
+            if ("SUCCEEDED".equals(task.getStatus())) {
+                try {
+                    var pack = resourcePackMapper.selectOne(
+                        new LambdaQueryWrapper<ResourcePack>()
+                            .eq(ResourcePack::getTaskId, task.getId()));
+                    if (pack != null) {
+                        item.put("packId", pack.getId());
+                        long readyCount = resourceItemMapper.selectCount(
+                            new LambdaQueryWrapper<ResourceItem>()
+                                .eq(ResourceItem::getPackId, pack.getId()));
+                        item.put("resourceCount", (int) readyCount);
+                    } else {
+                        item.put("packId", null);
+                        item.put("resourceCount", 0);
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to look up pack for task {}: {}", task.getId(), e.getMessage());
+                    item.put("packId", null);
+                    item.put("resourceCount", 0);
+                }
+            } else {
+                item.put("packId", null);
+                item.put("resourceCount", 0);
+            }
+
+            result.add(item);
+        }
+        return Result.success(result);
+    }
+
+    private List<String> parseResourceTypes(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<String>>() {});
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     /** SSE事件流 — 前端订阅实时进度 */
@@ -49,11 +148,47 @@ public class TaskController {
         return Result.error("TASK_ALREADY_FINAL", "Task already in final state");
     }
 
-    /** 查询任务状态（轮询备用方案） */
+    /** 查询任务状态（轮询恢复进度用） */
     @GetMapping("/{taskId}")
     public Result<Map<String, Object>> status(@PathVariable String taskId) {
-        // 从Redis热缓存中读取
-        // TODO: 通过TaskRepository实现
-        return Result.success(Map.of("taskId", taskId, "status", "check Events stream"));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("taskId", taskId);
+
+        // Always query MySQL for authoritative state (status, stage, percent, error, pack_id)
+        Task task = taskMapper.selectById(taskId);
+        if (task == null) {
+            return Result.error("TASK_NOT_FOUND", "Task not found");
+        }
+        result.put("status", task.getStatus());
+        result.put("stage", task.getStage() != null ? task.getStage() : "");
+        result.put("percent", task.getPercent() != null ? task.getPercent() : 0);
+        result.put("topic", task.getTopic() != null ? task.getTopic() : "");
+        result.put("created_at", task.getCreatedAt() != null ? task.getCreatedAt().toString() : "");
+        result.put("started_at", task.getStartedAt() != null ? task.getStartedAt().toString() : "");
+        result.put("finished_at", task.getFinishedAt() != null ? task.getFinishedAt().toString() : "");
+        result.put("error_code", task.getErrorCode());
+        result.put("error_message", task.getErrorMessage());
+
+        // Override with Redis hot data if available (more current stage/progress)
+        Map<Object, Object> redisStatus = redis.opsForHash().entries("task:" + taskId + ":status");
+        if (!redisStatus.isEmpty()) {
+            result.put("stage", redisStatus.getOrDefault("stage", result.get("stage")));
+            result.put("percent", redisStatus.getOrDefault("percent", result.get("percent")));
+            result.put("updated_at", redisStatus.getOrDefault("updated_at", ""));
+        }
+
+        // Look up resource pack for completed tasks
+        try {
+            var pack = resourcePackMapper.selectOne(
+                new LambdaQueryWrapper<ResourcePack>()
+                    .eq(ResourcePack::getTaskId, taskId));
+            if (pack != null) {
+                result.put("pack_id", pack.getId());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to look up pack for task {}: {}", taskId, e.getMessage());
+        }
+
+        return Result.success(result);
     }
 }
