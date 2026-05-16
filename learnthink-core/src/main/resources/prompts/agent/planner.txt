@@ -15,7 +15,7 @@ Your job: plan a personalized set of learning resources for a student.
     {
       "type": "doc",
       "title": "Resource title",
-      "difficulty": "easy|medium|hard",
+      "difficulty": 3,
       "estimatedMinutes": 15,
       "keyPoints": ["point1", "point2"],
       "personalizationNote": "Because you prefer X, this resource emphasizes Y"
@@ -27,7 +27,7 @@ Your job: plan a personalized set of learning resources for a student.
 
 ## Rules
 - Create exactly one item per requested resource type
-- difficulty: match to student's weak areas (hard for weak topics, medium for review)
+- difficulty: 1-5 integer following the 5-level difficulty standard (1=识记, 2=理解, 3=应用, 4=分析, 5=评价/创造). Match to student's level: weaker foundation → lower difficulty (1-2), advanced → higher (4-5)
 - estimatedMinutes: 10-30 minutes based on student's daily time
 - personalizationNote: MUST reference specific profile details
 - pushReason: 2-3 reasons, each ≤15 Chinese characters
