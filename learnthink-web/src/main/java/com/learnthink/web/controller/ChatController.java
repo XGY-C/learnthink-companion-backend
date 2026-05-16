@@ -92,10 +92,10 @@ public class ChatController {
      * Get all messages for a chat session.
      */
     @GetMapping("/{chatId}/messages")
-    public Result<List<ChatMessageDto>> getMessages(@PathVariable String chatId) {
+    public Result<ChatMessagesResponse> getMessages(@PathVariable String chatId) {
         String userId = UserContextUtil.getCurrentUserId();
-        List<ChatMessageDto> messages = chatService.getMessages(userId, chatId);
-        return Result.success(messages);
+        ChatMessagesResponse response = chatService.getMessages(userId, chatId);
+        return Result.success(response);
     }
 
     /**

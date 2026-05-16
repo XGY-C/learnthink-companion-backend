@@ -111,7 +111,7 @@ public class TaskOrchestrator {
         try {
             String resourceTypesJson = objectMapper.writeValueAsString(state.resourceTypes);
             persistenceService.createTask(taskId, userId, req.courseId(), "resource_generate",
-                req.topic(), resourceTypesJson, req.profileVersion());
+                req.topic(), resourceTypesJson, req.profileVersion(), req.chatId());
         } catch (JsonProcessingException e) {
             log.warn("Failed to serialize resourceTypes", e);
         }
@@ -209,6 +209,7 @@ public class TaskOrchestrator {
         String courseId,
         String topic,
         List<String> resourceTypes,
-        int profileVersion
+        int profileVersion,
+        String chatId
     ) {}
 }

@@ -27,7 +27,12 @@ public enum ErrorCode {
     TTS_SUBMIT_FAILED("TTS_500", "语音合成任务提交失败"),
     TTS_QUERY_FAILED("TTS_500", "查询任务状态失败"),
     TTS_TIMEOUT("TTS_500", "语音合成超时"),
-    TTS_DOWNLOAD_FAILED("TTS_500", "音频下载失败");
+    TTS_DOWNLOAD_FAILED("TTS_500", "音频下载失败"),
+    
+    // 视频生成相关错误码
+    VIDEO_GENERATION_FAILED("VIDEO_500", "视频生成失败"),
+    VIDEO_SERVICE_ERROR("VIDEO_500", "视频服务响应异常"),
+    VIDEO_PARAM_ERROR("VIDEO_400", "视频参数错误");
 
     private final Object code;
     private final String message;

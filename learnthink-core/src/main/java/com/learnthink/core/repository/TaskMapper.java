@@ -16,4 +16,7 @@ public interface TaskMapper extends BaseMapper<Task> {
 
     @Select("SELECT * FROM tasks WHERE user_id = #{userId} AND course_id = #{courseId} ORDER BY created_at DESC")
     List<Task> findByUserIdAndCourseId(@Param("userId") String userId, @Param("courseId") String courseId);
+
+    @Select("SELECT * FROM tasks WHERE chat_id = #{chatId} AND status IN ('PENDING', 'RUNNING') ORDER BY created_at DESC")
+    List<Task> findActiveByChatId(@Param("chatId") String chatId);
 }

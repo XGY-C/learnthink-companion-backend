@@ -120,6 +120,7 @@ CREATE TABLE tasks (
     topic VARCHAR(200),
     requested_resource_types JSON,
     profile_version_id CHAR(36) COMMENT '生成时所依据的画像版本',
+    chat_id CHAR(36) COMMENT '关联的对话会话ID',
     status VARCHAR(20) DEFAULT 'PENDING' COMMENT 'PENDING / RUNNING / SUCCEEDED / FAILED / CANCELLED',
     stage VARCHAR(30) COMMENT 'PROFILING / RETRIEVING / PLANNING / GENERATING / REVIEWING / PUBLISHING',
     percent INT DEFAULT 0,
@@ -133,6 +134,7 @@ CREATE TABLE tasks (
     INDEX idx_task_type (task_type),
     INDEX idx_task_stage (stage),
     INDEX idx_task_status (status),
+    INDEX idx_task_chat (chat_id),
     CONSTRAINT fk_tasks_profiles FOREIGN KEY (user_id, course_id)
         REFERENCES profiles(user_id, course_id) ON DELETE RESTRICT,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,

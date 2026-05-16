@@ -14,10 +14,12 @@ import com.learnthink.core.config.PromptLoader;
 import com.learnthink.core.domain.entity.Profile;
 import com.learnthink.core.domain.entity.ProfileChat;
 import com.learnthink.core.domain.entity.ProfileVersion;
+import com.learnthink.core.domain.entity.Task;
 import com.learnthink.core.repository.CourseMapper;
 import com.learnthink.core.repository.ProfileChatMapper;
 import com.learnthink.core.repository.ProfileMapper;
 import com.learnthink.core.repository.ProfileVersionMapper;
+import com.learnthink.core.repository.TaskMapper;
 import com.learnthink.core.service.ChatService;
 import com.learnthink.core.service.ProfileService;
 import com.learnthink.core.service.TaskPersistenceService;
@@ -48,6 +50,7 @@ public class ChatServiceImpl implements ChatService {
     private final ProfileMapper profileMapper;
     private final ProfileVersionMapper profileVersionMapper;
     private final CourseMapper courseMapper;
+    private final TaskMapper taskMapper;
     private final ChatClient.Builder chatClientBuilder;
     private final ObjectMapper objectMapper;
     private final PromptLoader promptLoader;
@@ -61,6 +64,7 @@ public class ChatServiceImpl implements ChatService {
                            ProfileMapper profileMapper,
                            ProfileVersionMapper profileVersionMapper,
                            CourseMapper courseMapper,
+                           TaskMapper taskMapper,
                            @Qualifier("chatChatClientBuilder") ChatClient.Builder chatClientBuilder,
                            ObjectMapper objectMapper,
                            PromptLoader promptLoader,
@@ -72,6 +76,7 @@ public class ChatServiceImpl implements ChatService {
         this.profileMapper = profileMapper;
         this.profileVersionMapper = profileVersionMapper;
         this.courseMapper = courseMapper;
+        this.taskMapper = taskMapper;
         this.chatClientBuilder = chatClientBuilder;
         this.objectMapper = objectMapper;
         this.promptLoader = promptLoader;
@@ -237,13 +242,46 @@ public class ChatServiceImpl implements ChatService {
     }
 
     @Override
-    public List<ChatMessageDto> getMessages(String userId, String chatId) {
+    public ChatMessagesResponse getMessages(String userId, String chatId) {
         ProfileChat chat = profileChatMapper.selectById(chatId);
         if (chat == null || !chat.getUserId().equals(userId)) {
             throw new org.springframework.web.server.ResponseStatusException(
                 org.springframework.http.HttpStatus.NOT_FOUND, "Chat session not found");
         }
-        return parseMessages(chat.getMessagesJson());
+        List<ChatMessageDto> messages = parseMessages(chat.getMessagesJson());
+
+        // Query active tasks linked to this chat
+        List<Task> activeTasks = taskMapper.findActiveByChatId(chatId);
+        List<ActiveTaskDto> activeTaskDtos = new ArrayList<>();
+        for (Task task : activeTasks) {
+            ActiveTaskDto dto = new ActiveTaskDto();
+            dto.setTaskId(task.getId());
+            dto.setTopic(task.getTopic());
+            dto.setStatus(task.getStatus());
+            dto.setStage(task.getStage());
+            dto.setPercent(task.getPercent() != null ? task.getPercent() : 0);
+            dto.setResourceTypes(parseResourceTypes(task.getRequestedResourceTypes()));
+            dto.setErrorMessage(task.getErrorMessage());
+            activeTaskDtos.add(dto);
+        }
+
+        // Check if generation is ready and no active task exists (reconstruct offer)
+        boolean generationReady = chat.getProfileVersionId() != null && activeTaskDtos.isEmpty();
+        Map<String, Object> generationMeta = null;
+        if (generationReady) {
+            generationMeta = Map.of("stage", "offered");
+        }
+
+        return new ChatMessagesResponse(messages, generationReady, generationMeta, activeTaskDtos);
+    }
+
+    private List<String> parseResourceTypes(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<String>>() {});
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     @Override
