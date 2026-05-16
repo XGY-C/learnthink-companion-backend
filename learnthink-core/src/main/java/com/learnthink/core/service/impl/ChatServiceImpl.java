@@ -251,7 +251,7 @@ public class ChatServiceImpl implements ChatService {
         List<ChatMessageDto> messages = parseMessages(chat.getMessagesJson());
 
         // Query active tasks linked to this chat
-        List<Task> activeTasks = taskMapper.findActiveByChatId(chatId);
+        List<Task> activeTasks = taskMapper.findByChatId(chatId);
         List<ActiveTaskDto> activeTaskDtos = new ArrayList<>();
         for (Task task : activeTasks) {
             ActiveTaskDto dto = new ActiveTaskDto();

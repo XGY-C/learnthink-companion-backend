@@ -100,7 +100,7 @@ public class TaskOrchestrator {
         state.courseId = req.courseId();
         state.topic = req.topic();
         state.resourceTypes = req.resourceTypes() != null ? req.resourceTypes()
-            : List.of("doc", "quiz", "reading", "code", "mindmap");
+            : List.of("doc", "quiz", "reading", "code", "mindmap", "video");
         state.profileVersion = req.profileVersion();
         state.status = "PENDING";
         state.stage = "PENDING";

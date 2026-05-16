@@ -12,5 +12,5 @@ public interface ExplanationVideoService {
      * @param userId 用户Id
      * @return 视频VO
      */
-    ExplanationVideoDTO generateVideo(ProjectInput projectInput, Long userId) throws JsonProcessingException;
+    ExplanationVideoDTO generateVideo(ProjectInput projectInput, String userId) throws JsonProcessingException;
 }

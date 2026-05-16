@@ -60,8 +60,8 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
     }
 
     @Override
-    public ExplanationVideoDTO generateVideo(ProjectInput projectInput, Long userId) throws JsonProcessingException {
-        if(userId == null){
+    public ExplanationVideoDTO generateVideo(ProjectInput projectInput, String userId) throws JsonProcessingException {
+        if(userId == null || userId.trim().isEmpty()){
             throw new BusinessException(ErrorCode.VALIDATION_ERROR, "用户ID不能为空");
         }
         if(projectInput == null){
@@ -563,7 +563,7 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
 
     /**
      * 清理 AI 返回的 Markdown 格式 JSON，提取纯 JSON 内容
-     * 处理格式：```json {...} ``` 或 ``` {...}
+     * 处理格式：``json {...} ``` 或 ``` {...}
      */
     private String cleanMarkdownJson(String rawJson) {
         if (rawJson == null || rawJson.isEmpty()) {

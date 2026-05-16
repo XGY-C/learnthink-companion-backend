@@ -139,6 +139,7 @@ public class RetrieverAgent {
             case "reading" -> topic + " 扩展阅读 前沿进展 相关领域";
             case "code"    -> topic + " 代码实现 算法 编程示例";
             case "mindmap" -> topic + " 知识结构 概念关系 思维导图";
+            case "video" -> topic + " 概念讲解 可视化 动画演示";
             default        -> topic;
         };
     }

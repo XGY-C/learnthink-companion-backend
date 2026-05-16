@@ -222,7 +222,7 @@ CREATE TABLE IF NOT EXISTS resource_items (
     id CHAR(36) PRIMARY KEY,
     pack_id CHAR(36) NOT NULL,
     task_id CHAR(36) NOT NULL,
-    type VARCHAR(30) COMMENT 'doc / quiz / mindmap / reading / code / video_script',
+    type VARCHAR(30) COMMENT 'doc / quiz / mindmap / reading / code / video',
     title VARCHAR(500),
     status VARCHAR(20) DEFAULT 'pending' COMMENT 'pending / ready / failed / rejected',
     content_ref VARCHAR(500) COMMENT '对象存储 key',

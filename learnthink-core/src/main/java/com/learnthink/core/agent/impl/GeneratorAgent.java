@@ -21,7 +21,8 @@ import java.util.Map;
  *     ├── ExerciseGenerator  (quizzes & practice problems)
  *     ├── ReadingGenerator   (extended reading lists)
  *     ├── CodeGenerator      (code examples & walkthroughs)
- *     └── MindmapGenerator   (concept maps in JSON)
+ *     ├── MindmapGenerator   (concept maps in JSON)
+ *     └── VideoGenerator     (explanation videos via TTS + Manim rendering)
  * </pre>
  *
  * Each sub-agent has its own specialized prompt template, temperature, and output format.
@@ -39,14 +40,16 @@ public class GeneratorAgent {
         ExerciseGenerator exGen,
         ReadingGenerator readGen,
         CodeGenerator codeGen,
-        MindmapGenerator mapGen
+        MindmapGenerator mapGen,
+        VideoGenerator videoGen
     ) {
         this.generators = Map.of(
             "doc", docGen,
             "quiz", exGen,
             "reading",  readGen,
             "code",     codeGen,
-            "mindmap",  mapGen
+            "mindmap",  mapGen,
+            "video", videoGen
         );
     }
 
@@ -79,7 +82,7 @@ public class GeneratorAgent {
             "Delegating to " + gen.getClass().getSimpleName());
 
         try {
-            var content = gen.generate(planItem, typeSources, profile, forceLowConfidence, reviewFeedback);
+            var content = gen.generate(planItem, typeSources, profile, forceLowConfidence, reviewFeedback, ctx);
             long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
             log.info("Sub-generator completed in {}ms", elapsed);
 
@@ -113,7 +116,7 @@ public class GeneratorAgent {
             return AgentResult.error("No generator for type: " + type);
         }
         try {
-            var content = gen.revise(planItem, typeSources, profile, forceLowConfidence, reviewFeedback, original);
+            var content = gen.revise(planItem, typeSources, profile, forceLowConfidence, reviewFeedback, original, ctx);
             return AgentResult.of(content, AgentResult.TokenUsage.ZERO, 0,
                 Map.of("agent", "GeneratorAgent", "subAgent", gen.getClass().getSimpleName(), "revised", true));
         } catch (Exception e) {
