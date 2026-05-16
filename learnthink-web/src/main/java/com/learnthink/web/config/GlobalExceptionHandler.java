@@ -33,6 +33,21 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 处理客户端断开连接的 IO 异常（SSE/流式响应场景）
+     * 这类异常在用户刷新页面或关闭浏览器时非常常见，属于正常行为
+     */
+    @ExceptionHandler(IOException.class)
+    @ResponseStatus(HttpStatus.OK)
+    public Result<Void> handleIOException(IOException e, HttpServletRequest request) {
+        if (isSseRequest(request) || isClientDisconnectException(e)) {
+            log.info("Client disconnected: {}", e.getMessage());
+            return null;
+        }
+        log.warn("IO exception in non-SSE context: {}", e.getMessage());
+        return Result.error("文件读写错误");
+    }
+
+    /**
      * 处理其他异常—跳过 SSE 端点
      */
     @ExceptionHandler(Exception.class)
@@ -40,12 +55,44 @@ public class GlobalExceptionHandler {
     public Result<Void> handleException(Exception e, HttpServletRequest request) {
         // SSE 端点不需要返回 JSON 错误响应（SseEmitter 已断开）
         if (isSseRequest(request)) {
-            log.warn("SSE endpoint exception (client disconnected): {}", e.getMessage());
+            // 客户端断开属于正常情况，仅记录 INFO 级别日志，不打印堆栈
+            if (isClientDisconnectException(e)) {
+                log.info("SSE client disconnected: {}", e.getMessage());
+            } else {
+                log.warn("SSE endpoint exception: {}", e.getMessage());
+            }
             return null;
         }
         // SSE 端点也不需要 500 错误码
         log.error("Unexpected exception", e);
         return Result.error("服务器内部错误");
+    }
+
+    /**
+     * 判断是否为客户端主动断开连接的异常
+     */
+    private boolean isClientDisconnectException(Exception e) {
+        String message = e.getMessage();
+        if (message != null) {
+            return message.contains("你的主机中的软件中止了一个已建立的连接")
+                || message.contains("Connection reset by peer")
+                || message.contains("Broken pipe")
+                || message.contains("Connection reset")
+                || message.contains("Connection closed")
+                || message.contains("EofException");
+        }
+        
+        Throwable cause = e.getCause();
+        if (cause instanceof IOException) {
+            String causeMsg = cause.getMessage();
+            return causeMsg != null && (
+                causeMsg.contains("你的主机中的软件中止了一个已建立的连接")
+                || causeMsg.contains("Connection reset by peer")
+                || causeMsg.contains("Broken pipe")
+            );
+        }
+        
+        return e.getClass().getName().contains("RecycleRequiredException");
     }
 
     private boolean isSseRequest(HttpServletRequest request) {

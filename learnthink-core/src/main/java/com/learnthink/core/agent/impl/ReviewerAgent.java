@@ -93,8 +93,8 @@ public class ReviewerAgent {
                 return AgentResult.of(result);
             }
 
-            // For reading/mindmap with no sources, skip R1
-            boolean exemptR1 = "reading".equals(resourceType) || "mindmap".equals(resourceType);
+            // For reading/mindmap/video with no sources, skip R1
+            boolean exemptR1 = "reading".equals(resourceType) || "mindmap".equals(resourceType) || "video".equals(resourceType);
             if (exemptR1 && sources.isEmpty()) {
                 log.info("Exempt from R1 check for type: {} with no sources", resourceType);
                 var result = new ResourceGenerationState.ReviewResult(

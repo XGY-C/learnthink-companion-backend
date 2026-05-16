@@ -39,6 +39,12 @@ public class Task {
     private String profileVersionId;
 
     /**
+     * 关联的对话会话ID（NULL=非对话触发的任务）
+     */
+    @TableField("chat_id")
+    private String chatId;
+
+    /**
      * PENDING/RUNNING/SUCCEEDED/FAILED/CANCELLED
      */
     private String status;

@@ -47,7 +47,8 @@ public class TaskPersistenceService {
 
     @Transactional
     public Task createTask(String taskId, String userId, String courseId, String taskType,
-                           String topic, String resourceTypesJson, Integer profileVersion) {
+                           String topic, String resourceTypesJson, Integer profileVersion,
+                           String chatId) {
         Task task = new Task();
         task.setId(taskId);
         task.setUserId(userId);
@@ -55,6 +56,7 @@ public class TaskPersistenceService {
         task.setTaskType(taskType);
         task.setTopic(topic);
         task.setRequestedResourceTypes(resourceTypesJson);
+        task.setChatId(chatId);
 
         // tasks.profile_version_id stores profile_versions.id (CHAR(36)).
         // Orchestrator passes profileVersion (int). Resolve it to the version row id.

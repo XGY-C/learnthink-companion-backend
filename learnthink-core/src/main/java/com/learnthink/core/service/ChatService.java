@@ -14,7 +14,7 @@ public interface ChatService {
     /** Streaming send: returns SSE event stream. Read SseEvent.isNamed() to distinguish events from chunks. */
     Flux<SseEvent> streamMessage(String userId, String chatId, ChatSendRequest request);
 
-    List<ChatMessageDto> getMessages(String userId, String chatId);
+    ChatMessagesResponse getMessages(String userId, String chatId);
 
     List<ChatSessionDto> getSessions(String userId, String courseId);
 

@@ -1,5 +1,6 @@
 package com.learnthink.core.agent.impl.generators;
 
+import com.learnthink.core.agent.framework.AgentContext;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import com.learnthink.core.config.PromptLoader;
 import org.springframework.ai.openai.OpenAiChatOptions;
@@ -37,7 +38,8 @@ public class DocumentGenerator implements TypeGenerator {
         List<ResourceGenerationState.SourceItem> sources,
         ResourceGenerationState.ProfileSummary profile,
         boolean forceLowConfidence,
-        String reviewFeedback) {
+        String reviewFeedback,
+        AgentContext context) {
 
         String sourcesText = sources.stream()
             .map(s -> String.format("[doc:%s] %s — %s", s.docId(), s.quote(), s.locator()))
@@ -86,7 +88,8 @@ public class DocumentGenerator implements TypeGenerator {
         ResourceGenerationState.ProfileSummary profile,
         boolean forceLowConfidence,
         String reviewFeedback,
-        ResourceGenerationState.GeneratedContent original) {
+        ResourceGenerationState.GeneratedContent original,
+        AgentContext context) {
 
         String systemPrompt = promptLoader.get("generator/document")
             .replace("{difficulty}", item.difficulty())

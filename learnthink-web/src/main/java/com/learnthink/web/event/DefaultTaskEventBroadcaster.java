@@ -1,6 +1,7 @@
 package com.learnthink.web.event;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learnthink.core.agent.orchestration.TaskEventBroadcaster;
 import org.slf4j.Logger;
@@ -67,8 +68,15 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
             "status", status, "packId", packId != null ? packId : "",
             "resourcesReady", resourceCount,
             "failedTypes", failedTypes != null ? failedTypes : Set.of()));
-        new Thread(() -> { try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
-            closeSubscribers(taskId); }).start();
+        
+        // 延迟关闭 SSE 连接，给前端足够时间接收最终状态
+        // 增加到 60 秒，避免前端仍在监听时过早关闭
+        new Thread(() -> { 
+            try { 
+                Thread.sleep(60000); 
+            } catch (InterruptedException ignored) {}
+            closeSubscribers(taskId); 
+        }).start();
     }
 
     @Override
@@ -99,7 +107,40 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
         emitter.onCompletion(() -> removeSubscriber(taskId, emitter));
         emitter.onTimeout(() -> removeSubscriber(taskId, emitter));
         emitter.onError(e -> removeSubscriber(taskId, emitter));
+
+        // Replay recent events from Redis so late-connecting views catch up
+        replayRecentEvents(taskId, emitter);
+
         return emitter;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void replayRecentEvents(String taskId, SseEmitter emitter) {
+        try {
+            List<String> rawEvents = redis.opsForList().range("task:" + taskId + ":events", 0, -1);
+            if (rawEvents == null || rawEvents.isEmpty()) return;
+
+            // Reverse: Redis list is newest-first (leftPush), we want oldest-first for replay
+            Collections.reverse(rawEvents);
+
+            for (String json : rawEvents) {
+                try {
+                    Map<String, Object> event = mapper.readValue(json, new TypeReference<Map<String, Object>>() {});
+                    String eventType = (String) event.get("eventType");
+                    Map<String, Object> payload = (Map<String, Object>) event.get("payload");
+                    if (eventType != null && payload != null) {
+                        emitter.send(SseEmitter.event()
+                            .name(eventType)
+                            .id((String) event.get("eventId"))
+                            .data(payload));
+                    }
+                } catch (Exception ignored) {
+                    // skip malformed events during replay
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Event replay unavailable for task {}: {}", taskId, e.getMessage());
+        }
     }
 
     private void broadcast(String taskId, String eventType, Map<String, Object> payload) {
@@ -123,10 +164,15 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
                 try {
                     emitter.send(SseEmitter.event().name(eventType).id(eventId).data(payload));
                 } catch (IOException e) {
+                    // IO 异常表示客户端已断开，正常清理即可
+                    removeSubscriber(taskId, emitter);
+                } catch (IllegalStateException e) {
+                    // SseEmitter 已完成/关闭，正常情况
+                    log.debug("SseEmitter already completed for task {}: {}", taskId, e.getMessage());
                     removeSubscriber(taskId, emitter);
                 } catch (Exception e) {
-                    // Defensive: unexpected SseEmitter errors must never propagate
-                    log.warn("SseEmitter send failed for task {} (removed): {}", taskId, e.getMessage());
+                    // 其他异常记录为 DEBUG，避免日志污染
+                    log.debug("SseEmitter send failed for task {} (removed): {}", taskId, e.getMessage());
                     removeSubscriber(taskId, emitter);
                 }
             }

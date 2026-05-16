@@ -103,3 +103,9 @@ rag:
     url: http://localhost:19531
     connect-timeout: 5s
     read-timeout: 30s
+
+# Manim视频API配置
+manim:
+  video:
+    api:
+      base-url: http://127.0.0.1:8005

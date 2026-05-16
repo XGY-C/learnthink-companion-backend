@@ -1,12 +1,13 @@
 package com.learnthink.core.agent.impl.generators;
 
+import com.learnthink.core.agent.framework.AgentContext;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import java.util.List;
 
 /**
  * Contract for type-specialized content generators.
- * Each resource type (doc, quiz, reading, code, mindmap) has its own implementation
- * with specialized prompt templates, temperature, and output format handling.
+ * Each resource type (doc, quiz, reading, code, mindmap, video) has its own
+ * implementation with specialized prompt templates, temperature, and output format handling.
  */
 public interface TypeGenerator {
 
@@ -19,7 +20,8 @@ public interface TypeGenerator {
         List<ResourceGenerationState.SourceItem> typeSources,
         ResourceGenerationState.ProfileSummary profile,
         boolean forceLowConfidence,
-        String reviewFeedback
+        String reviewFeedback,
+        AgentContext context
     );
 
     /**
@@ -33,6 +35,7 @@ public interface TypeGenerator {
         ResourceGenerationState.ProfileSummary profile,
         boolean forceLowConfidence,
         String reviewFeedback,
-        ResourceGenerationState.GeneratedContent original
+        ResourceGenerationState.GeneratedContent original,
+        AgentContext context
     );
 }
