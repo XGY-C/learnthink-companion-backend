@@ -88,7 +88,7 @@ public class OrchestratorAgent implements Agent<ResourceGenerationState, Resourc
                 yield "FAIL"; // profile not ready
             }
             case "RETRIEVING" -> {
-                if (Boolean.TRUE.equals(ctx.get("forceLowConfidence")) && state.totalSources == 0) {
+                if (Boolean.TRUE.equals(ctx.get("forceLowConfidence")) && state.retrieval.totalSources() == 0) {
                     yield "FALLBACK";
                 }
                 yield "PLANNING";

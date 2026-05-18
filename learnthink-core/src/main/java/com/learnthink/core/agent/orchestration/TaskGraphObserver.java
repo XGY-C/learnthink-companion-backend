@@ -72,16 +72,16 @@ public class TaskGraphObserver implements GraphObserver<ResourceGenerationState>
 
     @Override
     public void onRouting(String fromNode, String toNode, ResourceGenerationState s) {
-        log.info("Routing: {} → {} (retryCount={})", fromNode, toNode, s.reviewRetryCount);
+        log.info("Routing: {} → {} (retryCount={})", fromNode, toNode, s.review.reviewRetryCount());
 
         // Log decision for replay
         Map<String, Object> decisionPayload = java.util.Map.of(
             "from", fromNode,
             "to", toNode,
-            "reviewRetryCount", s.reviewRetryCount,
-            "planRetryCount", s.planRetryCount,
-            "failedTypes", s.failedTypes,
-            "forceLowConfidence", s.forceLowConfidence
+            "reviewRetryCount", s.review.reviewRetryCount(),
+            "planRetryCount", s.planning.planRetryCount(),
+            "failedTypes", s.generation.failedTypes(),
+            "forceLowConfidence", s.retrieval.forceLowConfidence()
         );
 
         broadcaster.broadcastEvent(s.taskId, "graph.route", decisionPayload);
@@ -90,7 +90,7 @@ public class TaskGraphObserver implements GraphObserver<ResourceGenerationState>
     @Override
     public void onGraphComplete(ResourceGenerationState s, long totalElapsedMs) {
         log.info("Graph complete: status={}, resources={}, failed={}, time={}ms",
-            s.status, s.artifacts.size(), s.failedTypes.size(), totalElapsedMs);
+            s.status, s.generation.artifacts().size(), s.generation.failedTypes().size(), totalElapsedMs);
 
         broadcaster.broadcastEvent(s.taskId, "graph.complete", java.util.Map.of(
             "status", s.status,

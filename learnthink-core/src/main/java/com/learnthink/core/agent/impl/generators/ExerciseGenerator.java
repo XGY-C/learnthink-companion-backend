@@ -42,7 +42,13 @@ public class ExerciseGenerator implements TypeGenerator {
         AgentContext context) {
 
         String sourcesText = sources.stream()
-            .map(s -> String.format("[doc:%s] %s — %s", s.docId(), s.quote(), s.locator()))
+            .map(s -> {
+                String book = s.bookTitle() != null && !s.bookTitle().isBlank() ? "《" + s.bookTitle() + "》" : "";
+                String chapter = s.chapterTitle() != null && !s.chapterTitle().isBlank() ? s.chapterTitle() : "";
+                String tag = book + chapter;
+                String ref = tag.isBlank() ? s.docId() : tag;
+                return String.format("[%s] %s — %s", ref, s.quote(), s.locator());
+            })
             .collect(Collectors.joining("\n"));
 
         String systemPrompt = promptLoader.get("generator/exercise")

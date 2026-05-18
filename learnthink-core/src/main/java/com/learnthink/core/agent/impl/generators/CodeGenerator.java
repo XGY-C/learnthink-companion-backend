@@ -42,7 +42,14 @@ public class CodeGenerator implements TypeGenerator {
         AgentContext context) {
 
         String sourcesText = sources.stream()
-            .map(s -> String.format("[%s] %s", s.docId(), s.quote()))
+            .map(s -> {
+                String book = s.bookTitle() != null && !s.bookTitle().isBlank() ? "《" + s.bookTitle() + "》" : "";
+                String chapter = s.chapterTitle() != null && !s.chapterTitle().isBlank() ? s.chapterTitle() : "";
+                String tag = book + chapter;
+                String ref = tag.isBlank() ? s.docId() : tag;
+                String loc = s.locator() != null && !s.locator().isBlank() ? " — " + s.locator() : "";
+                return String.format("[%s] %s%s", ref, s.quote(), loc);
+            })
             .collect(Collectors.joining("\n"));
 
         String systemPrompt = promptLoader.get("generator/code")

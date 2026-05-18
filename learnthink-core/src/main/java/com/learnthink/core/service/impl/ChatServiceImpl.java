@@ -9,18 +9,23 @@ import com.learnthink.core.agent.framework.AgentObservation;
 import com.learnthink.core.agent.framework.AgentResult;
 import com.learnthink.core.agent.impl.ConversationAgent;
 import com.learnthink.core.agent.impl.RagTool;
-import com.learnthink.core.agent.impl.RetrieverAgent;
+import com.learnthink.core.agent.impl.EvidenceRetriever;
 import com.learnthink.core.config.PromptLoader;
 import com.learnthink.core.domain.entity.Profile;
 import com.learnthink.core.domain.entity.ProfileChat;
 import com.learnthink.core.domain.entity.ProfileVersion;
+import com.learnthink.core.domain.entity.ResourceItem;
+import com.learnthink.core.domain.entity.ResourcePack;
 import com.learnthink.core.domain.entity.Task;
 import com.learnthink.core.repository.CourseMapper;
 import com.learnthink.core.repository.ProfileChatMapper;
 import com.learnthink.core.repository.ProfileMapper;
 import com.learnthink.core.repository.ProfileVersionMapper;
+import com.learnthink.core.repository.ResourceItemMapper;
+import com.learnthink.core.repository.ResourcePackMapper;
 import com.learnthink.core.repository.TaskMapper;
 import com.learnthink.core.service.ChatService;
+import com.learnthink.core.service.KpAnchorService;
 import com.learnthink.core.service.ProfileService;
 import com.learnthink.core.service.TaskPersistenceService;
 import lombok.extern.slf4j.Slf4j;
@@ -51,6 +56,8 @@ public class ChatServiceImpl implements ChatService {
     private final ProfileVersionMapper profileVersionMapper;
     private final CourseMapper courseMapper;
     private final TaskMapper taskMapper;
+    private final ResourcePackMapper resourcePackMapper;
+    private final ResourceItemMapper resourceItemMapper;
     private final ChatClient.Builder chatClientBuilder;
     private final ObjectMapper objectMapper;
     private final PromptLoader promptLoader;
@@ -58,6 +65,7 @@ public class ChatServiceImpl implements ChatService {
     private final ProfileService profileService;
     private final ConversationAgent conversationAgent;
     private final RagTool ragTool;
+    private final KpAnchorService kpAnchorService;
     private final ExecutorService profileAnalysisExecutor = Executors.newFixedThreadPool(2);
 
     public ChatServiceImpl(ProfileChatMapper profileChatMapper,
@@ -65,18 +73,23 @@ public class ChatServiceImpl implements ChatService {
                            ProfileVersionMapper profileVersionMapper,
                            CourseMapper courseMapper,
                            TaskMapper taskMapper,
+                           ResourcePackMapper resourcePackMapper,
+                           ResourceItemMapper resourceItemMapper,
                            @Qualifier("chatChatClientBuilder") ChatClient.Builder chatClientBuilder,
                            ObjectMapper objectMapper,
                            PromptLoader promptLoader,
                            TaskPersistenceService persistenceService,
                            ProfileService profileService,
                            ConversationAgent conversationAgent,
-                           RagTool ragTool) {
+                           RagTool ragTool,
+                           KpAnchorService kpAnchorService) {
         this.profileChatMapper = profileChatMapper;
         this.profileMapper = profileMapper;
         this.profileVersionMapper = profileVersionMapper;
         this.courseMapper = courseMapper;
         this.taskMapper = taskMapper;
+        this.resourcePackMapper = resourcePackMapper;
+        this.resourceItemMapper = resourceItemMapper;
         this.chatClientBuilder = chatClientBuilder;
         this.objectMapper = objectMapper;
         this.promptLoader = promptLoader;
@@ -84,6 +97,7 @@ public class ChatServiceImpl implements ChatService {
         this.profileService = profileService;
         this.conversationAgent = conversationAgent;
         this.ragTool = ragTool;
+        this.kpAnchorService = kpAnchorService;
     }
 
     @Override
@@ -125,7 +139,18 @@ public class ChatServiceImpl implements ChatService {
         String knowledgeContext = chat.getCourseId() != null
             ? buildKnowledgeContext(messages, chat.getCourseId())
             : null;
+
+        // === Detect generation intent BEFORE LLM call ===
+        ConversationAgent.GenerationIntent genIntent =
+            conversationAgent.detectGenerationIntent(request.getContent());
+        boolean hasGenIntent = genIntent != null && genIntent.wantsGeneration();
+
         String systemPrompt = buildConversationSystemPrompt(userId, chat.getCourseId(), knowledgeContext);
+        // If user wants resource generation, keep prompt context but add generation instruction
+        if (hasGenIntent) {
+            systemPrompt = systemPrompt + "\n\n## 当前请求\n用户请求生成学习资源。请用1-2句话简单确认（可引用课程和画像信息），然后询问具体需求。不要展开讲解任何知识点。";
+        }
+
         int roundNum = messages.size() / 2 + 1;
         AgentContext ctx = AgentContext.builder(chatId, userId)
             .courseId(chat.getCourseId())
@@ -148,14 +173,11 @@ public class ChatServiceImpl implements ChatService {
         boolean generationReady = false;
         Map<String, Object> generationMeta = null;
 
-        // === Step A: Detect if user is responding to a generation offer ===
-        ConversationAgent.GenerationIntent genIntent =
-            conversationAgent.detectGenerationIntent(request.getContent());
-
-        if (genIntent != null && genIntent.wantsGeneration()) {
+        if (hasGenIntent) {
             log.info("User wants resource generation: chatId={}, prefs={}", chatId, genIntent.preferences());
 
-            String clarifying = conversationAgent.generateClarifyingQuestion(genIntent, sufficiency);
+            String clarifying = conversationAgent.generateClarifyingQuestion(genIntent, sufficiency,
+                getCourseName(chat.getCourseId()));
             if (clarifying != null) {
                 aiResponse = aiResponse + "\n\n" + clarifying;
                 generationReady = true;
@@ -187,7 +209,7 @@ public class ChatServiceImpl implements ChatService {
         }
 
         // === Step B: If sufficiency just reached, offer resource generation ===
-        if (profileReady && genIntent == null) {
+        if (profileReady && !hasGenIntent) {
             String offer = conversationAgent.generateResourceOffer(sufficiency);
             aiResponse = aiResponse + offer;
             generationReady = true;
@@ -260,8 +282,29 @@ public class ChatServiceImpl implements ChatService {
             dto.setStatus(task.getStatus());
             dto.setStage(task.getStage());
             dto.setPercent(task.getPercent() != null ? task.getPercent() : 0);
-            dto.setResourceTypes(parseResourceTypes(task.getRequestedResourceTypes()));
+            List<String> resourceTypes = parseResourceTypes(task.getRequestedResourceTypes());
+            dto.setResourceTypes(resourceTypes);
+            dto.setTotalCount(resourceTypes != null ? resourceTypes.size() : 0);
             dto.setErrorMessage(task.getErrorMessage());
+
+            // Count ready resources for completed tasks
+            if ("SUCCEEDED".equals(task.getStatus())) {
+                try {
+                    var pack = resourcePackMapper.selectOne(
+                        new LambdaQueryWrapper<ResourcePack>()
+                            .eq(ResourcePack::getTaskId, task.getId()));
+                    if (pack != null) {
+                        long readyCount = resourceItemMapper.selectCount(
+                            new LambdaQueryWrapper<ResourceItem>()
+                                .eq(ResourceItem::getPackId, pack.getId())
+                                .eq(ResourceItem::getStatus, "ready"));
+                        dto.setReadyCount((int) readyCount);
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to count resources for task {}: {}", task.getId(), e.getMessage());
+                }
+            }
+
             activeTaskDtos.add(dto);
         }
 
@@ -447,7 +490,7 @@ public class ChatServiceImpl implements ChatService {
                     int dimCount = dimensions.size();
                     Object confMap = summary.get("confidence");
                     persistenceService.recordThinkingTrace(
-                        chatId, "ProfileAgent", "profile",
+                        chatId, "ProfileAnalyzer", "profile",
                         "PROFILING",
                         "从 " + (messages != null ? messages.size() : 0) + " 轮对话中提取画像",
                         "已提取 " + dimCount + " 个维度，置信度 " + confMap,
@@ -457,6 +500,9 @@ public class ChatServiceImpl implements ChatService {
                     log.warn("Failed to persist profile thinking trace: {}", e.getMessage());
                 }
             }
+
+            // v4.0: Trigger async KP anchoring
+            triggerKpAnchoring(pv.getId(), chat.getCourseId(), dimensions);
 
             return new ProfileSummaryDto(pv.getId(), newVersion, summary,
                 Map.of("dimensions", dimensions));
@@ -614,6 +660,11 @@ public class ChatServiceImpl implements ChatService {
         // ── Pre-stream: Detect generation intent (no LLM needed) ──
         ConversationAgent.GenerationIntent genIntent =
             conversationAgent.detectGenerationIntent(request.getContent());
+        boolean hasGenIntent = genIntent != null && genIntent.wantsGeneration();
+
+        // Resolve clarifying question upfront (doesn't depend on sufficiency result)
+        final String preClarifying = hasGenIntent
+            ? conversationAgent.generateClarifyingQuestion(genIntent, null, courseName) : null;
 
         // ── Build pre-events: CONTEXT + RETRIEVE (emitted before streaming) ──
         String contextObs = (courseName != null ? "课程: " + courseName : "课程已选择")
@@ -664,12 +715,25 @@ public class ChatServiceImpl implements ChatService {
         StringBuilder replyBuffer = new StringBuilder();
 
         // ── True streaming: call LLM via Agent framework with ctx ──
-        ConversationAgent.ConversationInput streamInput =
-            new ConversationAgent.ConversationInput(chat.getCourseId(), messages, roundNum, systemPrompt);
+        // If genIntent is clear (no clarifying needed), skip LLM stream entirely
+        boolean skipLLM = hasGenIntent && preClarifying == null;
 
-        Flux<SseEvent> replyStream = conversationAgent.streamReply(streamInput, ctx)
-            .doOnNext(replyBuffer::append)
-            .map(SseEvent::chunk);
+        Flux<SseEvent> replyStream;
+        if (skipLLM) {
+            // Emit brief acknowledgment — the clarifying/generation text comes from extraText
+            replyStream = Flux.just("好的，马上为你准备学习资源！")
+                .doOnNext(t -> { replyBuffer.append(t); })
+                .map(SseEvent::chunk);
+        } else {
+            String streamPrompt = hasGenIntent
+                ? systemPrompt + "\n\n## 当前请求\n用户请求生成学习资源。请用1-2句话简单确认（可引用课程和画像信息），然后询问具体需求。不要展开讲解任何知识点。"
+                : systemPrompt;
+            ConversationAgent.ConversationInput streamInput =
+                new ConversationAgent.ConversationInput(chat.getCourseId(), messages, roundNum, streamPrompt);
+            replyStream = conversationAgent.streamReply(streamInput, ctx)
+                .doOnNext(replyBuffer::append)
+                .map(SseEvent::chunk);
+        }
 
         // ── Post-stream: evaluate sufficiency, handle genIntent, save, emit done ──
         Flux<SseEvent> postStream = Flux.defer(() -> {
@@ -701,7 +765,7 @@ public class ChatServiceImpl implements ChatService {
             Map<String, Object> generationMeta = null;
             StringBuilder extraText = new StringBuilder();
 
-            if (genIntent != null && genIntent.wantsGeneration()) {
+            if (hasGenIntent) {
                 log.info("用户需要资源生成: chatId={}, prefs={}", chatId, genIntent.preferences());
                 // Resolve topic regardless of clarifying path
                 String topic = conversationAgent.resolveTopic(
@@ -709,9 +773,8 @@ public class ChatServiceImpl implements ChatService {
                 java.util.Map<String, Object> prefsWithTopic =
                     new java.util.LinkedHashMap<>(genIntent.preferences());
                 prefsWithTopic.put("topic", topic);
-                String clarifying = conversationAgent.generateClarifyingQuestion(genIntent, sufficiency);
-                if (clarifying != null) {
-                    extraText.append("\n\n").append(clarifying);
+                if (preClarifying != null) {
+                    extraText.append("\n\n").append(preClarifying);
                     generationReady = true;
                     generationMeta = Map.of("stage", "clarifying", "preferences", prefsWithTopic);
                 } else {
@@ -721,7 +784,7 @@ public class ChatServiceImpl implements ChatService {
             }
 
             // If sufficiency just reached without genIntent, offer resource generation
-            if (sufficiency.sufficient() && genIntent == null) {
+            if (sufficiency.sufficient() && !hasGenIntent) {
                 String offer = conversationAgent.generateResourceOffer(sufficiency);
                 extraText.append(offer);
                 generationReady = true;
@@ -1123,7 +1186,7 @@ private ProfileChat lazyCreateSession(String chatId, String userId, String cours
         if (!isKnowledgeQuestion || courseId == null) return null;
 
         try {
-            RetrieverAgent.RagClient.RagResponse resp =
+            EvidenceRetriever.RagClient.RagResponse resp =
                 ragTool.retrieve(courseId, latestUserMsg, null, 3);
             if (resp == null || resp.sources() == null || resp.sources().isEmpty()) return null;
 
@@ -1132,11 +1195,13 @@ private ProfileChat lazyCreateSession(String chatId, String userId, String cours
             ctx.append("以下是从课程知识库中检索到的相关资料，如相关可引用：\n\n");
             for (int i = 0; i < resp.sources().size(); i++) {
                 var s = resp.sources().get(i);
-                ctx.append("**").append(i + 1).append(". ").append(s.title()).append("**\n");
+                String ref = (s.bookTitle() != null && !s.bookTitle().isBlank() ? "《" + s.bookTitle() + "》" : "")
+                           + (s.chapterTitle() != null && !s.chapterTitle().isBlank() ? " " + s.chapterTitle() : "");
+                ctx.append("**").append(i + 1).append(". ").append(ref.isBlank() ? s.docId() : ref).append("**\n");
                 ctx.append("> ").append(s.quote() != null ?
                     s.quote().substring(0, Math.min(200, s.quote().length())) : "").append("\n\n");
             }
-            ctx.append("引用时标注来源文档标题。如果知识库资料与用户问题不直接相关，基于你自己的知识回答。\n");
+            ctx.append("引用时标注来源书籍与章节标题。如果知识库资料与用户问题不直接相关，基于你自己的知识回答。\n");
 
             return ctx.toString();
         } catch (Exception e) {
@@ -1163,6 +1228,25 @@ private ProfileChat lazyCreateSession(String chatId, String userId, String cours
     }
 
     /** Count dimensions that contain at least one non-empty value field. */
+    /**
+     * v4.0: Trigger async KP anchoring after profile version is persisted.
+     */
+    private void triggerKpAnchoring(String profileVersionId, String courseId,
+                                     List<Map<String, Object>> dimensions) {
+        ExecutorService kpExecutor = Executors.newSingleThreadExecutor();
+        kpExecutor.submit(() -> {
+            try {
+                log.info("[KP锚定] 开始异步锚定 - pvId={}", profileVersionId);
+                kpAnchorService.anchor(profileVersionId, courseId, dimensions);
+                log.info("[KP锚定] 锚定完成 - pvId={}", profileVersionId);
+            } catch (Exception e) {
+                log.error("[KP锚定] 锚定失败 - pvId={}: {}", profileVersionId, e.getMessage(), e);
+            } finally {
+                kpExecutor.shutdown();
+            }
+        });
+    }
+
     private int countMeaningfulDimensions(List<Map<String, Object>> dimensions) {
         if (dimensions == null) return 0;
         int count = 0;

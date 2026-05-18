@@ -44,7 +44,7 @@ spring:
 #
 # Preset usage by agent:
 #   chat       → ChatServiceImpl / ConversationAgent (low latency, no thinking)
-#   reasoning  → PlannerAgent / ReviewerAgent (deep reasoning, thinking enabled)
+#   reasoning  → CurriculumPlanner / ContentReviewer (deep reasoning, thinking enabled)
 #   generation → DocumentGenerator / ExerciseGenerator / MindmapGenerator / etc.
 #
 # Thinking mode (DeepSeek CoT):
@@ -102,10 +102,19 @@ rag:
   service:
     url: http://localhost:19531
     connect-timeout: 5s
-    read-timeout: 30s
+    read-timeout: 60s
 
+
+# Mineru文档解析API配置（精准解析API，需Token）
+mineru:
+  api:
+    base-url: ${MINERU_BASE_URL:https://mineru.net}
+    token: ${MINERU_TOKEN}
+    
 # Manim视频API配置
 manim:
   video:
     api:
       base-url: http://127.0.0.1:8005
+      connect-timeout: 60s
+      read-timeout: 1200s

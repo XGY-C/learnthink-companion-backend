@@ -1,12 +1,22 @@
 package com.learnthink.core.agent.framework;
 
 /**
- * Enhanced agent interface with structured I/O, context, and tracing.
- * Replaces the legacy {@code String execute(String)} contract.
+ * Pipeline-stage processor with structured I/O, context, and tracing.
+ *
+ * <p>Implementations are single-step nodes composed via {@code StateGraph} —
+ * they accept structured input, call LLM / external services, and return
+ * structured output. The graph engine handles routing, retries, and feedback
+ * loops. For autonomous multi-step reasoning with tool selection, see the
+ * future {@code agent/autonomous/} package.</p>
  *
  * @param <I> input type
  * @param <O> output type
+ * @deprecated Current pipeline-stage components use concrete methods
+ *             (e.g. {@code summarize()}, {@code plan()}) rather than this
+ *             generic interface. Kept as a reference for future autonomous
+ *             agent abstraction.
  */
+@Deprecated
 public interface Agent<I, O> {
     /** Unique name for this agent (used in tracing and logging) */
     String name();

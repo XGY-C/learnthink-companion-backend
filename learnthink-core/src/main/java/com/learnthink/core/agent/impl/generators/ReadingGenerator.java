@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Component
 public class ReadingGenerator implements TypeGenerator {
@@ -32,6 +33,9 @@ public class ReadingGenerator implements TypeGenerator {
     public String type() { return "reading"; }
 
     @Override
+    public boolean requiresSourceCoverage() { return false; }
+
+    @Override
     public ResourceGenerationState.GeneratedContent generate(
         ResourceGenerationState.ResourcePlanItem item,
         List<ResourceGenerationState.SourceItem> sources,
@@ -39,6 +43,16 @@ public class ReadingGenerator implements TypeGenerator {
         boolean forceLowConfidence,
         String reviewFeedback,
         AgentContext context) {
+
+        String sourcesText = sources.stream()
+            .map(s -> {
+                String book = s.bookTitle() != null && !s.bookTitle().isBlank() ? "《" + s.bookTitle() + "》" : "";
+                String chapter = s.chapterTitle() != null && !s.chapterTitle().isBlank() ? s.chapterTitle() : "";
+                String tag = book + chapter;
+                String ref = tag.isBlank() ? s.docId() : tag;
+                return String.format("[%s] %s — %s", ref, s.quote(), s.locator());
+            })
+            .collect(Collectors.joining("\n"));
 
         String systemPrompt = promptLoader.get("generator/reading")
             .replace("{personalization_note}", item.personalizationNote())
@@ -50,9 +64,10 @@ public class ReadingGenerator implements TypeGenerator {
 
         String content = chatClient.prompt()
             .messages(new SystemMessage(systemPrompt),
-                new UserMessage(String.format("Topic: %s\nKey points: %s\nStudent interests: %s",
+                new UserMessage(String.format("Topic: %s\nKey points: %s\nStudent interests: %s\nSources:\n%s",
                     item.title(), String.join(", ", item.keyPoints()),
-                    String.join(", ", profile.style()))))
+                    String.join(", ", profile.style()),
+                    sourcesText.isEmpty() ? "(no sources available — use general knowledge with disclaimers)" : sourcesText)))
             .call()
             .content();
 

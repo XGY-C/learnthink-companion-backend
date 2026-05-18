@@ -15,20 +15,20 @@ import java.util.Map;
  * <p>Any Agent with this tool in its registry can independently search the knowledge base.
  * Permission model (enforced at Agent registration time):
  * <ul>
- *   <li>RetrieverAgent — READ_WRITE (primary retrieval + supplementary retrieval)</li>
- *   <li>ReviewerAgent — READ (fact-checking: targeted retrieval for specific claims)</li>
+ *   <li>EvidenceRetriever — READ_WRITE (primary retrieval + supplementary retrieval)</li>
+ *   <li>ContentReviewer — READ (fact-checking: targeted retrieval for specific claims)</li>
  *   <li>TutorAgent — READ (Q&A: retrieve relevant materials to support answers)</li>
- *   <li>GeneratorAgent — READ (optional: self-retrieve specific details during generation)</li>
+ *   <li>ResourceGenerator — READ (optional: self-retrieve specific details during generation)</li>
  * </ul>
  */
 public class RagTool implements AgentTool {
 
     private static final Logger log = LoggerFactory.getLogger(RagTool.class);
 
-    private final RetrieverAgent.RagClient ragClient;
+    private final EvidenceRetriever.RagClient ragClient;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public RagTool(RetrieverAgent.RagClient ragClient) {
+    public RagTool(EvidenceRetriever.RagClient ragClient) {
         this.ragClient = ragClient;
     }
 
@@ -72,7 +72,7 @@ public class RagTool implements AgentTool {
             log.info("RagTool executing retrieve - courseId: {}, query: '{}', k: {}, topic: {}", 
                 courseId, query, k, topic);
 
-            RetrieverAgent.RagClient.RagResponse resp = ragClient.retrieve(courseId, query, topic, k, 0.4, 1);
+            EvidenceRetriever.RagClient.RagResponse resp = ragClient.retrieve(courseId, query, topic, k, 0.4, 1);
             if (resp == null) {
                 log.warn("RagTool returned null response");
                 return mapper.writeValueAsString(Map.of("sources", List.of(), "error", "KB_NOT_READY"));
@@ -87,10 +87,10 @@ public class RagTool implements AgentTool {
     }
 
     /** Convenience: typed retrieval for Java callers */
-    public RetrieverAgent.RagClient.RagResponse retrieve(String courseId, String query, String topic, int k) {
+    public EvidenceRetriever.RagClient.RagResponse retrieve(String courseId, String query, String topic, int k) {
         log.info("RagTool.retrieve called - courseId: {}, query: '{}', k: {}, topic: {}", 
             courseId, query, k, topic);
-        RetrieverAgent.RagClient.RagResponse resp = ragClient.retrieve(courseId, query, topic, k, 0.4, 1);
+        EvidenceRetriever.RagClient.RagResponse resp = ragClient.retrieve(courseId, query, topic, k, 0.4, 1);
         if (resp != null && resp.sources() != null) {
             log.info("RagTool.retrieve returned {} sources", resp.sources().size());
         } else {

@@ -9,6 +9,7 @@ import com.learnthink.common.exception.ErrorCode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Component;
@@ -29,8 +30,6 @@ import java.util.concurrent.atomic.AtomicReference;
  * 阿里云语音合成（TTS）工具类
  * 注意：传入文本必须采用 UTF-8 编码。
  * 参考文档：<a href="https://help.aliyun.com/zh/isi/developer-reference/sdk-reference-1?spm=0.0.0.0">...</a>
- * @author 谢光益
- * @since 2026/2/28
  */
 @Component
 public class TtsUtil implements InitializingBean {
@@ -51,7 +50,7 @@ public class TtsUtil implements InitializingBean {
     private final AliOSSUtil aliOSSUtils;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public TtsUtil(RestTemplate restTemplate, AliOSSUtil aliOSSUtils) {
+    public TtsUtil(@Qualifier("ragRestTemplate") RestTemplate restTemplate, AliOSSUtil aliOSSUtils) {
         this.restTemplate = restTemplate;
         this.aliOSSUtils = aliOSSUtils;
     }
@@ -363,8 +362,15 @@ public class TtsUtil implements InitializingBean {
     public TaskStatus synthesizeLongTextAndUpload(String text) throws Exception {
         TaskStatus status = synthesizeLongText(text);
         if (status.getAudioAddress() != null) {
-            // 上传音频到OSS，音频名为sentence第一个句子的前三个字符
-            String ossUrl =uploadAudio(status.getAudioAddress(), status.getSentences().getFirst().getText().substring(0, 3) + ".wav", "audio/");
+            List<TtsQueryResponse.Sentence> sentences = status.getSentences();
+            String fileName;
+            if (sentences != null && !sentences.isEmpty()) {
+                String sentenceText = sentences.getFirst().getText();
+                fileName = (sentenceText != null && sentenceText.length() >= 3 ? sentenceText.substring(0, 3) : "tts") + ".wav";
+            } else {
+                fileName = "tts.wav";
+            }
+            String ossUrl = uploadAudio(status.getAudioAddress(), fileName, "audio/");
             status.setAudioAddress(ossUrl);
         }
         return status;

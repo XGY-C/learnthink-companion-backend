@@ -25,6 +25,14 @@ public interface TypeGenerator {
     );
 
     /**
+     * Whether this resource type requires evidence sources for content generation.
+     * Types that return false are exempt from source-coverage checks in ContentReviewer.
+     * Default is true — only override for types where sources are not applicable
+     * (e.g. reading lists, mindmaps, videos).
+     */
+    default boolean requiresSourceCoverage() { return true; }
+
+    /**
      * Targeted revision based on review feedback.
      * Unlike generate() which creates from scratch, revise() modifies specific sections
      * identified by the reviewer, preserving approved sections.

@@ -93,19 +93,11 @@ public class TaskOrchestrator {
             redis.opsForValue().set("idem:" + userId + ":" + idempotencyKey, taskId, Duration.ofMinutes(5));
         }
 
-        // Initialize state
-        ResourceGenerationState state = new ResourceGenerationState();
-        state.taskId = taskId;
-        state.userId = userId;
-        state.courseId = req.courseId();
-        state.topic = req.topic();
-        state.resourceTypes = req.resourceTypes() != null ? req.resourceTypes()
-            : List.of("doc", "quiz", "reading", "code", "mindmap", "video");
-        state.profileVersion = req.profileVersion();
-        state.status = "PENDING";
-        state.stage = "PENDING";
-        state.percent = 0;
-        state.createdAt = Instant.now();
+        // Initialize state with constructor
+        ResourceGenerationState state = new ResourceGenerationState(
+            taskId, userId, req.courseId(), req.topic(),
+            req.resourceTypes() != null ? req.resourceTypes() : null,
+            req.profileVersion());
 
         // Persist task to MySQL
         try {
@@ -174,15 +166,18 @@ public class TaskOrchestrator {
                 || "RUNNING".equals(result.status)) ? "SUCCEEDED" : result.status;
             log.info("Graph execution completed in {}ms", totalMs);
             log.info("Final state: status={}, artifacts={}, failedTypes={}",
-                    result.status, result.artifacts.size(), result.failedTypes.size());
+                    result.status, result.generation.artifacts().size(), result.generation.failedTypes().size());
             persistenceService.updateTaskStage(state.taskId, "PUBLISHING", 100,
                 finalStatus);
-            persistenceService.recordTaskDone(state.taskId, finalStatus, result.packId, result.artifacts.size());
+            persistenceService.recordTaskDone(state.taskId, finalStatus,
+                result.publish.packId(), result.generation.artifacts().size());
             broadcaster.taskDone(state.taskId, finalStatus,
-                result.packId, result.artifacts.size(), result.failedTypes);
+                result.publish.packId(), result.generation.artifacts().size(),
+                result.generation.failedTypes());
 
             log.info("=== Task {} COMPLETED === status={}, resources={}, failed={}, time={}ms",
-                state.taskId, finalStatus, result.artifacts.size(), result.failedTypes.size(), totalMs);
+                state.taskId, finalStatus,
+                result.generation.artifacts().size(), result.generation.failedTypes().size(), totalMs);
 
         } catch (Exception e) {
             log.error("Task {} failed unexpectedly: {}", state.taskId, e.getMessage(), e);

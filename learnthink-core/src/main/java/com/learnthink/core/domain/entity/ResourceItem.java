@@ -68,6 +68,9 @@ public class ResourceItem {
 
     private String reviewSummary;
 
+    /** Sub-topic index (0 = topic-level, 1..N = sub-topic) */
+    private Integer subtopicIndex;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;
