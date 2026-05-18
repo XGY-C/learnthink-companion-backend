@@ -4,6 +4,7 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import com.learnthink.common.dto.user.UserInfoResponse;
 
 /**
  * 登录响应

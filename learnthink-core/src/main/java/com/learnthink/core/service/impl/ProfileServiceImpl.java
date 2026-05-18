@@ -16,6 +16,7 @@ import com.learnthink.core.repository.CourseMapper;
 import com.learnthink.core.repository.ProfileChatMapper;
 import com.learnthink.core.repository.ProfileMapper;
 import com.learnthink.core.repository.ProfileVersionMapper;
+import com.learnthink.core.service.KpAnchorService;
 import com.learnthink.core.service.ProfileService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -75,7 +76,11 @@ public class ProfileServiceImpl implements ProfileService {
     private final ObjectMapper objectMapper;
     private final PromptLoader promptLoader;
     private final ConversationAgent conversationAgent;
+    private final KpAnchorService kpAnchorService;
     private final ExecutorService profileUpdateExecutor = Executors.newFixedThreadPool(2);
+
+    // Separate small pool for KP anchoring to avoid blocking profile update threads
+    private final ExecutorService kpAnchorExecutor = Executors.newFixedThreadPool(2);
 
     /** Per-(user+course) lock for safe concurrent profile writes. */
     private static final ConcurrentHashMap<String, java.util.concurrent.locks.ReentrantLock> PROFILE_LOCKS = new ConcurrentHashMap<>();
@@ -92,7 +97,8 @@ public class ProfileServiceImpl implements ProfileService {
                               @Qualifier("chatChatClientBuilder") ChatClient.Builder chatClientBuilder,
                               ObjectMapper objectMapper,
                               PromptLoader promptLoader,
-                              ConversationAgent conversationAgent) {
+                              ConversationAgent conversationAgent,
+                              KpAnchorService kpAnchorService) {
         this.profileChatMapper = profileChatMapper;
         this.profileMapper = profileMapper;
         this.profileVersionMapper = profileVersionMapper;
@@ -101,6 +107,7 @@ public class ProfileServiceImpl implements ProfileService {
         this.objectMapper = objectMapper;
         this.promptLoader = promptLoader;
         this.conversationAgent = conversationAgent;
+        this.kpAnchorService = kpAnchorService;
     }
 
     @Override
@@ -190,6 +197,16 @@ public class ProfileServiceImpl implements ProfileService {
                 
                 int newVersion = persistProfileVersion(userId, courseId, merged, latestChat);
                 log.info("[异步] === 画像更新成功 === 新版本: {}, chatId={}", newVersion, chatId);
+
+                // v4.0: Trigger async KP anchoring
+                ProfileVersion newPv = profileVersionMapper.selectOne(
+                    new LambdaQueryWrapper<ProfileVersion>()
+                        .eq(ProfileVersion::getUserId, userId)
+                        .eq(ProfileVersion::getCourseId, courseId)
+                        .eq(ProfileVersion::getVersion, newVersion));
+                if (newPv != null) {
+                    triggerKpAnchoring(newPv.getId(), courseId);
+                }
             } catch (Exception e) {
                 log.error("[异步] 画像更新失败 - chatId={}: {}", chatId, e.getMessage(), e);
             } finally {
@@ -222,7 +239,16 @@ public class ProfileServiceImpl implements ProfileService {
                 chat.setCourseId(courseId);
                 chat.setMessagesJson("[]");
             }
-            persistProfileVersion(userId, courseId, merged, chat);
+            int newVersion = persistProfileVersion(userId, courseId, merged, chat);
+            // v4.0: Trigger async KP anchoring
+            ProfileVersion newPv = profileVersionMapper.selectOne(
+                new LambdaQueryWrapper<ProfileVersion>()
+                    .eq(ProfileVersion::getUserId, userId)
+                    .eq(ProfileVersion::getCourseId, courseId)
+                    .eq(ProfileVersion::getVersion, newVersion));
+            if (newPv != null) {
+                triggerKpAnchoring(newPv.getId(), courseId);
+            }
             return getProfile(userId, courseId);
         } finally {
             lock.unlock();
@@ -495,6 +521,27 @@ public class ProfileServiceImpl implements ProfileService {
         
         log.info("[持久化] === 画像版本持久化完成 === version={}", newVersion);
         return newVersion;
+    }
+
+    /**
+     * v4.0: Trigger async KP anchoring after profile version is persisted.
+     */
+    private void triggerKpAnchoring(String profileVersionId, String courseId) {
+        CompletableFuture.runAsync(() -> {
+            try {
+                log.info("[KP锚定] 开始异步锚定 - pvId={}", profileVersionId);
+                ProfileVersion pv = profileVersionMapper.selectById(profileVersionId);
+                if (pv == null || pv.getDimensionsJson() == null) {
+                    log.warn("[KP锚定] 画像版本不存在或无维度数据 - pvId={}", profileVersionId);
+                    return;
+                }
+                List<Map<String, Object>> dimensions = parseDimensionsList(pv.getDimensionsJson());
+                kpAnchorService.anchor(profileVersionId, courseId, dimensions);
+                log.info("[KP锚定] 锚定完成 - pvId={}", profileVersionId);
+            } catch (Exception e) {
+                log.error("[KP锚定] 锚定失败 - pvId={}: {}", profileVersionId, e.getMessage(), e);
+            }
+        }, kpAnchorExecutor);
     }
 
     private Map<String, Object> buildViz(Map<String, Object> profileFull) {

@@ -27,26 +27,29 @@ import java.util.Map;
  * <ol>
  *   <li>Rule layer (R1-R3): format check, source coverage, safety pre-filter (zero LLM)</li>
  *   <li>Claim Extraction (LLM): extract factual assertions from content</li>
- *   <li>Source Matching (rule): match claims against RetrieverAgent sources</li>
+ *   <li>Source Matching (rule): match claims against EvidenceRetriever sources</li>
  *   <li>Targeted Retrieval (RagTool): for unmatched claims, independent RAG search</li>
  *   <li>Verdict: backed ≥ 70% → APPROVED / 40-70% → MEDIUM / < 40% → RETRY</li>
  * </ol>
  */
 @Component
-public class ReviewerAgent {
+public class ContentReviewer {
 
-    private static final Logger log = LoggerFactory.getLogger(ReviewerAgent.class);
+    private static final Logger log = LoggerFactory.getLogger(ContentReviewer.class);
     private final ChatClient chatClient;
     private final PromptLoader promptLoader;
     private final RagTool ragTool;
+    private final ResourceGenerator resourceGenerator;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public ReviewerAgent(@Qualifier("reasoningChatClientBuilder") ChatClient.Builder chatClientBuilder,
-                         PromptLoader promptLoader,
-                         RagTool ragTool) {
+    public ContentReviewer(@Qualifier("reasoningChatClientBuilder") ChatClient.Builder chatClientBuilder,
+                           PromptLoader promptLoader,
+                           RagTool ragTool,
+                           ResourceGenerator resourceGenerator) {
         this.chatClient = chatClientBuilder.build();
         this.promptLoader = promptLoader;
         this.ragTool = ragTool;
+        this.resourceGenerator = resourceGenerator;
     }
 
     public AgentResult<ResourceGenerationState.ReviewResult> review(
@@ -56,11 +59,11 @@ public class ReviewerAgent {
         boolean forceLowConfidence,
         AgentContext ctx) {
 
-        log.info("=== ReviewerAgent START === type={}, sources={}, forceLowConfidence={}", 
+        log.info("=== ContentReviewer START === type={}, sources={}, forceLowConfidence={}",
                 resourceType, sources.size(), forceLowConfidence);
         Instant start = Instant.now();
         String systemPrompt = promptLoader.get("agent/reviewer");
-        ctx.observation().onPrompt("ReviewerAgent", systemPrompt,
+        ctx.observation().onPrompt("ContentReviewer", systemPrompt,
             Map.of("type", resourceType, "sourcesCount", sources.size(),
                    "forceLowConfidence", forceLowConfidence));
 
@@ -74,12 +77,11 @@ public class ReviewerAgent {
                     List.of(new ResourceGenerationState.ReviewReason("R4", "fail", "Blocked pattern detected")),
                     0.0,
                     ResourceGenerationState.ReviewAction.REJECT_PERMANENT);
-                ctx.observation().onDecision("ReviewerAgent", "REJECT_PERMANENT", "Safety filter blocked content");
+                ctx.observation().onDecision("ContentReviewer", "REJECT_PERMANENT", "Safety filter blocked content");
                 return AgentResult.of(result);
             }
 
             // FALLBACK/zero-source: skip review when no evidence exists to verify against.
-            // Re-reviewing content with no sources just wastes LLM calls — mark low confidence.
             if (forceLowConfidence && sources.isEmpty()) {
                 log.info("Bypassing review (forceLowConfidence=true, no sources) for type: {}", resourceType);
                 var result = new ResourceGenerationState.ReviewResult(
@@ -88,13 +90,13 @@ public class ReviewerAgent {
                     List.of(new ResourceGenerationState.ReviewReason("R1", "warn", "Zero-source fallback")),
                     0.0,
                     ResourceGenerationState.ReviewAction.PUBLISH);
-                ctx.observation().onDecision("ReviewerAgent", "PUBLISH",
+                ctx.observation().onDecision("ContentReviewer", "PUBLISH",
                     "Zero-source fallback (forceLowConfidence) — " + resourceType);
                 return AgentResult.of(result);
             }
 
-            // For reading/mindmap/video with no sources, skip R1
-            boolean exemptR1 = "reading".equals(resourceType) || "mindmap".equals(resourceType) || "video".equals(resourceType);
+            // Check whether this resource type requires source coverage
+            boolean exemptR1 = !resourceGenerator.requiresSourceCoverage(resourceType);
             if (exemptR1 && sources.isEmpty()) {
                 log.info("Exempt from R1 check for type: {} with no sources", resourceType);
                 var result = new ResourceGenerationState.ReviewResult(
@@ -103,7 +105,7 @@ public class ReviewerAgent {
                     List.of(new ResourceGenerationState.ReviewReason("R1", "warn", "Exempt: " + resourceType)),
                     0.0,
                     ResourceGenerationState.ReviewAction.PUBLISH);
-                ctx.observation().onDecision("ReviewerAgent", "PUBLISH", "Exempt from R1 — " + resourceType);
+                ctx.observation().onDecision("ContentReviewer", "PUBLISH", "Exempt from R1 — " + resourceType);
                 return AgentResult.of(result);
             }
 
@@ -120,14 +122,17 @@ public class ReviewerAgent {
             double backedRatio = (double) backedCount / totalClaims;
 
             log.info("Claim verification: {}/{} backed ({:.0f}%)", backedCount, totalClaims, backedRatio * 100);
-            ctx.observation().onDecision("ReviewerAgent",
+            ctx.observation().onDecision("ContentReviewer",
                 "CLAIMS_VERIFIED",
                 backedCount + "/" + totalClaims + " claims backed (ratio=" +
                 String.format("%.0f%%", backedRatio * 100) + ")");
 
             String sourcesJson = mapper.writeValueAsString(
                 sources.stream().map(s -> Map.of(
-                    "docId", s.docId(), "title", s.title(),
+                    "docId", s.docId(), "bookTitle", s.bookTitle(),
+                    "bookType", s.bookType(), "chapterIndex", s.chapterIndex(),
+                    "chapterTitle", s.chapterTitle(),
+                    "sourceType", s.sourceType(), "headingPath", s.headingPath(),
                     "quote", s.quote(), "locator", s.locator()
                 )).toList());
 
@@ -153,22 +158,22 @@ public class ReviewerAgent {
 
             long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
             log.info("LLM call completed in {}ms", elapsed);
-            ctx.observation().onResponse("ReviewerAgent", response, elapsed, AgentResult.TokenUsage.ZERO);
+            ctx.observation().onResponse("ContentReviewer", response, elapsed, AgentResult.TokenUsage.ZERO);
 
             var result = parseReview(response);
-            log.info("Review result: action={}, confidence={}, coverage={}", 
+            log.info("Review result: action={}, confidence={}, coverage={}",
                     result.action(), result.confidence(), result.citationCoverage());
-            ctx.observation().onDecision("ReviewerAgent",
+            ctx.observation().onDecision("ContentReviewer",
                 result.action().name(),
                 result.reviewSummary());
 
-            log.info("ReviewerAgent completed successfully");
+            log.info("ContentReviewer completed successfully");
             return AgentResult.of(result, AgentResult.TokenUsage.ZERO, elapsed,
-                Map.of("agent", "ReviewerAgent", "coverage", result.citationCoverage()));
+                Map.of("agent", "ContentReviewer", "coverage", result.citationCoverage()));
 
         } catch (Exception e) {
-            log.error("ReviewerAgent failed: {}", e.getMessage(), e);
-            ctx.observation().onError("ReviewerAgent", e);
+            log.error("ContentReviewer failed: {}", e.getMessage(), e);
+            ctx.observation().onError("ContentReviewer", e);
             return AgentResult.error("Review failed: " + e.getMessage());
         }
     }
@@ -231,7 +236,7 @@ public class ReviewerAgent {
         }
     }
 
-    /** Verify claims against RetrieverAgent sources + independent RagTool retrieval */
+    /** Verify claims against evidence sources + independent RagTool retrieval */
     private Map<String, String> verifyClaims(List<Claim> claims,
                                               List<ResourceGenerationState.SourceItem> retrieverSources,
                                               AgentContext ctx) {
@@ -239,7 +244,7 @@ public class ReviewerAgent {
         String courseId = ctx.courseId();
 
         for (Claim claim : claims) {
-            // Step 1: Try matching against RetrieverAgent sources
+            // Step 1: Try matching against retriever sources
             boolean found = retrieverSources.stream().anyMatch(s ->
                 s.quote() != null && claim.claim() != null &&
                 (s.quote().contains(claim.claim().substring(0, Math.min(10, claim.claim().length()))) ||
@@ -255,7 +260,7 @@ public class ReviewerAgent {
             if (ragTool != null && courseId != null) {
                 String searchQuery = claim.entity() + " " + claim.topic();
                 try {
-                    RetrieverAgent.RagClient.RagResponse extraResp =
+                    EvidenceRetriever.RagClient.RagResponse extraResp =
                         ragTool.retrieve(courseId, searchQuery, null, 3);
                     if (extraResp != null && extraResp.sources() != null) {
                         boolean extraFound = extraResp.sources().stream().anyMatch(s ->

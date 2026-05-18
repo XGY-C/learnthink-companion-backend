@@ -23,6 +23,7 @@ import org.springframework.web.client.RestTemplate;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -50,7 +51,7 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
     public ExplanationVideoServiceImpl(ProjectBriefNormalizer projectBriefNormalizer,
                                        @Qualifier("videoScriptChatClient") ChatClient aiVideoScriptGenerator,
                                        @Qualifier("videoSceneChatClient") ChatClient aiSceneJsonGenerator,
-                                       RestTemplate restTemplate,
+                                       @Qualifier("manimRestTemplate") RestTemplate restTemplate,
                                        TtsUtil ttsUtils) {
         this.projectBriefNormalizer = projectBriefNormalizer;
         this.aiVideoScriptGenerator = aiVideoScriptGenerator;
@@ -93,15 +94,243 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
         // 5.合并分镜脚本和语音合成结果
         sceneJson = mergeFinalJson(script, sceneJson, ttsResults);
         log.info("合并后的分镜脚本为：{}", sceneJson);
-        // 6.根据分镜脚本和视频信息生成视频
-        String videoUrl = generateVideoBySceneJson(sceneJson, projectBrief);
-        log.info("视频url为：{}", videoUrl);
-        // 6.返回视频vo
+        
+        // 6.异步提交视频渲染任务，立即返回任务ID
+        String taskId = submitVideoRenderTaskAsync(sceneJson, projectBrief);
+        log.info("视频渲染任务已提交，taskId: {}", taskId);
+        
+        // 7.返回包含任务ID的临时响应
         ExplanationVideoDTO ev = new ExplanationVideoDTO();
         ev.setTitle(projectBrief.getTopic());
         ev.setDuration(projectBrief.getTargetDurationSec());
-        ev.setVideoUrl(videoUrl);
+        ev.setVideoUrl("task:" + taskId); // 使用 task: 前缀标识异步任务
         return ev;
+    }
+
+    /**
+     * 异步提交视频渲染任务，立即返回taskId
+     * @param sceneJson 分镜脚本
+     * @param projectBrief 项目简介
+     * @return 任务ID
+     */
+    private String submitVideoRenderTaskAsync(String sceneJson, ProjectBrief projectBrief) {
+        try {
+            // 1. 构建请求体
+            ManimVideoRenderRequest request = new ManimVideoRenderRequest();
+            request.setProjectBrief(projectBrief);
+            
+            // 2. 解析并转换timedScenes(复用原有逻辑)
+            Object timedScenes = buildTimedScenes(sceneJson);
+            request.setTimedScenes(timedScenes);
+            
+            // 3. 发送异步HTTP请求
+            String url = manimApiBaseUrl + "/v1/video/render";
+            log.info("异步调用Manim视频API: {}", url);
+            
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            
+            String requestBody = objectMapper.writeValueAsString(request);
+            HttpEntity<String> entity = new HttpEntity<>(requestBody, headers);
+            
+            // 使用异步RestTemplate或CompletableFuture
+            CompletableFuture<ManimVideoRenderResponse> future = CompletableFuture.supplyAsync(() -> {
+                try {
+                    log.info("========== 开始异步视频渲染请求 ==========");
+                    log.info("请求URL: {}", url);
+                    log.info("请求体长度: {} bytes", requestBody.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+                    
+                    ResponseEntity<ManimVideoRenderResponse> response = restTemplate.postForEntity(
+                        url, entity, ManimVideoRenderResponse.class
+                    );
+                    
+                    log.info("Manim API响应状态码: {}", response.getStatusCode());
+                    log.info("Manim API响应头: {}", response.getHeaders());
+                    
+                    ManimVideoRenderResponse renderResponse = response.getBody();
+                    if (renderResponse != null) {
+                        log.info("视频渲染响应 - taskId: {}, success: {}, status: {}", 
+                            renderResponse.getTaskId(), 
+                            renderResponse.getSuccess(), 
+                            renderResponse.getStatus());
+                        
+                        if (Boolean.TRUE.equals(renderResponse.getSuccess())) {
+                            log.info("✅ 视频渲染任务提交成功");
+                            log.info("   - taskId: {}", renderResponse.getTaskId());
+                            log.info("   - videoUrl: {}", renderResponse.getVideoUrl());
+                            log.info("   - ossObjectKey: {}", renderResponse.getOssObjectKey());
+                            log.info("   - message: {}", renderResponse.getMessage());
+                            log.info("   - attempts: {}", renderResponse.getAttempts());
+                            log.info("   - taskDir: {}", renderResponse.getTaskDir());
+                        } else {
+                            log.error("❌ 视频渲染任务提交失败");
+                            log.error("   - message: {}", renderResponse.getMessage());
+                            log.error("   - attempts: {}", renderResponse.getAttempts());
+                        }
+                    } else {
+                        log.warn("⚠️ Manim API返回body为null");
+                    }
+                    
+                    log.info("========================================");
+                    return renderResponse;
+                } catch (Exception e) {
+                    log.error("========== ❌ 异步视频渲染任务失败 ==========");
+                    log.error("异常类型: {}", e.getClass().getName());
+                    log.error("异常消息: {}", e.getMessage());
+                    log.error("堆栈跟踪:", e);
+                    log.error("========================================");
+                    throw new RuntimeException(e);
+                }
+            });
+            
+            // 立即返回，不等待结果
+            String tempTaskId = "pending_" + System.currentTimeMillis();
+            log.info("异步视频渲染任务已提交，临时taskId: {}", tempTaskId);
+            return tempTaskId;
+            
+        } catch (Exception e) {
+            log.error("提交异步视频渲染任务异常", e);
+            throw new BusinessException(ErrorCode.VIDEO_GENERATION_FAILED, "提交任务失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 构建timedScenes数据结构
+     */
+    private Object buildTimedScenes(String sceneJson) throws JsonProcessingException {
+        JsonNode sceneNode = objectMapper.readTree(sceneJson);
+        ArrayNode timedScenes = objectMapper.createArrayNode();
+        
+        JsonNode sceneBlocksNode = sceneNode.get("sceneBlocks");
+        JsonNode ttsResultsNode = sceneNode.get("ttsResults");
+        
+        if (sceneBlocksNode == null || !sceneBlocksNode.isArray()) {
+            throw new BusinessException(ErrorCode.VIDEO_PARAM_ERROR, "sceneJson 中缺少 sceneBlocks 数组");
+        }
+        
+        Map<String, JsonNode> ttsResultMap = new HashMap<>();
+        if (ttsResultsNode != null && ttsResultsNode.isArray()) {
+            for (JsonNode ttsResult : ttsResultsNode) {
+                String sceneId = getTextValue(ttsResult, "sceneId");
+                if (sceneId != null) {
+                    ttsResultMap.put(sceneId, ttsResult);
+                }
+            }
+        }
+        
+        for (JsonNode sceneBlock : sceneBlocksNode) {
+            ObjectNode timedScene = objectMapper.createObjectNode();
+            String sceneId = getTextValue(sceneBlock, "id");
+            timedScene.put("sceneId", sceneId);
+            
+            JsonNode ttsResult = ttsResultMap.get(sceneId);
+            double durationSec = 0.0;
+            if (ttsResult != null) {
+                JsonNode sentencesForDuration = ttsResult.get("sentences");
+                if (sentencesForDuration != null && sentencesForDuration.isArray() && sentencesForDuration.size() > 0) {
+                    JsonNode lastSentence = sentencesForDuration.get(sentencesForDuration.size() - 1);
+                    String endTimeStr = getTextValue(lastSentence, "end_time");
+                    if (endTimeStr != null && !endTimeStr.isEmpty()) {
+                        try {
+                            durationSec = Double.parseDouble(endTimeStr) / 1000.0;
+                        } catch (NumberFormatException e) {
+                            log.warn("无法解析 end_time: {}", endTimeStr);
+                        }
+                    }
+                }
+                String audioAddress = getTextValue(ttsResult, "audioAddress");
+                if (audioAddress != null && !audioAddress.isEmpty()) {
+                    timedScene.put("audioUrl", audioAddress);
+                }
+                
+                JsonNode sentences = ttsResult.get("sentences");
+                if (sentences != null && sentences.isArray()) {
+                    ArrayNode sentencesArray = objectMapper.createArrayNode();
+                    int index = 0;
+                    for (JsonNode sentence : sentences) {
+                        ObjectNode sentenceObj = objectMapper.createObjectNode();
+                        sentenceObj.put("index", ++index);
+                        sentenceObj.put("text", getTextValue(sentence, "text"));
+                        
+                        String beginTimeStr = getTextValue(sentence, "begin_time");
+                        String endTimeStr = getTextValue(sentence, "end_time");
+                        
+                        if (beginTimeStr != null && !beginTimeStr.isEmpty()) {
+                            try {
+                                sentenceObj.put("startSec", Double.parseDouble(beginTimeStr) / 1000.0);
+                            } catch (NumberFormatException e) {
+                                log.warn("无法解析 begin_time: {}", beginTimeStr);
+                            }
+                        }
+                        
+                        if (endTimeStr != null && !endTimeStr.isEmpty()) {
+                            try {
+                                sentenceObj.put("endSec", Double.parseDouble(endTimeStr) / 1000.0);
+                            } catch (NumberFormatException e) {
+                                log.warn("无法解析 end_time: {}", endTimeStr);
+                            }
+                        }
+                        
+                        sentencesArray.add(sentenceObj);
+                    }
+                    timedScene.set("sentences", sentencesArray);
+                    timedScene.set("subtitleItems", sentencesArray.deepCopy());
+                }
+            }
+            
+            timedScene.put("durationSec", durationSec);
+            
+            ObjectNode sceneSpec = objectMapper.createObjectNode();
+            String layoutTemplate = getTextValue(sceneBlock, "layoutTemplate");
+            if (layoutTemplate != null) {
+                sceneSpec.put("layoutTemplate", layoutTemplate);
+            }
+            
+            JsonNode objects = sceneBlock.get("objects");
+            if (objects != null && objects.isArray()) {
+                sceneSpec.set("objects", objects);
+            }
+            
+            timedScene.set("sceneSpec", sceneSpec);
+            
+            JsonNode animationPlan = sceneBlock.get("animationPlan");
+            if (animationPlan != null && animationPlan.isArray()) {
+                ArrayNode animationCues = objectMapper.createArrayNode();
+                for (JsonNode cue : animationPlan) {
+                    ObjectNode animationCue = objectMapper.createObjectNode();
+                    
+                    String cueId = getTextValue(cue, "id");
+                    if (cueId != null) {
+                        animationCue.put("id", cueId);
+                    }
+                    
+                    JsonNode targetRefs = cue.get("targetRefs");
+                    if (targetRefs != null) {
+                        animationCue.set("targetRefs", targetRefs);
+                    }
+                    
+                    String action = getTextValue(cue, "action");
+                    if (action != null) {
+                        animationCue.put("action", action);
+                    }
+                    
+                    String intent = getTextValue(cue, "intent");
+                    if (intent != null) {
+                        animationCue.put("intent", intent);
+                    }
+                    
+                    animationCue.put("timeSec", 0.0);
+                    animationCue.put("runTimeSec", 1.0);
+                    
+                    animationCues.add(animationCue);
+                }
+                timedScene.set("animationCues", animationCues);
+            }
+            
+            timedScenes.add(timedScene);
+        }
+        
+        return objectMapper.convertValue(timedScenes, List.class);
     }
 
     /**
@@ -592,6 +821,107 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
             cleaned = cleaned.trim();
             log.debug("已清理 Markdown 标记，原始长度: {}, 清理后长度: {}", 
                     rawJson.length(), cleaned.length());
+        }
+        
+        // 清理JSON中的注释（// 单行注释和 /* */ 多行注释）
+        cleaned = removeJsonComments(cleaned);
+        
+        return cleaned;
+    }
+
+    /**
+     * 移除 JSON 字符串中的注释
+     * 支持两种注释格式：
+     * 1. 单行注释: // ...
+     * 2. 多行注释: /* ... * /
+     * 
+     * 注意: 不会移除字符串内部的 // 或 /* 字符
+     */
+    private String removeJsonComments(String json) {
+        if (json == null || json.isEmpty()) {
+            return json;
+        }
+        
+        StringBuilder result = new StringBuilder();
+        boolean inString = false;
+        boolean escapeNext = false;
+        int i = 0;
+        
+        while (i < json.length()) {
+            char current = json.charAt(i);
+            
+            // 处理转义字符
+            if (escapeNext) {
+                result.append(current);
+                escapeNext = false;
+                i++;
+                continue;
+            }
+            
+            // 检测到反斜杠
+            if (current == '\\') {
+                result.append(current);
+                escapeNext = true;
+                i++;
+                continue;
+            }
+            
+            // 处理字符串边界
+            if (current == '"') {
+                inString = !inString;
+                result.append(current);
+                i++;
+                continue;
+            }
+            
+            // 如果在字符串内部，直接添加字符
+            if (inString) {
+                result.append(current);
+                i++;
+                continue;
+            }
+            
+            // 检测单行注释 //
+            if (current == '/' && i + 1 < json.length() && json.charAt(i + 1) == '/') {
+                // 跳过直到行尾
+                i += 2;
+                while (i < json.length() && json.charAt(i) != '\n') {
+                    i++;
+                }
+                // 保留换行符（如果存在）
+                if (i < json.length()) {
+                    result.append('\n');
+                    i++;
+                }
+                continue;
+            }
+            
+            // 检测多行注释 /* ... */
+            if (current == '/' && i + 1 < json.length() && json.charAt(i + 1) == '*') {
+                i += 2;
+                while (i + 1 < json.length()) {
+                    if (json.charAt(i) == '*' && json.charAt(i + 1) == '/') {
+                        i += 2;
+                        break;
+                    }
+                    i++;
+                }
+                // 如果没找到结束标记，跳到末尾
+                if (i >= json.length()) {
+                    break;
+                }
+                continue;
+            }
+            
+            // 普通字符
+            result.append(current);
+            i++;
+        }
+        
+        String cleaned = result.toString().trim();
+        if (!cleaned.equals(json.trim())) {
+            log.debug("已清理JSON注释，原始长度: {}, 清理后长度: {}", 
+                    json.length(), cleaned.length());
         }
         
         return cleaned;

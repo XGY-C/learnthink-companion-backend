@@ -264,7 +264,8 @@ public class TaskPersistenceService {
                                     String type, String title, String content,
                                     String mimeType, String confidence,
                                     List<Map<String, Object>> sources,
-                                    String reviewStatus, String reviewSummary) {
+                                    String reviewStatus, String reviewSummary,
+                                    int subTopicIndex) {
         ResourceItem item = new ResourceItem();
         item.setId(itemId);
         item.setPackId(packId);
@@ -272,7 +273,6 @@ public class TaskPersistenceService {
         item.setType(type);
         item.setTitle(title);
         item.setStatus("ready");
-        // content_ref is an object storage key; store full content in metadata_json
         String contentRef = "resources/" + taskId + "/" + type;
         item.setContentRef(contentRef);
         item.setContentMime(mimeType);
@@ -280,6 +280,7 @@ public class TaskPersistenceService {
         item.setSourcesJson(toJson(sources));
         item.setReviewStatus(reviewStatus);
         item.setReviewSummary(reviewSummary);
+        item.setSubtopicIndex(subTopicIndex);
         // Store full content in metadata_json (content_ref is only a path key, max 500 chars)
         Map<String, String> meta = new java.util.HashMap<>();
         meta.put("content", content.length() > 10000 ? content.substring(0, 10000) : content);

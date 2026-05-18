@@ -13,29 +13,26 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Orchestrates generation by delegating to type-specialized sub-agents.
+ * Orchestrates generation by delegating to type-specialized sub-generators.
  *
  * <pre>
- *   GeneratorAgent
- *     ├── DocumentGenerator  (explanatory articles)
- *     ├── ExerciseGenerator  (quizzes & practice problems)
- *     ├── ReadingGenerator   (extended reading lists)
- *     ├── CodeGenerator      (code examples & walkthroughs)
- *     ├── MindmapGenerator   (concept maps in JSON)
- *     └── VideoGenerator     (explanation videos via TTS + Manim rendering)
+ *   ResourceGenerator
+ *     ├── DocumentGenerator   (explanatory articles)
+ *     ├── ExerciseGenerator   (quizzes & practice problems)
+ *     ├── ReadingGenerator    (extended reading lists)
+ *     ├── CodeGenerator       (code examples & walkthroughs)
+ *     ├── MindmapGenerator    (concept maps in JSON)
+ *     └── VideoGenerator      (explanation videos via TTS + Manim rendering)
  * </pre>
- *
- * Each sub-agent has its own specialized prompt template, temperature, and output format.
- * This replaces the old monolithic approach where one agent handled all 5 types.
  */
 @Component
-public class GeneratorAgent {
+public class ResourceGenerator {
 
-    private static final Logger log = LoggerFactory.getLogger(GeneratorAgent.class);
+    private static final Logger log = LoggerFactory.getLogger(ResourceGenerator.class);
 
     private final Map<String, TypeGenerator> generators;
 
-    public GeneratorAgent(
+    public ResourceGenerator(
         DocumentGenerator docGen,
         ExerciseGenerator exGen,
         ReadingGenerator readGen,
@@ -54,7 +51,7 @@ public class GeneratorAgent {
     }
 
     /**
-     * Generate content for a specific resource type, delegating to the specialized sub-agent.
+     * Generate content for a specific resource type, delegating to the specialized sub-generator.
      *
      * @param reviewFeedback if regenerating after a review rejection, the reviewer's feedback
      */
@@ -66,7 +63,7 @@ public class GeneratorAgent {
         String reviewFeedback,
         AgentContext ctx) {
 
-        log.info("=== GeneratorAgent START === type={}, title={}, feedback={}", 
+        log.info("=== ResourceGenerator START === type={}, title={}, feedback={}",
                 planItem.type(), planItem.title(), reviewFeedback != null ? "with feedback" : "initial");
         Instant start = Instant.now();
         String type = planItem.type();
@@ -78,7 +75,7 @@ public class GeneratorAgent {
         }
 
         log.info("Delegating to sub-generator: {}", gen.getClass().getSimpleName());
-        ctx.observation().onDecision("GeneratorAgent", "delegate",
+        ctx.observation().onDecision("ResourceGenerator", "delegate",
             "Delegating to " + gen.getClass().getSimpleName());
 
         try {
@@ -86,20 +83,20 @@ public class GeneratorAgent {
             long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
             log.info("Sub-generator completed in {}ms", elapsed);
 
-            log.info("GeneratorAgent completed successfully for type: {}", type);
+            log.info("ResourceGenerator completed successfully for type: {}", type);
             return AgentResult.of(content, AgentResult.TokenUsage.ZERO, elapsed,
-                Map.of("agent", "GeneratorAgent", "subAgent", gen.getClass().getSimpleName(),
+                Map.of("agent", "ResourceGenerator", "subAgent", gen.getClass().getSimpleName(),
                        "type", type, "regeneration", reviewFeedback != null));
 
         } catch (Exception e) {
             log.error("Generator failed for type={}: {}", type, e.getMessage(), e);
-            ctx.observation().onError("GeneratorAgent/" + type, e);
+            ctx.observation().onError("ResourceGenerator/" + type, e);
             return AgentResult.error(type + " generation failed: " + e.getMessage());
         }
     }
 
     /**
-     * Targeted revision based on review feedback. Delegates to the specialized sub-agent's revise().
+     * Targeted revision based on review feedback. Delegates to the specialized sub-generator's revise().
      */
     public AgentResult<ResourceGenerationState.GeneratedContent> revise(
         ResourceGenerationState.ResourcePlanItem planItem,
@@ -118,9 +115,18 @@ public class GeneratorAgent {
         try {
             var content = gen.revise(planItem, typeSources, profile, forceLowConfidence, reviewFeedback, original, ctx);
             return AgentResult.of(content, AgentResult.TokenUsage.ZERO, 0,
-                Map.of("agent", "GeneratorAgent", "subAgent", gen.getClass().getSimpleName(), "revised", true));
+                Map.of("agent", "ResourceGenerator", "subAgent", gen.getClass().getSimpleName(), "revised", true));
         } catch (Exception e) {
             return AgentResult.error(type + " revision failed: " + e.getMessage());
         }
+    }
+
+    /**
+     * Whether the given resource type requires evidence sources.
+     * Delegates to the type's {@link TypeGenerator#requiresSourceCoverage()}.
+     */
+    boolean requiresSourceCoverage(String type) {
+        TypeGenerator gen = generators.get(type);
+        return gen != null && gen.requiresSourceCoverage();
     }
 }

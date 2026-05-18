@@ -28,13 +28,13 @@ import java.util.concurrent.ConcurrentMap;
  * <table>
  *   <tr><th>Preset</th><th>Model</th><th>Thinking</th><th>Used by</th></tr>
  *   <tr><td>chat</td><td>deepseek-v4-flash</td><td>No</td><td>ChatServiceImpl, ConversationAgent</td></tr>
- *   <tr><td>reasoning</td><td>deepseek-v4-pro</td><td>Yes (high)</td><td>PlannerAgent, ReviewerAgent</td></tr>
+ *   <tr><td>reasoning</td><td>deepseek-v4-pro</td><td>Yes (high)</td><td>CurriculumPlanner, ContentReviewer</td></tr>
  *   <tr><td>generation</td><td>deepseek-v4-flash</td><td>No</td><td>DocumentGenerator, ExerciseGenerator, etc.</td></tr>
  * </table>
  *
  * <h3>Why thinking for reasoning, not for chat/generation?</h3>
  * <ul>
- *   <li><b>PlannerAgent / ReviewerAgent</b> — complex multi-step reasoning (plan
+ *   <li><b>CurriculumPlanner / ContentReviewer</b> — complex multi-step reasoning (plan
  *       structuring, fact verification). Thinking mode improves accuracy on these
  *       tasks and latency is acceptable since they run asynchronously in the
  *       generation pipeline.</li>
@@ -75,7 +75,7 @@ public class ModelConfig {
         return buildForPreset("chat");
     }
 
-    /** Reasoning model — PlannerAgent, ReviewerAgent. Thinking enabled for complex reasoning. */
+    /** Reasoning model — CurriculumPlanner, ContentReviewer. Thinking enabled for complex reasoning. */
     @Bean
     public ChatClient.Builder reasoningChatClientBuilder() {
         return buildForPreset("reasoning");

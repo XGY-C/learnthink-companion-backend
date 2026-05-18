@@ -30,14 +30,14 @@ import java.util.Set;
  * Total budget: ≤ 1K tokens, ≤ 500ms.
  */
 @Component
-public class RetrieverAgent {
+public class EvidenceRetriever {
 
-    private static final Logger log = LoggerFactory.getLogger(RetrieverAgent.class);
+    private static final Logger log = LoggerFactory.getLogger(EvidenceRetriever.class);
     private final RagClient ragClient;
     private final ChatClient chatClient;
 
-    public RetrieverAgent(RagClient ragClient,
-                          @Qualifier("chatChatClientBuilder") ChatClient.Builder chatClientBuilder) {
+    public EvidenceRetriever(RagClient ragClient,
+                             @Qualifier("chatChatClientBuilder") ChatClient.Builder chatClientBuilder) {
         this.ragClient = ragClient;
         this.chatClient = chatClientBuilder.build();
     }
@@ -48,13 +48,13 @@ public class RetrieverAgent {
     public AgentResult<List<ResourceGenerationState.SourceItem>> retrieve(
         String courseId, String topic, String resourceType, AgentContext ctx) {
 
-        log.info("=== RetrieverAgent START === courseId={}, topic={}, type={}", courseId, topic, resourceType);
+        log.info("=== EvidenceRetriever START === courseId={}, topic={}, type={}", courseId, topic, resourceType);
         Instant start = Instant.now();
 
         // Step 1: Build base query
         String baseQuery = buildBaseQuery(topic, resourceType);
         log.info("Base query: {}", baseQuery);
-        ctx.observation().onPrompt("RetrieverAgent", "base query: " + baseQuery,
+        ctx.observation().onPrompt("EvidenceRetriever", "base query: " + baseQuery,
             Map.of("courseId", courseId, "type", resourceType));
 
         // Step 2: Query rewriting pipeline
@@ -86,7 +86,7 @@ public class RetrieverAgent {
                     // Deduplicate
                     allSources = allSources.stream().distinct().toList();
                     totalSources = allSources.size();
-                    ctx.observation().onDecision("RetrieverAgent",
+                    ctx.observation().onDecision("EvidenceRetriever",
                         "MULTI_HOP", "2-hop retrieval: " + totalSources + " total sources");
                 }
             } else {
@@ -103,26 +103,26 @@ public class RetrieverAgent {
 
             long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
             log.info("Retrieval completed in {}ms with {} sources", elapsed, totalSources);
-            ctx.observation().onResponse("RetrieverAgent",
+            ctx.observation().onResponse("EvidenceRetriever",
                 "sources=" + totalSources + " (query: " + rewrittenQuery.substring(0, Math.min(80, rewrittenQuery.length())) + "...)",
                 elapsed, AgentResult.TokenUsage.ZERO);
 
             boolean lowConfidence = totalSources < 3;
             if (lowConfidence) {
                 log.warn("Low confidence: only {} sources found for {}", totalSources, resourceType);
-                ctx.observation().onDecision("RetrieverAgent",
+                ctx.observation().onDecision("EvidenceRetriever",
                     "LOW_CONFIDENCE", "Only " + totalSources + " sources found for " + resourceType);
                 ctx.put("forceLowConfidence", true);
             }
 
-            log.info("RetrieverAgent completed successfully");
+            log.info("EvidenceRetriever completed successfully");
             return AgentResult.of(allSources, AgentResult.TokenUsage.ZERO, elapsed,
-                Map.of("agent", "RetrieverAgent", "sourceCount", totalSources,
+                Map.of("agent", "EvidenceRetriever", "sourceCount", totalSources,
                        "multiHop", isMultiHop, "lowConfidence", lowConfidence));
 
         } catch (Exception e) {
-            log.error("RetrieverAgent failed for type={}: {}", resourceType, e.getMessage(), e);
-            ctx.observation().onError("RetrieverAgent", e);
+            log.error("EvidenceRetriever failed for type={}: {}", resourceType, e.getMessage(), e);
+            ctx.observation().onError("EvidenceRetriever", e);
             return AgentResult.error(e.getMessage());
         }
     }
@@ -139,7 +139,7 @@ public class RetrieverAgent {
             case "reading" -> topic + " 扩展阅读 前沿进展 相关领域";
             case "code"    -> topic + " 代码实现 算法 编程示例";
             case "mindmap" -> topic + " 知识结构 概念关系 思维导图";
-            case "video" -> topic + " 概念讲解 可视化 动画演示";
+            case "video"   -> topic + " 概念讲解 可视化 动画演示";
             default        -> topic;
         };
     }
@@ -163,7 +163,7 @@ public class RetrieverAgent {
                 .call().content();
 
             if (rewritten != null && !rewritten.isBlank()) {
-                ctx.observation().onDecision("RetrieverAgent", "QUERY_REWRITTEN",
+                ctx.observation().onDecision("EvidenceRetriever", "QUERY_REWRITTEN",
                     baseQuery + " → " + rewritten);
                 return rewritten.trim();
             }
@@ -188,7 +188,7 @@ public class RetrieverAgent {
         // Extract key entities from top sources
         List<String> entities = hop1.sources().stream()
             .limit(3)
-            .map(RagClient.SourceRef::title)
+            .map(RagClient.SourceRef::chapterTitle)
             .filter(t -> t != null && !t.isBlank())
             .distinct()
             .toList();
@@ -197,7 +197,9 @@ public class RetrieverAgent {
 
     private ResourceGenerationState.SourceItem toSourceItem(RagClient.SourceRef s) {
         return new ResourceGenerationState.SourceItem(
-            s.docId(), s.title(), s.chunkId(), s.quote(), s.locator(), s.relevance());
+            s.docId(), s.bookTitle(), s.bookType(), s.chapterIndex(), s.chapterTitle(),
+            s.sourceType(), s.chunkId(), s.quote(), s.locator(), s.headingPath(),
+            s.relevance());
     }
 
     // === RAG client abstraction ===
@@ -206,6 +208,18 @@ public class RetrieverAgent {
     public interface RagClient {
         RagResponse retrieve(String courseId, String query, String topic, int k, double minRelevance, int minSources);
         record RagResponse(List<SourceRef> sources, String mode) {}
-        record SourceRef(String docId, String title, String chunkId, String quote, String locator, double relevance) {}
+        record SourceRef(
+            String docId,
+            String bookTitle,
+            String bookType,
+            Integer chapterIndex,
+            String chapterTitle,
+            String sourceType,
+            String chunkId,
+            String quote,
+            String locator,
+            String headingPath,
+            double relevance
+        ) {}
     }
 }

@@ -24,7 +24,7 @@ public class AgentFrameworkConfig {
      * Registered as a Spring bean so any Agent can receive it via constructor injection.
      */
     @Bean
-    public RagTool ragTool(RetrieverAgent.RagClient ragClient) {
+    public RagTool ragTool(EvidenceRetriever.RagClient ragClient) {
         return new RagTool(ragClient);
     }
 
@@ -44,7 +44,7 @@ public class AgentFrameworkConfig {
      *
      * Architecture note (from design doc §3.2):
      * The system has TWO conceptual graphs:
-     *   A. Conversation profile graph: ConversationAgent ⇄ user → ProfileAgent (interactive)
+     *   A. Conversation profile graph: ConversationAgent ⇄ user → ProfileAnalyzer (interactive)
      *      - ConversationAgent is called directly by ChatServiceImpl for interactive chat
      *      - Can be registered as a GraphNode for non-interactive replay/debug scenarios
      *   B. Resource generation graph (this bean): Profile → Retrieve → Plan → Generate → Review
@@ -55,16 +55,16 @@ public class AgentFrameworkConfig {
      */
     @Bean
     public ResourceGenerationGraph resourceGenerationGraph(
-        ProfileAgent profileAgent,
-        RetrieverAgent retrieverAgent,
-        PlannerAgent plannerAgent,
-        GeneratorAgent generatorAgent,
-        ReviewerAgent reviewerAgent,
+        ProfileAnalyzer profileAnalyzer,
+        EvidenceRetriever evidenceRetriever,
+        CurriculumPlanner curriculumPlanner,
+        ResourceGenerator resourceGenerator,
+        ContentReviewer contentReviewer,
         ResourceGenerationGraph.Publisher publisher,
         TaskPersistenceService persistenceService) {
 
         return new ResourceGenerationGraph(
-            profileAgent, retrieverAgent, plannerAgent,
-            generatorAgent, reviewerAgent, publisher, persistenceService);
+            profileAnalyzer, evidenceRetriever, curriculumPlanner,
+            resourceGenerator, contentReviewer, publisher, persistenceService);
     }
 }

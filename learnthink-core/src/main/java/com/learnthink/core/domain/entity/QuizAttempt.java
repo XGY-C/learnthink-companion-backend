@@ -23,9 +23,14 @@ public class QuizAttempt {
     private String topic;
 
     /**
-     * 关联路径节点
+     * 关联路径节点 (v2.0, deprecated — use activityId)
      */
     private String nodeId;
+
+    /**
+     * 关联 activity (v3.0)
+     */
+    private String activityId;
 
     private String packId;
 

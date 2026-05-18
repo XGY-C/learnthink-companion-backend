@@ -24,7 +24,7 @@ import reactor.core.publisher.Flux;
  * <ul>
  *   <li>L3 Judgment-level autonomy: decides when enough information has been collected</li>
  *   <li>Intelligent sufficiency evaluation via structured confidence scoring (NOT string matching)</li>
- *   <li>Returns chat reply first (non-blocking), then async triggers ProfileAgent</li>
+ *   <li>Returns chat reply first (non-blocking), then async triggers ProfileAnalyzer</li>
  *   <li>Plan-Act-Observe-Reflect loop per conversation turn</li>
  * </ul>
  *
@@ -239,6 +239,10 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
         if (userMessage == null || userMessage.isBlank()) return null;
 
         String lower = userMessage.toLowerCase().trim();
+
+        // Skip system-generated confirmation messages (e.g. 确认生成「xxx」)
+        if (lower.startsWith("确认生成") && lower.contains("「")) return null;
+
         // Quick positive indicators
         boolean hasPositive = lower.contains("生成") || lower.contains("创建") ||
             lower.contains("做") || lower.contains("要") || lower.contains("可以") ||
@@ -310,13 +314,16 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
 
     /**
      * Generate clarifying questions when user wants generation but hasn't specified requirements.
+     * @param courseName course display name (may be null if unknown)
      */
-    public String generateClarifyingQuestion(GenerationIntent intent, SufficiencyResult sufficiency) {
+    public String generateClarifyingQuestion(GenerationIntent intent, SufficiencyResult sufficiency,
+                                              String courseName) {
         var prefs = intent.preferences();
         boolean hasTypes = prefs.containsKey("requestedTypes");
+        String context = (courseName != null && !courseName.isBlank()) ? "针对《" + courseName + "》，" : "";
 
         if (!hasTypes) {
-            return "好的！你想生成哪些类型的资源呢？\n\n"
+            return "好的！" + context + "你想生成哪些类型的资源呢？\n\n"
                 + "1. 📄 讲解文档 — 系统学习知识点\n"
                 + "2. 📝 练习题 — 检验掌握程度\n"
                 + "3. 🧠 思维导图 — 梳理知识脉络\n"
@@ -326,7 +333,9 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
         }
 
         if (!prefs.containsKey("focus")) {
-            return "明白了！你希望侧重基础入门还是进阶深入？或者有考试复习的需求？";
+            return (courseName != null && !courseName.isBlank()
+                ? "明白了，针对《" + courseName + "》，你希望侧重基础入门还是进阶深入？或者有考试复习的需求？"
+                : "明白了！你希望侧重基础入门还是进阶深入？或者有考试复习的需求？");
         }
 
         // Requirements are clear enough — confirm and trigger

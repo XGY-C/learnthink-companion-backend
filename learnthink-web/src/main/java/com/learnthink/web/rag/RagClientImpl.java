@@ -1,6 +1,6 @@
 package com.learnthink.web.rag;
 
-import com.learnthink.core.agent.impl.RetrieverAgent.RagClient;
+import com.learnthink.core.agent.impl.EvidenceRetriever.RagClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpEntity;
@@ -89,10 +89,15 @@ public class RagClientImpl implements RagClient {
             List<SourceRef> refs = sources.stream()
                 .map(s -> new SourceRef(
                     str(s, "doc_id"),
-                    str(s, "doc_title"),
+                    str(s, "book_title"),
+                    str(s, "book_type"),
+                    intOrNull(s, "chapter_index"),
+                    str(s, "chapter_title"),
+                    str(s, "source_type"),
                     str(s, "chunk_id"),
                     str(s, "excerpt"),
                     str(s, "locator"),
+                    str(s, "heading_path"),
                     dbl(s, "relevance")))
                 .toList();
 
@@ -121,5 +126,11 @@ public class RagClientImpl implements RagClient {
         Object v = m.get(key);
         if (v instanceof Number n) return n.doubleValue();
         return 0.0;
+    }
+
+    private static Integer intOrNull(Map<String, Object> m, String key) {
+        Object v = m.get(key);
+        if (v instanceof Number n) return n.intValue();
+        return null;
     }
 }

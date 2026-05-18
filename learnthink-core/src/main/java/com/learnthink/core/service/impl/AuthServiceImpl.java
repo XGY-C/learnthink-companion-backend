@@ -1,9 +1,11 @@
 package com.learnthink.core.service.impl;
 
 import com.learnthink.common.dto.auth.*;
+import com.learnthink.common.dto.user.UserInfoResponse;
 import com.learnthink.common.exception.BusinessException;
 import com.learnthink.common.exception.ErrorCode;
 import com.learnthink.common.util.PasswordValidator;
+import com.learnthink.core.domain.converter.UserConverter;
 import com.learnthink.core.domain.entity.User;
 import com.learnthink.core.service.AuthService;
 import com.learnthink.core.service.EmailVerificationService;
@@ -204,11 +206,7 @@ public class AuthServiceImpl implements AuthService {
         tokenStorageService.addRefreshTokenToUserIndex(user.getId(), refreshToken);
         
         // 构建响应
-        UserInfoResponse userInfo = UserInfoResponse.builder()
-            .id(user.getId())
-            .username(user.getUsername())
-            .role(user.getRole())
-            .build();
+        UserInfoResponse userInfo = UserConverter.toUserInfoResponse(user);
         
         return LoginResponse.builder()
             .accessToken(accessToken)

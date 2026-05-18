@@ -25,6 +25,20 @@ public class User {
 
     private String role;
 
+    @TableField("display_name")
+    private String displayName;
+
+    @TableField("avatar_url")
+    private String avatarUrl;
+
+    private String bio;
+
+    private String major;
+
+    private String grade;
+
+    private String phone;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;
