@@ -26,5 +26,8 @@ public class KnowledgeDocument {
 
     private String filePath;
 
+    /** 父文档ID（讲义章节 → 教材/讲义） */
+    private String parentId;
+
     private LocalDateTime createdAt;
 }

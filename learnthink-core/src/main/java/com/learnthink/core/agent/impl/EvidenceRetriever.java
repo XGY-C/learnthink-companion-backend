@@ -71,14 +71,14 @@ public class EvidenceRetriever {
             if (isMultiHop) {
                 log.info("Executing multi-hop retrieval");
                 // First hop: retrieve base concepts
-                RagClient.RagResponse hop1 = ragClient.retrieve(courseId, rewrittenQuery, topic, 8, 0.4, 2);
+                RagClient.RagResponse hop1 = ragClient.retrieve(courseId, rewrittenQuery, topic, 8, 0.25, 1);
                 if (hop1 != null && hop1.sources() != null) {
                     log.info("First hop retrieved {} sources", hop1.sources().size());
                     allSources.addAll(hop1.sources().stream().map(this::toSourceItem).toList());
                     // Extract key entities from first hop for second query
                     String secondQuery = buildMultiHopQuery(hop1, topic);
                     log.info("Second hop query: {}", secondQuery);
-                    RagClient.RagResponse hop2 = ragClient.retrieve(courseId, secondQuery, topic, 8, 0.4, 2);
+                    RagClient.RagResponse hop2 = ragClient.retrieve(courseId, secondQuery, topic, 8, 0.25, 1);
                     if (hop2 != null && hop2.sources() != null) {
                         log.info("Second hop retrieved {} sources", hop2.sources().size());
                         allSources.addAll(hop2.sources().stream().map(this::toSourceItem).toList());
@@ -91,7 +91,14 @@ public class EvidenceRetriever {
                 }
             } else {
                 log.info("Executing single-hop retrieval");
-                RagClient.RagResponse ragResp = ragClient.retrieve(courseId, rewrittenQuery, topic, 8, 0.4, 2);
+                RagClient.RagResponse ragResp = ragClient.retrieve(courseId, rewrittenQuery, topic, 8, 0.25, 1);
+                
+                // 如果重写查询无结果，尝试使用基础查询重试
+                if ((ragResp == null || ragResp.sources().isEmpty()) && !rewrittenQuery.equals(baseQuery)) {
+                    log.warn("No results with rewritten query, retrying with base query: {}", baseQuery);
+                    ragResp = ragClient.retrieve(courseId, baseQuery, topic, 8, 0.2, 1);
+                }
+                
                 if (ragResp == null) {
                     log.warn("RAG response is null - KB not ready");
                     return AgentResult.error("KB_NOT_READY");

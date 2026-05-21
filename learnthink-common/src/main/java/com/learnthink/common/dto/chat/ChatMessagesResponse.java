@@ -14,5 +14,7 @@ public class ChatMessagesResponse {
     private List<ChatMessageDto> messages;
     private boolean generationReady;
     private Map<String, Object> generationMeta;
+    private boolean planGenerationReady;
+    private Map<String, Object> planGenerationMeta;
     private List<ActiveTaskDto> activeTasks;
 }

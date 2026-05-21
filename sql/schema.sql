@@ -363,6 +363,7 @@ CREATE TABLE IF NOT EXISTS knowledge_documents (
     title VARCHAR(500),
     source_type VARCHAR(50) COMMENT 'lecture / glossary / exercise_bank / reading',
     file_path VARCHAR(500),
+    parent_id CHAR(36) DEFAULT NULL COMMENT '父文档ID，关联教材PDF/MD → 讲义章节',
     doc_hash VARCHAR(64) COMMENT 'SHA-256 文件哈希，用于增量索引去重',
     chunk_count INT DEFAULT 0 COMMENT '切分后的 chunk 数量',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
