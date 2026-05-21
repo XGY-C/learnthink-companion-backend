@@ -34,9 +34,12 @@ public class RagClientImpl implements RagClient {
         body.put("course_id", courseId);
         body.put("query", query);
         body.put("k", k);
-        body.put("topic", topic != null ? topic : "");
-        body.put("min_relevance", minRelevance);
-        body.put("min_sources", minSources);
+        // 注意：topic 参数会导致 RAG 服务端额外过滤，暂时禁用（与 curl 测试保持一致）
+        body.put("topic", "");
+        // 限制 min_relevance 最高为 0.25，避免过滤掉有效结果
+        body.put("min_relevance", Math.min(minRelevance, 0.25));
+        // 确保 min_sources 至少为 1，避免无结果时直接返回空数组
+        body.put("min_sources", Math.max(minSources, 1));
         body.put("query_mode", "raw");
         body.put("search_mode", "hybrid");
         body.put("sparse_weight", 0.3);
@@ -47,8 +50,10 @@ public class RagClientImpl implements RagClient {
             headers.setContentType(MediaType.APPLICATION_JSON);
             HttpEntity<java.util.HashMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
 
-            log.info("RAG request - URL: /internal/rag/retrieve, Body: {}", body);
-            log.info("RAG request - Headers: {}", headers);
+            log.info("=== RAG REQUEST DETAIL ===");
+            log.info("URL: /internal/rag/retrieve");
+            log.info("Body JSON: {}", body);
+            log.info("Headers: {}", headers);
 
             // 使用 exchange 方法代替 postForObject，以获得更好的控制
             org.springframework.http.ResponseEntity<Map> response = restTemplate.exchange(
@@ -58,8 +63,9 @@ public class RagClientImpl implements RagClient {
                 Map.class
             );
 
-            log.info("RAG response status: {}", response.getStatusCode());
-            log.info("RAG response headers: {}", response.getHeaders());
+            log.info("=== RAG RESPONSE DETAIL ===");
+            log.info("Status: {}", response.getStatusCode());
+            log.info("Headers: {}", response.getHeaders());
 
             @SuppressWarnings("unchecked")
             Map<String, Object> resp = response.getBody();
@@ -69,22 +75,29 @@ public class RagClientImpl implements RagClient {
                 return null;
             }
 
-            log.info("RAG response body keys: {}", resp.keySet());
-            log.info("RAG response full body: {}", resp);
-
+            log.info("Response keys: {}", resp.keySet());
+            log.info("Full response body: {}", resp);
+            
+            // 详细记录 sources 信息
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> sources = (List<Map<String, Object>>) resp.getOrDefault("sources", Collections.emptyList());
-
-            log.info("RAG sources count: {}", sources.size());
+            log.info("Sources count: {}, isEmpty: {}", sources.size(), sources.isEmpty());
+            
             if (!sources.isEmpty()) {
-                log.info("RAG first source: {}", sources.get(0));
+                log.info("First source detail: {}", sources.get(0));
+                log.info("All source doc_ids: {}", sources.stream().map(s -> s.get("doc_id")).toList());
+            } else {
+                log.warn("⚠️ RAG returned EMPTY sources! Possible causes:");
+                log.warn("  1. Course '{}' has no indexed documents", courseId);
+                log.warn("  2. Query '{}' too restrictive", query);
+                log.warn("  3. Topic filter was applied (now disabled)", topic);
+                log.warn("  4. RAG service internal filtering");
             }
 
             @SuppressWarnings("unchecked")
             Map<String, Object> stats = (Map<String, Object>) resp.get("stats");
             String mode = stats != null ? String.valueOf(stats.getOrDefault("query_mode", "hybrid")) : "hybrid";
-
-            log.info("RAG query mode: {}, stats: {}", mode, stats);
+            log.info("Query mode: {}, Full stats: {}", mode, stats);
 
             List<SourceRef> refs = sources.stream()
                 .map(s -> new SourceRef(

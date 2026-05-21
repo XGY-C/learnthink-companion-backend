@@ -126,7 +126,7 @@ public class ResourceGenerationGraph {
             var result = evidenceRetriever.retrieve(s.courseId, s.topic, resourceType, ctx);
             if (!result.success()) {
                 log.warn("Retrieval failed for type {}: {}", resourceType, result.errorMessage());
-                if ("KB_NOT_READY".equals(s.errorCode)) {
+                if ("KB_NOT_READY".equals(result.errorMessage())) {
                     log.info("Knowledge base not ready, routing to FALLBACK");
                     return s;
                 }
@@ -513,6 +513,7 @@ public class ResourceGenerationGraph {
             0);
 
         log.info("Fallback plan created for {} resource types", s.resourceTypes.size());
+        s.subTopicProgress = s.subTopicProgress.start(fallbackSubTopics.size());
         s._nextRoute = "GENERATING";
         return s;
     }

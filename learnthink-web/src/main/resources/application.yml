@@ -38,6 +38,12 @@ spring:
   ai:
     openai:
       api-key: ${OPENAI_API_KEY}
+
+  servlet:
+    multipart:
+      max-file-size: 200MB         # 根据需要设置单个文件最大值
+      max-request-size: 200MB      # 整个请求的最大值
+
 # ── AI Providers & Models ───────────────────────────────────────
 # Each provider is an OpenAI-compatible API endpoint.
 # Each model preset bundles a provider + model + temperature + optional thinking mode.
@@ -101,7 +107,7 @@ aliyun:
 rag:
   service:
     url: http://localhost:19531
-    connect-timeout: 5s
+    connect-timeout: 45s
     read-timeout: 60s
 
 

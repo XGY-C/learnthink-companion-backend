@@ -9,10 +9,9 @@ import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
-import org.springframework.http.client.ClientHttpRequestInterceptor;
-import org.springframework.web.client.RestClient;
 
-import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -20,9 +19,9 @@ import java.util.concurrent.ConcurrentMap;
  * Multi-provider, multi-model configuration with optional DeepSeek thinking mode.
  *
  * <p>Each provider gets its own {@link OpenAiApi} (lazily created, cached).
- * When a model preset has {@code thinking-enabled: true}, a separate API instance
- * is created that injects {@code {"thinking": {"type": "enabled"}}} and optional
- * {@code reasoning_effort} into every chat-completion request body.</p>
+ * Thinking mode params are injected via {@link OpenAiChatOptions#setExtraBody(Map)}
+ * which applies to both sync ({@code RestClient}) and streaming ({@code WebClient})
+ * paths — unlike HTTP interceptors which only cover the sync path.</p>
  *
  * <h3>Preset → Agent mapping</h3>
  * <table>
@@ -104,72 +103,50 @@ public class ModelConfig {
                 "Provider '" + providerName + "' not found in learnthink.providers config");
         }
 
-        // Separate API instances for thinking vs non-thinking (different HTTP interceptors)
         boolean thinking = preset.isThinkingEnabled();
-        String cacheKey = providerName + (thinking ? ":thinking:" + preset.getReasoningEffort() : "");
+        String reasoningEffort = preset.getReasoningEffort();
+        String cacheKey = providerName + ":thinking:" + (thinking ? reasoningEffort : "disabled");
 
         OpenAiApi api = apiCache.computeIfAbsent(cacheKey, key -> {
             log.info("Creating API client for provider '{}': base-url={}, thinking={}, reasoningEffort={}",
-                providerName, provider.getBaseUrl(), thinking, preset.getReasoningEffort());
+                providerName, provider.getBaseUrl(), thinking, reasoningEffort);
 
-            var apiBuilder = OpenAiApi.builder()
+            return OpenAiApi.builder()
                 .baseUrl(provider.getBaseUrl())
-                .apiKey(provider.getApiKey());
-
-            if (thinking) {
-                var restBuilder = RestClient.builder()
-                    .requestInterceptor(thinkingInterceptor(preset.getReasoningEffort()));
-                apiBuilder.restClientBuilder(restBuilder);
-            }
-
-            return apiBuilder.build();
+                .apiKey(provider.getApiKey())
+                .build();
         });
+
+        // Build options: model, temperature, DeepSeek thinking params
+        var optionsBuilder = OpenAiChatOptions.builder()
+            .model(preset.getModel())
+            .temperature(preset.getTemperature());
+
+        if (thinking && reasoningEffort != null && !reasoningEffort.isBlank()) {
+            optionsBuilder.reasoningEffort(reasoningEffort);
+        }
+
+        var options = optionsBuilder.build();
+
+        // Inject DeepSeek thinking mode via extraBody.
+        // DeepSeek defaults thinking to ENABLED, which causes 400 on tool-call
+        // follow-ups when reasoning_content is absent. We explicitly set it for
+        // every preset:
+        //   reasoning → enabled (CoT for complex tasks)
+        //   chat/generation → disabled (latency-critical, temperature-dependent)
+        // Using extraBody (not an HTTP interceptor) ensures it applies to both
+        // RestClient (sync) and WebClient (streaming) paths.
+        Map<String, Object> extraBody = new HashMap<>();
+        extraBody.put("thinking", Map.of("type", thinking ? "enabled" : "disabled"));
+        options.setExtraBody(extraBody);
 
         log.info("Configuring '{}' model: provider={}, model={}, temperature={}, thinking={}",
             presetName, providerName, preset.getModel(), preset.getTemperature(), thinking);
 
         var chatModel = OpenAiChatModel.builder()
             .openAiApi(api)
-            .defaultOptions(OpenAiChatOptions.builder()
-                .model(preset.getModel())
-                .temperature(preset.getTemperature())
-                .build())
+            .defaultOptions(options)
             .build();
         return ChatClient.builder(chatModel);
-    }
-
-    /**
-     * Creates an HTTP interceptor that injects DeepSeek thinking mode parameters
-     * into chat-completion request bodies.
-     *
-     * <p>Only modifies requests to {@code /chat/completions} endpoints to avoid
-     * corrupting embedding or other API calls.</p>
-     */
-    private ClientHttpRequestInterceptor thinkingInterceptor(String reasoningEffort) {
-        return (request, body, execution) -> {
-            String path = request.getURI().getPath();
-            if (path != null && path.contains("/chat/completions")) {
-                String jsonBody = new String(body, StandardCharsets.UTF_8);
-                String modified = injectThinkingParams(jsonBody, reasoningEffort);
-                log.debug("Injected thinking params into chat-completion request");
-                return execution.execute(request, modified.getBytes(StandardCharsets.UTF_8));
-            }
-            return execution.execute(request, body);
-        };
-    }
-
-    /** Injects {@code "thinking":{"type":"enabled"}} and optional {@code reasoning_effort}
-     *  into the JSON request body just before the closing brace. */
-    private String injectThinkingParams(String json, String reasoningEffort) {
-        StringBuilder sb = new StringBuilder(json);
-        int lastBrace = sb.lastIndexOf("}");
-        if (lastBrace > 0) {
-            StringBuilder extra = new StringBuilder(",\"thinking\":{\"type\":\"enabled\"}");
-            if (reasoningEffort != null && !reasoningEffort.isBlank()) {
-                extra.append(",\"reasoning_effort\":\"").append(reasoningEffort).append("\"");
-            }
-            sb.insert(lastBrace, extra.toString());
-        }
-        return sb.toString();
     }
 }

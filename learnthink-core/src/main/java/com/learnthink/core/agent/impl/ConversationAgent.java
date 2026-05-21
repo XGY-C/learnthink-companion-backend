@@ -9,6 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.*;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
@@ -66,12 +68,18 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
             "Evaluating conversation state (round " + input.roundNumber() + ")",
             Map.of("courseId", input.courseId(), "historySize", input.conversationHistory().size()));
 
-        // Step 1: Generate reply
+        // Step 1: Generate reply with optional tool (ReAct)
         String systemPrompt = input.systemPromptOverride() != null && !input.systemPromptOverride().isBlank()
             ? input.systemPromptOverride()
             : promptLoader.get("agent/conversation");
         List<Message> messages = buildMessages(systemPrompt, input.conversationHistory());
-        String reply = chatClient.prompt().messages(messages).call().content();
+
+        var promptSpec = chatClient.prompt().messages(messages);
+        ToolCallback ragToolCallback = ctx.get("rag_tool");
+        if (ragToolCallback != null) {
+            promptSpec = promptSpec.toolCallbacks(ragToolCallback);
+        }
+        String reply = promptSpec.call().content();
 
         // === ACT ===
         ctx.observation().onResponse(name(), "Reply generated (" + reply.length() + " chars)",
@@ -107,11 +115,12 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
     // ================================================================
 
     /**
-     * Stream the LLM reply token-by-token. Does NOT evaluate sufficiency —
-     * that happens post-stream in ChatServiceImpl. Accepts AgentContext
-     * to emit observation events (prompt/response/decision).
+     * Stream the LLM reply token-by-token with optional tool access.
+     * Emits {@link ChatResponse} objects so the caller can observe tool calls
+     * and emit intermediate SSE events (RETRIEVE/RAG thought events).
+     * Does NOT evaluate sufficiency — that happens post-stream in ChatServiceImpl.
      */
-    public Flux<String> streamReply(ConversationInput input, AgentContext ctx) {
+    public Flux<ChatResponse> streamReply(ConversationInput input, AgentContext ctx) {
         String systemPrompt = input.systemPromptOverride() != null && !input.systemPromptOverride().isBlank()
             ? input.systemPromptOverride()
             : promptLoader.get("agent/conversation");
@@ -121,7 +130,12 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
         ctx.observation().onPrompt(name(), "Streaming reply generation (round " + input.roundNumber() + ")",
             Map.of("courseId", input.courseId(), "historySize", input.conversationHistory().size()));
 
-        return chatClient.prompt().messages(messages).stream().content()
+        var promptSpec = chatClient.prompt().messages(messages);
+        ToolCallback ragToolCallback = ctx.get("rag_tool");
+        if (ragToolCallback != null) {
+            promptSpec = promptSpec.toolCallbacks(ragToolCallback);
+        }
+        return promptSpec.stream().chatResponse()
             .doFinally(signalType -> {
                 long elapsed = System.currentTimeMillis() - start;
                 ctx.observation().onResponse(name(),
@@ -228,45 +242,88 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
     }
 
     // ================================================================
-    // Resource generation intent detection (v3.1)
+    // Resource generation intent detection (v4.0 — LLM-based)
     // ================================================================
 
     /**
-     * Detect whether the user's latest message expresses intent to generate resources.
-     * Returns null if no intent detected, otherwise returns parsed requirements.
+     * LLM determines IF user wants generation (boolean), then keyword extraction
+     * handles types/focus/quantity for precision.
      */
-    public GenerationIntent detectGenerationIntent(String userMessage) {
+    public GenerationIntent detectGenerationIntent(String userMessage,
+                                                    List<Map<String, String>> conversationHistory) {
         if (userMessage == null || userMessage.isBlank()) return null;
 
-        String lower = userMessage.toLowerCase().trim();
+        // Build conversation context for LLM decision
+        StringBuilder context = new StringBuilder();
+        if (conversationHistory != null) {
+            int start = Math.max(0, conversationHistory.size() - 6);
+            for (int i = start; i < conversationHistory.size(); i++) {
+                var msg = conversationHistory.get(i);
+                String role = msg.getOrDefault("role", "");
+                String content = msg.getOrDefault("content", "");
+                if ("user".equals(role)) context.append("学生: ").append(content).append("\n");
+                else if ("assistant".equals(role)) context.append("老师: ").append(content).append("\n");
+            }
+        }
 
-        // Skip system-generated confirmation messages (e.g. 确认生成「xxx」)
+        String prompt = """
+            判断学生是否在表示想要生成学习资源。只需返回 true 或 false。
+            true 的例子：说"生成资料"、"做练习题"、"帮我创建"、"全部"、回应老师建议时说"好/行/可以/嗯/对/开始"
+            false 的例子：问知识点、拒绝（含不/不用）、日常聊天、回答画像问题
+            只输出 true 或 false，不要其他内容。
+            """;
+
+        try {
+            String response = chatClient.prompt()
+                .messages(
+                    new SystemMessage(prompt),
+                    new UserMessage(context.length() > 0 ? context.toString() : userMessage))
+                .call().content();
+
+            boolean wantsGen = response != null && (response.trim().equals("true") ||
+                response.trim().toLowerCase().startsWith("true"));
+
+            if (!wantsGen) return null;
+
+            // LLM says YES — use keyword extraction for precise types/focus/quantity
+            var prefs = keywordExtractPreferences(userMessage);
+
+            log.info("GenIntent detected (LLM=true), prefs={}", prefs);
+            return new GenerationIntent(true, prefs);
+
+        } catch (Exception e) {
+            log.warn("LLM intent detection failed, using keyword fallback: {}", e.getMessage());
+            GenerationIntent fallback = keywordDetectGenerationIntent(userMessage);
+            if (fallback != null) log.info("GenIntent detected (keyword fallback), prefs={}", fallback.preferences());
+            return fallback;
+        }
+    }
+
+    /** Keyword-based fallback for when LLM call fails */
+    private GenerationIntent keywordDetectGenerationIntent(String userMessage) {
+        String lower = userMessage.toLowerCase().trim();
         if (lower.startsWith("确认生成") && lower.contains("「")) return null;
 
-        // Quick positive indicators
         boolean hasPositive = lower.contains("生成") || lower.contains("创建") ||
             lower.contains("做") || lower.contains("要") || lower.contains("可以") ||
             lower.contains("好") || lower.contains("行") || lower.contains("嗯") ||
             lower.contains("对") || lower.contains("是") || lower.contains("开始") ||
-            lower.contains("来") || lower.contains("帮") || lower.contains("给");
+            lower.contains("来") || lower.contains("帮") || lower.contains("给") ||
+            lower.contains("全部") || lower.contains("所有");
 
-        // Quick negative indicators
         boolean hasNegative = lower.contains("不") || lower.contains("不要") ||
             lower.contains("不用") || lower.contains("算了") || lower.contains("等等") ||
             lower.contains("先不") || lower.contains("暂") || lower.contains("再说");
 
         if (!hasPositive || hasNegative) return null;
 
-        // Extract specific resource preferences from the message
-        var preferences = extractResourcePreferences(lower);
-        return new GenerationIntent(true, preferences);
+        var prefs = keywordExtractPreferences(lower);
+        return new GenerationIntent(true, prefs);
     }
 
-    /** Extract resource type and focus preferences from user message */
-    private Map<String, Object> extractResourcePreferences(String message) {
+    /** Keyword-based preference extraction fallback */
+    private Map<String, Object> keywordExtractPreferences(String message) {
         Map<String, Object> prefs = new java.util.LinkedHashMap<>();
-
-        // Detect resource types mentioned
         java.util.List<String> requestedTypes = new java.util.ArrayList<>();
         if (message.contains("文档") || message.contains("讲解") || message.contains("讲义")) requestedTypes.add("doc");
         if (message.contains("题") || message.contains("练习") || message.contains("习题")) requestedTypes.add("quiz");
@@ -274,16 +331,19 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
         if (message.contains("代码") || message.contains("编程") || message.contains("实操")) requestedTypes.add("code");
         if (message.contains("阅读") || message.contains("拓展") || message.contains("资料")) requestedTypes.add("reading");
         if (!requestedTypes.isEmpty()) prefs.put("requestedTypes", requestedTypes);
-
-        // Detect focus areas
         if (message.contains("基础") || message.contains("入门")) prefs.put("focus", "foundation");
         if (message.contains("进阶") || message.contains("深入") || message.contains("高级")) prefs.put("focus", "advanced");
         if (message.contains("考试") || message.contains("复习") || message.contains("应试")) prefs.put("focus", "exam");
-
-        // Detect quantity
-        if (message.contains("全部") || message.contains("所有") || message.contains("5") || message.contains("五")) prefs.put("quantity", "all");
-        else if (message.contains("先") || message.contains("一个") || message.contains("一种") || message.contains("试试")) prefs.put("quantity", "one");
-
+        if (message.contains("全部") || message.contains("所有") || message.contains("5") || message.contains("五")) {
+            prefs.put("quantity", "all");
+            if (requestedTypes.isEmpty()) {
+                requestedTypes.addAll(java.util.List.of("doc", "quiz", "mindmap", "code", "reading"));
+                prefs.put("requestedTypes", requestedTypes);
+            }
+            if (!prefs.containsKey("focus")) prefs.put("focus", "all");
+        } else if (message.contains("先") || message.contains("一个") || message.contains("一种") || message.contains("试试")) {
+            prefs.put("quantity", "one");
+        }
         return prefs;
     }
 
@@ -332,13 +392,7 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
                 + "你可以选几项，或者说\"全部\"～";
         }
 
-        if (!prefs.containsKey("focus")) {
-            return (courseName != null && !courseName.isBlank()
-                ? "明白了，针对《" + courseName + "》，你希望侧重基础入门还是进阶深入？或者有考试复习的需求？"
-                : "明白了！你希望侧重基础入门还是进阶深入？或者有考试复习的需求？");
-        }
-
-        // Requirements are clear enough — confirm and trigger
+        // Types specified → ready to confirm
         return null; // null means "ready to trigger"
     }
 
