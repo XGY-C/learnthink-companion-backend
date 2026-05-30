@@ -1,14 +1,15 @@
 package com.learnthink.core.agent.impl.generators;
 
-import com.learnthink.core.agent.framework.AgentContext;
+import com.learnthink.core.agent.impl.AutonomousGenerator;
+import com.learnthink.core.agent.impl.RagTool;
+import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
-import org.springframework.ai.openai.OpenAiChatOptions;
 import com.learnthink.core.config.PromptLoader;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
@@ -17,88 +18,101 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 @Component
-public class ExerciseGenerator implements TypeGenerator {
+public class ExerciseGenerator extends AutonomousGenerator implements TypeGenerator {
 
-    private static final Logger log = LoggerFactory.getLogger(ExerciseGenerator.class);
-    private final ChatClient chatClient;
     private final PromptLoader promptLoader;
 
-    public ExerciseGenerator(@Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
-                             PromptLoader promptLoader) {
-        this.chatClient = chatClientBuilder.defaultOptions(OpenAiChatOptions.builder().temperature(0.3).build()).build();
+    public ExerciseGenerator(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
+            RagTool ragTool, PromptLoader promptLoader) {
+        super(chatClientBuilder.defaultOptions(OpenAiChatOptions.builder().temperature(0.3).build()).build(),
+            List.of(), ragTool);
         this.promptLoader = promptLoader;
     }
 
-    @Override
-    public String type() { return "quiz"; }
+    @Override public String type() { return "quiz"; }
 
     @Override
     public ResourceGenerationState.GeneratedContent generate(
-        ResourceGenerationState.ResourcePlanItem item,
-        List<ResourceGenerationState.SourceItem> sources,
-        ResourceGenerationState.ProfileSummary profile,
-        boolean forceLowConfidence,
-        String reviewFeedback,
-        AgentContext context) {
+            ResourceGenerationState.ResourcePlanItem item,
+            List<ResourceGenerationState.SourceItem> typeSources,
+            ResourceGenerationState.ProfileSummary profile,
+            boolean forceLowConfidence, String reviewFeedback, AgentContext ctx) {
 
-        String sourcesText = sources.stream()
-            .map(s -> {
-                String book = s.bookTitle() != null && !s.bookTitle().isBlank() ? "《" + s.bookTitle() + "》" : "";
-                String chapter = s.chapterTitle() != null && !s.chapterTitle().isBlank() ? s.chapterTitle() : "";
-                String tag = book + chapter;
-                String ref = tag.isBlank() ? s.docId() : tag;
-                return String.format("[%s] %s — %s", ref, s.quote(), s.locator());
-            })
-            .collect(Collectors.joining("\n"));
+        GenerationTask task = new GenerationTask("ExerciseGenerator", "quiz", item.title(), item.title(),
+            item.keyPoints(), item.difficulty(), item.personalizationNote(),
+            profile != null ? profile.style() : List.of(),
+            profile != null ? profile.weakTop() : List.of(),
+            reviewFeedback, typeSources);
 
-        String systemPrompt = promptLoader.get("generator/exercise")
-            .replace("{personalization_note}", item.personalizationNote())
-            .replace("{weakTop}", profile != null ? String.join("、", profile.weakTop()) : "");
+        GenerationResult result = runAutonomousLoop(task, ctx);
+        if (result.content() == null) throw new RuntimeException("Exercise generation failed");
 
-        if (reviewFeedback != null) {
-            systemPrompt += "\n\nCORRECTION REQUIRED: " + reviewFeedback;
-        }
-
-        String content = chatClient.prompt()
-            .messages(new SystemMessage(systemPrompt),
-                new UserMessage(String.format("Topic: %s\nKey points: %s\nSources:\n%s",
-                    item.title(), String.join(", ", item.keyPoints()), sourcesText)))
-            .call()
-            .content();
-
-        return new ResourceGenerationState.GeneratedContent(
-            item.title(), content, "application/json", sources,
-            forceLowConfidence ? "low" : "high",
-            Map.of("generator", "ExerciseGenerator", "sourceCount", sources.size())
-        );
+        return new ResourceGenerationState.GeneratedContent(item.title(), result.content(),
+            "application/json", result.sources(),
+            result.confidence() >= 0.8 ? "high" : result.confidence() >= 0.5 ? "medium" : "low",
+            Map.of("generator", "ExerciseGenerator", "autonomous", true, "confidence", result.confidence()));
     }
 
     @Override
     public ResourceGenerationState.GeneratedContent revise(
-        ResourceGenerationState.ResourcePlanItem item,
-        List<ResourceGenerationState.SourceItem> sources,
-        ResourceGenerationState.ProfileSummary profile,
-        boolean forceLowConfidence,
-        String reviewFeedback,
-        ResourceGenerationState.GeneratedContent original,
-        AgentContext context) {
+            ResourceGenerationState.ResourcePlanItem item,
+            List<ResourceGenerationState.SourceItem> typeSources,
+            ResourceGenerationState.ProfileSummary profile,
+            boolean forceLowConfidence, String reviewFeedback,
+            ResourceGenerationState.GeneratedContent original, AgentContext ctx) {
+        String sp = getGenPrompt(item, profile) + "\n\n## 修改要求\n" + reviewFeedback;
+        String um = "需修改的题目：\n" + (original.content() != null ? original.content().substring(0, Math.min(2000, original.content().length())) : "");
+        String content = chatClient.prompt().messages(new SystemMessage(sp), new UserMessage(um)).call().content();
+        log.info("[AI-RESPONSE][ExerciseGenerator] revise length={} chars\n{}",
+            content != null ? content.length() : 0,
+            content != null ? content.substring(0, Math.min(2000, content.length())) : "null");
+        return new ResourceGenerationState.GeneratedContent(item.title(), content, "application/json", typeSources,
+            forceLowConfidence ? "low" : "high", Map.of("generator", "ExerciseGenerator", "revised", true));
+    }
 
-        String systemPrompt = promptLoader.get("generator/exercise")
+    @Override protected String doGenerate(GenerationTask task, List<ResourceGenerationState.SourceItem> sources, AgentContext ctx) {
+        return chatClient.prompt()
+            .messages(new SystemMessage(getGenerationSystemPrompt(task, sources)),
+                      new UserMessage(buildUserMsg(task, sources)))
+            .toolCallbacks(buildRagCallback(ctx))
+            .call().content();
+    }
+
+    @Override protected String doRevise(GenerationTask task, List<ResourceGenerationState.SourceItem> sources,
+                                          String current, String feedback, AgentContext ctx) {
+        return chatClient.prompt()
+            .messages(new SystemMessage(getGenerationSystemPrompt(task, sources) + "\n\n## 修改\n" + feedback),
+                      new UserMessage("需修改：\n" + (current.length() > 2000 ? current.substring(0, 2000) + "..." : current)))
+            .toolCallbacks(buildRagCallback(ctx))
+            .call().content();
+    }
+
+    private ToolCallback buildRagCallback(AgentContext ctx) {
+        if (ragTool == null) return null;
+        return new com.learnthink.core.agent.impl.RagToolCallback(ragTool, ctx.courseId(), null, null);
+    }
+
+    @Override protected String getSelfReviewSystemPrompt(String t) { return promptLoader.get("agent/self_review_quiz"); }
+    @Override protected boolean shouldRetrieveMore(GenerationTask t, List<ResourceGenerationState.SourceItem> s) { return s.size() < 3; }
+    @Override protected String getGenerationSystemPrompt(GenerationTask task, List<ResourceGenerationState.SourceItem> sources) {
+        return getGenPrompt(task);
+    }
+
+    private String getGenPrompt(GenerationTask task) {
+        return promptLoader.get("generator/exercise")
+            .replace("{personalization_note}", task.personalizationNote() != null ? task.personalizationNote() : "")
+            .replace("{weakTop}", task.weakTop() != null ? String.join("、", task.weakTop()) : "");
+    }
+    private String getGenPrompt(ResourceGenerationState.ResourcePlanItem item, ResourceGenerationState.ProfileSummary profile) {
+        return promptLoader.get("generator/exercise")
             .replace("{personalization_note}", item.personalizationNote())
             .replace("{weakTop}", profile != null ? String.join("、", profile.weakTop()) : "");
-        systemPrompt += "\n\n## 修改要求\n请根据以下问题修改练习题，保持 JSON 格式不变。只修改被指出的题目。" + reviewFeedback;
-
-        String userMsg = "需修改的题目：\n" + (original.content() != null ? original.content().substring(0, Math.min(2000, original.content().length())) : "");
-
-        String content = chatClient.prompt()
-            .messages(new SystemMessage(systemPrompt), new UserMessage(userMsg))
-            .call()
-            .content();
-
-        return new ResourceGenerationState.GeneratedContent(
-            item.title(), content, "application/json", sources,
-            forceLowConfidence ? "low" : "high",
-            Map.of("generator", "ExerciseGenerator", "revised", true)
-        );
+    }
+    private String buildUserMsg(GenerationTask task, List<ResourceGenerationState.SourceItem> sources) {
+        String st = sources.stream().map(s -> String.format("[%s] %s — %s",
+            (s.bookTitle() != null ? "《" + s.bookTitle() + "》" : "") + (s.chapterTitle() != null ? s.chapterTitle() : ""),
+            s.quote(), s.locator())).collect(Collectors.joining("\n"));
+        return String.format("Topic: %s\nKey points: %s\nSources:\n%s", task.title(), String.join(", ", task.keyPoints()), st);
     }
 }

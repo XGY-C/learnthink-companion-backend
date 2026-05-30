@@ -18,16 +18,16 @@ import java.math.RoundingMode;
 import java.util.*;
 
 /**
- * Anchors free-text profile dimension labels to structured course knowledge points.
+ * 将自由文本的画像维度标签锚定到结构化的课程知识点。
  *
- * <h3>Matching pipeline (tried in order):</h3>
+ * <h3>匹配流水线（按顺序尝试）：</h3>
  * <ol>
- *   <li>Exact keyword match: label ∈ KP.keywords[] → confidence 0.95</li>
- *   <li>Fuzzy text match: Levenshtein + Chinese token intersection → threshold 0.75</li>
- *   <li>Unmatched labels → scope=extracurricular, confidence=0.50</li>
+ *   <li>精确关键词匹配：标签 ∈ KP.keywords[] → 置信度 0.95</li>
+ *   <li>模糊文本匹配：Levenshtein + 中文分词交集 → 阈值 0.75</li>
+ *   <li>未匹配标签 → 作用域=课外，置信度=0.50</li>
  * </ol>
  * <p>
- * Embedding similarity matching (BGE-M3) is a future enhancement.
+ * 嵌入相似度匹配（BGE-M3）是未来的增强方向。
  */
 @Service
 public class KpAnchorService {
@@ -59,7 +59,7 @@ public class KpAnchorService {
                                          List<Map<String, Object>> dimensions) {
         log.info("KP anchoring started: profileVersionId={}, courseId={}", profileVersionId, courseId);
 
-        // Load all KPs for this course
+        // 加载该课程的所有知识点
         List<CourseKnowledgePoint> allKps = kpMapper.selectList(
             new LambdaQueryWrapper<CourseKnowledgePoint>()
                 .eq(CourseKnowledgePoint::getCourseId, courseId));
@@ -69,11 +69,11 @@ public class KpAnchorService {
             log.warn("No KPs defined for course {}, all labels will be marked extracurricular", courseId);
         }
 
-        // Extract all labels from dimensions
+        // 从维度中提取所有标签
         List<LabelToAnchor> labels = extractLabels(dimensions);
         log.info("Extracted {} labels from dimensions", labels.size());
 
-        // Match each label
+        // 匹配每个标签
         List<ProfileKpAnchor> anchors = new ArrayList<>();
         int coreCount = 0, preCount = 0, suppCount = 0, extraCount = 0;
 
@@ -90,10 +90,21 @@ public class KpAnchorService {
             }
         }
 
-        // Batch save
+        // 批量保存（去重：同一 (profile_version_id, kp_id, dimension_key, relation_type) 只保留首次匹配）
         if (!anchors.isEmpty()) {
+            Set<String> seen = new HashSet<>();
+            int skipped = 0;
             for (ProfileKpAnchor a : anchors) {
+                String dedupKey = a.getProfileVersionId() + "|" + a.getKpId() + "|"
+                    + a.getDimensionKey() + "|" + a.getRelationType();
+                if (!seen.add(dedupKey)) {
+                    skipped++;
+                    continue;
+                }
                 anchorMapper.insert(a);
+            }
+            if (skipped > 0) {
+                log.info("KP anchoring dedup: skipped {} duplicate anchors", skipped);
             }
         }
 
@@ -110,7 +121,7 @@ public class KpAnchorService {
         String text = label.labelText().toLowerCase().trim();
         if (text.isEmpty()) return null;
 
-        // Step 1: Exact keyword match
+        // 第一步：精确关键词匹配
         for (CourseKnowledgePoint kp : allKps) {
             List<String> keywords = parseJsonArray(kp.getKeywords());
             for (String kw : keywords) {
@@ -120,7 +131,7 @@ public class KpAnchorService {
             }
         }
 
-        // Step 2: Fuzzy match against KP name and keywords
+        // 第二步：对知识点名称和关键词进行模糊匹配
         CourseKnowledgePoint bestMatch = null;
         double bestScore = 0;
         for (CourseKnowledgePoint kp : allKps) {
@@ -138,7 +149,7 @@ public class KpAnchorService {
             return buildAnchor(profileVersionId, bestMatch, label, conf, "fuzzy");
         }
 
-        // Step 3: Extracurricular (no match in KP tree)
+        // 第三步：课外（在知识点树中无匹配）
         return buildExtracurricularAnchor(profileVersionId, label);
     }
 
@@ -146,10 +157,10 @@ public class KpAnchorService {
      * Fuzzy match: Levenshtein ratio + Chinese bigram overlap.
      */
     private double fuzzyMatch(String text, CourseKnowledgePoint kp) {
-        // Compare against KP name
+        // 与知识点名称比较
         double nameScore = similarity(text, kp.getName().toLowerCase().trim());
 
-        // Compare against keywords
+        // 与关键词比较
         List<String> keywords = parseJsonArray(kp.getKeywords());
         double maxKwScore = 0;
         for (String kw : keywords) {
@@ -169,7 +180,7 @@ public class KpAnchorService {
 
         double levenshtein = 1.0 - (double) levenshteinDistance(a, b) / Math.max(a.length(), b.length());
 
-        // Chinese bigram overlap
+        // 中文二元组重叠度
         Set<String> bigramsA = bigrams(a);
         Set<String> bigramsB = bigrams(b);
         double bigramOverlap;
@@ -274,7 +285,7 @@ public class KpAnchorService {
         Object raw = value.get(field);
         if (raw instanceof List<?> list) {
             for (Object item : list) {
-                // Handle both plain strings and {label, kp_id, ...} objects
+                // 处理纯字符串和 {label, kp_id, ...} 对象两种格式
                 String text;
                 if (item instanceof String s) {
                     text = s;

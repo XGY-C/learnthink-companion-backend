@@ -2,7 +2,7 @@ package com.learnthink.core.agent.impl;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.learnthink.core.agent.framework.*;
+import com.learnthink.core.agent.runtime.*;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import com.learnthink.core.config.PromptLoader;
 import org.slf4j.Logger;
@@ -20,23 +20,23 @@ import java.util.Map;
 import reactor.core.publisher.Flux;
 
 /**
- * Conversation agent for profile-building dialogue.
+ * 用于画像构建对话的对话智能体。
  *
- * <h3>Design (from 05-画像对话 v3.0):</h3>
+ * <h3>设计（来自 05-画像对话 v3.0）：</h3>
  * <ul>
- *   <li>L3 Judgment-level autonomy: decides when enough information has been collected</li>
- *   <li>Intelligent sufficiency evaluation via structured confidence scoring (NOT string matching)</li>
- *   <li>Returns chat reply first (non-blocking), then async triggers ProfileAnalyzer</li>
- *   <li>Plan-Act-Observe-Reflect loop per conversation turn</li>
+ *   <li>L3 判断级自主性：决定何时已收集足够信息</li>
+ *   <li>通过结构化置信度评分进行智能充足性评估（而非字符串匹配）</li>
+ *   <li>先返回聊天回复（非阻塞），然后异步触发 ProfileAnalyzer</li>
+ *   <li>每次对话轮次执行 Plan-Act-Observe-Reflect 循环</li>
  * </ul>
  *
- * <h3>Key difference from ChatServiceImpl:</h3>
- * <p>ChatServiceImpl was a standalone service calling ChatClient directly.
- * ConversationAgent is an Agent running on the StateGraph engine, sharing AgentContext
- * with other agents, and pushing thinking chain events via Observation.</p>
+ * <h3>与 ChatServiceImpl 的关键区别：</h3>
+ * <p>ChatServiceImpl 是直接调用 ChatClient 的独立服务。
+ * ConversationAgent 是运行在 StateGraph 引擎上的智能体，与其他智能体共享 AgentContext，
+ * 并通过 Observation 推送思维链事件。</p>
  */
 @Component
-public class ConversationAgent implements Agent<ConversationAgent.ConversationInput, ConversationAgent.ConversationOutput> {
+public class ConversationAgent {
 
     private static final Logger log = LoggerFactory.getLogger(ConversationAgent.class);
     private final ChatClient chatClient;
@@ -49,26 +49,23 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
         this.promptLoader = promptLoader;
     }
 
-    @Override
     public String name() { return "ConversationAgent"; }
 
-    @Override
     public boolean isRetryable() { return false; }
 
     // ================================================================
-    // Plan-Act-Observe-Reflect loop (per conversation turn)
+    // 计划-执行-观察-反思循环（每次对话轮次）
     // ================================================================
 
-    @Override
     public AgentResult<ConversationOutput> execute(ConversationInput input, AgentContext ctx) {
         Instant start = Instant.now();
 
-        // === PLAN ===
+        // === 计划 ===
         ctx.observation().onPrompt(name(),
-            "Evaluating conversation state (round " + input.roundNumber() + ")",
+            "评估对话状态（第 " + input.roundNumber() + " 轮）",
             Map.of("courseId", input.courseId(), "historySize", input.conversationHistory().size()));
 
-        // Step 1: Generate reply with optional tool (ReAct)
+        // 步骤1：生成回复并可选使用工具（ReAct）
         String systemPrompt = input.systemPromptOverride() != null && !input.systemPromptOverride().isBlank()
             ? input.systemPromptOverride()
             : promptLoader.get("agent/conversation");
@@ -79,29 +76,36 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
         if (ragToolCallback != null) {
             promptSpec = promptSpec.toolCallbacks(ragToolCallback);
         }
+        ToolCallback bookInfoToolCallback = ctx.get("book_info_tool");
+        if (bookInfoToolCallback != null) {
+            promptSpec = promptSpec.toolCallbacks(bookInfoToolCallback);
+        }
         String reply = promptSpec.call().content();
+        log.info("[AI-RESPONSE][ConversationAgent] execute reply length={} chars\n{}",
+            reply != null ? reply.length() : 0,
+            reply != null ? reply.substring(0, Math.min(2000, reply.length())) : "null");
 
-        // === ACT ===
-        ctx.observation().onResponse(name(), "Reply generated (" + reply.length() + " chars)",
+        // === 执行 ===
+        ctx.observation().onResponse(name(), "已生成回复（" + reply.length() + " 字）",
             java.time.Duration.between(start, Instant.now()).toMillis(), AgentResult.TokenUsage.ZERO);
 
-        // Step 2: Evaluate sufficiency (structured confidence scoring)
+        // 步骤2：评估充足性（结构化置信度评分）
         SufficiencyResult sufficiency = evaluateSufficiency(input.conversationHistory());
 
-        // === OBSERVE ===
+        // === 观察 ===
         ctx.observation().onDecision(name(),
             sufficiency.sufficient() ? "SUFFICIENT" : "CONTINUE",
-            "Covered " + sufficiency.coveredCount() + "/7 dimensions, confidence=" + sufficiency.overallConfidence());
+            "已覆盖 " + sufficiency.coveredCount() + "/7 个维度，置信度=" + sufficiency.overallConfidence());
 
-        // Store in context for OrchestratorAgent
+        // 存储到上下文中供 OrchestratorAgent 使用
         ctx.put("profile.sufficient", sufficiency.sufficient());
         ctx.put("profile.covered_count", sufficiency.coveredCount());
         ctx.put("profile.confidence", sufficiency.overallConfidence());
         ctx.put("profile.missing_dimensions", sufficiency.missingDimensions());
 
-        // === REFLECT ===
-        // (L3 judgment: the agent itself decides whether to end the conversation)
-        // Reflection is captured in the observation above
+        // === 反思 ===
+        // （L3 判断：智能体自身决定是否结束对话）
+        // 反思已捕获在上述观察中
 
         long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
         ConversationOutput output = new ConversationOutput(reply, sufficiency);
@@ -111,14 +115,14 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
     }
 
     // ================================================================
-    // Streaming reply (true streaming, returns Flux<String>)
+    // 流式回复（真正的流式，返回 Flux<String>）
     // ================================================================
 
     /**
-     * Stream the LLM reply token-by-token with optional tool access.
-     * Emits {@link ChatResponse} objects so the caller can observe tool calls
-     * and emit intermediate SSE events (RETRIEVE/RAG thought events).
-     * Does NOT evaluate sufficiency — that happens post-stream in ChatServiceImpl.
+     * 逐令牌流式传输 LLM 回复，支持可选的工具访问。
+     * 发射 {@link ChatResponse} 对象，以便调用者可以观察工具调用
+     * 并发出中间 SSE 事件（RETRIEVE/RAG 思考事件）。
+     * 不评估充足性——这会在 ChatServiceImpl 中的流结束后进行。
      */
     public Flux<ChatResponse> streamReply(ConversationInput input, AgentContext ctx) {
         String systemPrompt = input.systemPromptOverride() != null && !input.systemPromptOverride().isBlank()
@@ -127,7 +131,7 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
         List<Message> messages = buildMessages(systemPrompt, input.conversationHistory());
 
         long start = System.currentTimeMillis();
-        ctx.observation().onPrompt(name(), "Streaming reply generation (round " + input.roundNumber() + ")",
+        ctx.observation().onPrompt(name(), "流式生成回复（第 " + input.roundNumber() + " 轮）",
             Map.of("courseId", input.courseId(), "historySize", input.conversationHistory().size()));
 
         var promptSpec = chatClient.prompt().messages(messages);
@@ -135,41 +139,45 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
         if (ragToolCallback != null) {
             promptSpec = promptSpec.toolCallbacks(ragToolCallback);
         }
+        ToolCallback bookInfoToolCallback = ctx.get("book_info_tool");
+        if (bookInfoToolCallback != null) {
+            promptSpec = promptSpec.toolCallbacks(bookInfoToolCallback);
+        }
         return promptSpec.stream().chatResponse()
             .doFinally(signalType -> {
                 long elapsed = System.currentTimeMillis() - start;
                 ctx.observation().onResponse(name(),
-                    "Stream complete (" + elapsed + "ms)", elapsed, AgentResult.TokenUsage.ZERO);
+                    "流式回复完成（" + elapsed + "ms）", elapsed, AgentResult.TokenUsage.ZERO);
             });
     }
 
     // ================================================================
-    // Sufficiency evaluation (structured confidence scoring)
-    // Replaces the fragile [PROFILE_READY] string-marker approach
+    // 充足性评估（结构化置信度评分）
+    // 替换脆弱的 [PROFILE_READY] 字符串标记方法
     // ================================================================
 
     public SufficiencyResult evaluateSufficiency(List<Map<String, String>> conversationHistory) {
         String evalPrompt = """
-            Evaluate the conversation for student profile coverage.
-            Score each dimension 0-1:
-              - 0: completely unmentioned
-              - 0.3-0.5: indirectly inferred
-              - 0.6-0.8: explicitly mentioned but vague
-              - 0.9-1.0: explicitly and clearly stated
+            评估对话对学生画像的覆盖程度。
+            对每个维度评分 0-1：
+              - 0：完全未提及
+              - 0.3-0.5：间接推断
+              - 0.6-0.8：明确提及但较模糊
+              - 0.9-1.0：明确且清晰地陈述
 
-            Dimensions:
-            1. major_context — major, course, current chapter
-            2. knowledge_basis — strengths and weaknesses
-            3. learning_goal — target, deadline, sub-goals
-            4. cognitive_style — preferred learning methods, things to avoid
-            5. learning_pace — minutes per day, days per week, urgency
-            6. interest_direction — topics of interest, applications
-            7. error_pattern — common mistake types
+            维度：
+            1. major_context — 专业、课程、当前章节
+            2. knowledge_basis — 知识薄弱点与优势
+            3. learning_goal — 学习目标、截止日期、子目标
+            4. cognitive_style — 偏好的学习方式、应避免的内容
+            5. learning_pace — 每天分钟数、每周天数、紧迫程度
+            6. interest_direction — 感兴趣的话题与应用方向
+            7. error_pattern — 常见错误类型
 
-            Output strict JSON:
+            输出严格的 JSON：
             {
               "dimensions": {
-                "major_context": {"score": 0.9, "evidence": "brief quote"},
+                "major_context": {"score": 0.9, "evidence": "简短引用"},
                 ...
               },
               "covered_count": 4,
@@ -178,7 +186,7 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
               "suggested_question": "..."
             }
 
-            Rule: sufficient = covered_count >= 4 AND all covered dimensions score >= 0.7
+            规则：sufficient = covered_count >= 4 且所有已覆盖维度评分 >= 0.7
             """;
 
         try {
@@ -195,11 +203,15 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
                 .messages(new SystemMessage(evalPrompt), new UserMessage(transcript.toString()))
                 .call().content();
 
-            // Parse structured JSON — strip markdown code fences robustly
+            log.info("[AI-RESPONSE][ConversationAgent] evaluateSufficiency length={} chars\n{}",
+                response != null ? response.length() : 0,
+                response != null ? response.substring(0, Math.min(1500, response.length())) : "null");
+
+            // LLM 输出可能包裹 markdown 代码围栏，需鲁棒去除
             String json = response;
             int fenceStart = json.indexOf("```");
             if (fenceStart >= 0) {
-                // Skip the opening ``` and optional language tag (e.g. ```json, ```python)
+                // 跳过开头的 ``` 及可选的语言标签（如 json、python）
                 int contentStart = json.indexOf('\n', fenceStart);
                 if (contentStart < 0) contentStart = fenceStart + 3;
                 else contentStart = contentStart + 1;
@@ -209,7 +221,7 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
                 }
             }
             json = json.trim();
-            // If response is wrapped in text, isolate the JSON object
+            // 若响应嵌在文本中，仅提取 JSON 对象
             int braceStart = json.indexOf('{');
             int braceEnd = json.lastIndexOf('}');
             if (braceStart >= 0 && braceEnd > braceStart) {
@@ -236,24 +248,24 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
             return new SufficiencyResult(sufficient, coveredCount, overallConfidence, missing, suggested);
 
         } catch (Exception e) {
-            log.warn("Sufficiency evaluation failed, defaulting to CONTINUE: {}", e.getMessage());
+            log.warn("充足性评估失败，默认继续对话：{}", e.getMessage());
             return new SufficiencyResult(false, 0, 0, List.of(), "");
         }
     }
 
     // ================================================================
-    // Resource generation intent detection (v4.0 — LLM-based)
+    // 资源生成功能检测（v4.0 — 基于 LLM）
     // ================================================================
 
     /**
-     * LLM determines IF user wants generation (boolean), then keyword extraction
-     * handles types/focus/quantity for precision.
+     * LLM 判断用户是否想要生成资源（布尔值），然后关键词提取
+     * 处理类型/重点/数量以提高精度。
      */
     public GenerationIntent detectGenerationIntent(String userMessage,
                                                     List<Map<String, String>> conversationHistory) {
         if (userMessage == null || userMessage.isBlank()) return null;
 
-        // Build conversation context for LLM decision
+        // 构建对话上下文供 LLM 决策
         StringBuilder context = new StringBuilder();
         if (conversationHistory != null) {
             int start = Math.max(0, conversationHistory.size() - 6);
@@ -280,26 +292,29 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
                     new UserMessage(context.length() > 0 ? context.toString() : userMessage))
                 .call().content();
 
+            log.info("[AI-RESPONSE][ConversationAgent] detectGenerationIntent: {}",
+                response != null ? response.trim() : "null");
+
             boolean wantsGen = response != null && (response.trim().equals("true") ||
                 response.trim().toLowerCase().startsWith("true"));
 
             if (!wantsGen) return null;
 
-            // LLM says YES — use keyword extraction for precise types/focus/quantity
+            // LLM 说 YES —— 使用关键词提取获取精确的类型/重点/数量
             var prefs = keywordExtractPreferences(userMessage);
 
-            log.info("GenIntent detected (LLM=true), prefs={}", prefs);
+            log.info("检测到生成意图（LLM=true），偏好={}", prefs);
             return new GenerationIntent(true, prefs);
 
         } catch (Exception e) {
-            log.warn("LLM intent detection failed, using keyword fallback: {}", e.getMessage());
+            log.warn("LLM 意图检测失败，使用关键词后备方案：{}", e.getMessage());
             GenerationIntent fallback = keywordDetectGenerationIntent(userMessage);
-            if (fallback != null) log.info("GenIntent detected (keyword fallback), prefs={}", fallback.preferences());
+            if (fallback != null) log.info("检测到生成意图（关键词后备），偏好={}", fallback.preferences());
             return fallback;
         }
     }
 
-    /** Keyword-based fallback for when LLM call fails */
+    /** LLM 调用失败时的关键词后备方案 */
     private GenerationIntent keywordDetectGenerationIntent(String userMessage) {
         String lower = userMessage.toLowerCase().trim();
         if (lower.startsWith("确认生成") && lower.contains("「")) return null;
@@ -321,7 +336,7 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
         return new GenerationIntent(true, prefs);
     }
 
-    /** Keyword-based preference extraction fallback */
+    /** 基于关键词的偏好提取后备方案 */
     private Map<String, Object> keywordExtractPreferences(String message) {
         Map<String, Object> prefs = new java.util.LinkedHashMap<>();
         java.util.List<String> requestedTypes = new java.util.ArrayList<>();
@@ -348,7 +363,7 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
     }
 
     /**
-     * Generate a natural invitation to create resources, tailored to the student's profile.
+     * 根据学生的画像生成自然的资源创建邀请。
      */
     public String generateResourceOffer(SufficiencyResult sufficiency) {
         StringBuilder sb = new StringBuilder();
@@ -373,8 +388,8 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
     }
 
     /**
-     * Generate clarifying questions when user wants generation but hasn't specified requirements.
-     * @param courseName course display name (may be null if unknown)
+     * 当用户想要生成但未指定需求时，生成澄清问题。
+     * @param courseName 课程显示名称（如果未知可能为 null）
      */
     public String generateClarifyingQuestion(GenerationIntent intent, SufficiencyResult sufficiency,
                                               String courseName) {
@@ -392,23 +407,23 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
                 + "你可以选几项，或者说\"全部\"～";
         }
 
-        // Types specified → ready to confirm
-        return null; // null means "ready to trigger"
+        // 类型已指定 → 准备确认
+        return null; // null 表示"可以触发生成"
     }
 
     // ================================================================
-    // Topic resolution — intent → concrete topic
+    // 主题解析 — 意图 → 具体主题
     // ================================================================
 
     /**
-     * Resolve user's vague generation intent into a specific, retrievable topic.
-     * Uses conversation history + course name + profile dimensions to determine
-     * the actual knowledge topic (not the user's verbatim phrase).
+     * 将用户模糊的生成功能解析为具体的、可检索的主题。
+     * 使用对话历史 + 课程名称 + 画像维度来确定
+     * 实际的知识主题（而不是用户的原话）。
      */
     public String resolveTopic(String courseName,
                                 List<Map<String, String>> conversationHistory,
                                 Map<String, Object> profileDimensions) {
-        // Build conversation summary (last few exchanges, if any)
+        // 构建对话摘要（最近的几次交流，如果有的话）
         boolean hasConversation = conversationHistory != null && conversationHistory.size() >= 2;
         String convo;
         if (hasConversation) {
@@ -419,75 +434,76 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
                 sb.append(m.getOrDefault("role", "")).append(": ")
                     .append(m.getOrDefault("content", "")).append("\n");
             }
-            convo = "Recent conversation:\n" + sb.toString();
+            convo = "最近对话：\n" + sb.toString();
         } else {
-            convo = "The student requested resource generation for their course: " + courseName;
+            convo = "学生请求为课程生成资源：" + courseName;
         }
 
-        // Handle empty conversation: skip LLM call and use course-based fallback
+        // 如果没有对话且没有画像，跳过 LLM 调用并使用基于课程的后备方案
         if (!hasConversation && (profileDimensions == null || profileDimensions.isEmpty())) {
-            log.info("Topic resolution skipped (new chat, no profile) → defaulting to course name");
+            log.info("跳过主题解析（新对话，无画像）→ 默认使用课程名称");
             return courseName + "核心知识点";
         }
 
         String profileInfo = "";
         if (profileDimensions != null && !profileDimensions.isEmpty()) {
-            // Extract key profile fields
-            StringBuilder pi = new StringBuilder("Profile: ");
-            if (profileDimensions.containsKey("weak_top")) pi.append("weak areas: ").append(profileDimensions.get("weak_top")).append("; ");
-            if (profileDimensions.containsKey("goal")) pi.append("goal: ").append(profileDimensions.get("goal")).append("; ");
-            if (profileDimensions.containsKey("current_chapter")) pi.append("chapter: ").append(profileDimensions.get("current_chapter")).append("; ");
+            // 提取关键画像字段
+            StringBuilder pi = new StringBuilder("画像：");
+            if (profileDimensions.containsKey("weak_top")) pi.append("薄弱点：").append(profileDimensions.get("weak_top")).append("；");
+            if (profileDimensions.containsKey("goal")) pi.append("目标：").append(profileDimensions.get("goal")).append("；");
+            if (profileDimensions.containsKey("current_chapter")) pi.append("章节：").append(profileDimensions.get("current_chapter")).append("；");
             profileInfo = pi.toString();
         }
 
-        // Skip LLM call if no conversation AND no profile — use course name directly
+        // 如果没有对话且没有画像，跳过 LLM 调用——直接使用课程名称
         if (!hasConversation && profileInfo.isEmpty()) {
-            log.info("No conversation or profile data → default topic: {}核心知识点", courseName);
+            log.info("无对话或画像数据 → 默认主题：{}核心知识点", courseName);
             return courseName + "核心知识点";
         }
 
         String prompt = String.format("""
-            The student is taking course: %s
+            学生正在学习课程：%s
 
             %s
             %s
 
-            The student wants to generate learning resources. Determine the MOST SPECIFIC
-            topic that should be generated:
-            - Output ONLY the topic (2-20 Chinese characters)
-            - Be as specific as possible (concept or chapter, not course name)
-            - Never output meta-words like "学习资源", "该课程", "资源", "课程"
-            - If no clear topic can be determined, output the most likely chapter topic for this course
-            Topic:""",
+            学生想要生成学习资源。确定应生成的最具体主题：
+            - 仅输出主题（2-20 个汉字）
+            - 尽可能具体（概念或章节，而非课程名称）
+            - 切勿输出"学习资源""该课程""资源""课程"等元词汇
+            - 若无法确定明确主题，输出该课程最可能的章节主题
+            主题：""",
             courseName, convo, profileInfo);
 
         try {
             String topic = chatClient.prompt()
                 .messages(new SystemMessage(
-                    "Extract the specific knowledge topic the student wants to study. Output topic only, no explanation."),
+                    "提取学生想要学习的特定知识主题。仅输出主题，无需解释。"),
                     new UserMessage(prompt))
                 .call().content();
+            log.info("[AI-RESPONSE][ConversationAgent] resolveTopic raw: {}",
+                topic != null ? topic.trim() : "null");
             topic = topic != null ? topic.trim() : "";
             if (topic.length() > 40) topic = topic.substring(0, 40);
             if (topic.isEmpty() || topic.contains("学习资源") || topic.contains("该课程")) {
                 return courseName + "核心知识点";
             }
-            log.info("Topic resolved → \"{}\"", topic);
+            log.info("主题解析完成 → \"{}\"", topic);
             return topic;
         } catch (Exception e) {
-            log.warn("Topic resolution failed: {}", e.getMessage());
+            log.warn("主题解析失败：{}", e.getMessage());
             return courseName + "核心知识点";
         }
     }
 
     // ================================================================
-    // Data types
+    // 数据类型
     // ================================================================
 
     public record GenerationIntent(boolean wantsGeneration, Map<String, Object> preferences) {}
 
     // ================================================================
-    // helpers
+    // 辅助方法
     // ================================================================
 
     private List<Message> buildMessages(String systemPrompt, List<Map<String, String>> history) {
@@ -506,7 +522,7 @@ public class ConversationAgent implements Agent<ConversationAgent.ConversationIn
     }
 
     // ================================================================
-    // Data types
+    // 数据类型
     // ================================================================
 
     public record ConversationInput(

@@ -16,7 +16,11 @@ public class AgentThinkingTrace {
     @TableId(type = IdType.ASSIGN_UUID)
     private String id;
 
+    /** 任务ID（任务流使用，对话流场景可为空） */
     private String taskId;
+
+    /** 会话ID（对话流使用，引用 profile_chats.id） */
+    private String chatId;
 
     /** Agent 标识：Conversation / Profile / Retriever / Planner / Generator / Reviewer */
     private String agentName;
@@ -41,6 +45,9 @@ public class AgentThinkingTrace {
 
     /** high / medium / low */
     private String confidenceLevel;
+
+    /** 对应对话轮次（从 1 开始），用于历史消息重建思考链 */
+    private Integer roundNum;
 
     /** autonomous / response_to_agent / system_prompt */
     @TableField("`trigger`")

@@ -1,10 +1,9 @@
-package com.learnthink.core.agent.framework;
+package com.learnthink.core.agent.runtime;
 
-import java.util.List;
 import java.util.Map;
 
 /**
- * Structured result from an agent execution, carrying trace data for observability.
+ * Agent 执行的结构化结果，携带用于可观测性的追踪数据
  */
 public record AgentResult<O>(
     O output,
@@ -37,7 +36,7 @@ public record AgentResult<O>(
     }
 
     /**
-     * LLM token usage for this agent invocation.
+     * 本次 Agent 调用的 LLM Token 用量
      */
     public record TokenUsage(int promptTokens, int completionTokens, int totalTokens) {
         public static final TokenUsage ZERO = new TokenUsage(0, 0, 0);

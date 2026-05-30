@@ -1,6 +1,6 @@
 package com.learnthink.core.agent.impl;
 
-import com.learnthink.core.agent.framework.AgentContext;
+import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.impl.generators.*;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import org.junit.jupiter.api.Test;
@@ -110,7 +110,7 @@ class ContentReviewerTest {
         assertFalse(generators.get("video").requiresSourceCoverage(),
             "video should be exempt");
 
-        // Unknown types: null from map, ResourceGenerator would return false
+        // 未知类型：从 map 获取为 null，ResourceGenerator 将返回 false
         assertNull(generators.get("unknown"), "unknown type has no generator");
     }
 

@@ -1,11 +1,15 @@
 package com.learnthink.core.agent.orchestration;
 
-import com.learnthink.core.agent.framework.AgentContext;
-import com.learnthink.core.agent.framework.AgentResult;
+import com.learnthink.core.agent.runtime.AgentContext;
+import com.learnthink.core.agent.runtime.AgentObservation;
+import com.learnthink.core.agent.runtime.AgentResult;
 import com.learnthink.core.agent.graph.StateGraph;
 import com.learnthink.core.agent.graph.GraphRunner;
 import com.learnthink.core.agent.impl.*;
+import com.learnthink.core.agent.manager.AgentManager;
+import com.learnthink.core.agent.manager.GenerationChecklist;
 import com.learnthink.core.service.TaskPersistenceService;
+import com.learnthink.core.service.VideoRenderPoller;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,15 +19,21 @@ import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
- * The resource generation pipeline expressed as a {@link StateGraph}.
+ * 资源生成流水线，以 {@link StateGraph} 表达
  *
- * <h3>Graph topology (with feedback loops)</h3>
+ * <h3>图拓扑（含反馈循环）</h3>
  * <pre>
- *   PROFILING → RETRIEVING → PLANNING → GENERATING → REVIEWING → PUBLISHING
- *                                                     ↑        ↓
- *                                                     └────────┘ regenerate rejected
- *                                       ↑                      │
- *                                       └──────────────────────┘ replan on too many failures
+ *   聊天驱动路径：
+ *     PROFILING → RETRIEVING → PLANNING(LLM) → GENERATING → REVIEWING → PUBLISHING
+ *                                                       ↑        ↓
+ *                                                       └────────┘ 重新生成被拒绝内容
+ *                                         ↑                      │
+ *                                         └──────────────────────┘ 失败过多时重新规划
+ *
+ *   计划驱动路径（planContext != null）：
+ *     PROFILING → RETRIEVING → PLAN_DRIVEN(无 LLM) → GENERATING → REVIEWING → PUBLISHING
+ *                                                        ↑        ↓
+ *                                                        └────────┘ 重新生成被拒绝内容
  * </pre>
  */
 public class ResourceGenerationGraph {
@@ -41,8 +51,10 @@ public class ResourceGenerationGraph {
     private final ContentReviewer contentReviewer;
     private final Publisher publisher;
     private final TaskPersistenceService persistenceService;
+    private final AgentManager agentManager;
+    private final VideoRenderPoller videoRenderPoller;
     private final java.util.concurrent.ExecutorService generatorPool =
-        java.util.concurrent.Executors.newFixedThreadPool(5);
+        java.util.concurrent.Executors.newFixedThreadPool(20);
 
     public ResourceGenerationGraph(
         ProfileAnalyzer profileAnalyzer,
@@ -51,7 +63,9 @@ public class ResourceGenerationGraph {
         ResourceGenerator resourceGenerator,
         ContentReviewer contentReviewer,
         Publisher publisher,
-        TaskPersistenceService persistenceService
+        TaskPersistenceService persistenceService,
+        AgentManager agentManager,
+        VideoRenderPoller videoRenderPoller
     ) {
         this.profileAnalyzer = profileAnalyzer;
         this.evidenceRetriever = evidenceRetriever;
@@ -60,19 +74,23 @@ public class ResourceGenerationGraph {
         this.contentReviewer = contentReviewer;
         this.publisher = publisher;
         this.persistenceService = persistenceService;
+        this.agentManager = agentManager;
+        this.videoRenderPoller = videoRenderPoller;
     }
 
     public GraphRunner<ResourceGenerationState> build() {
         return StateGraph.<ResourceGenerationState>create(ResourceGenerationState.class)
-            .addNode("PROFILING", this::doProfiling, "Extract learning profile summary")
-            .addNode("RETRIEVING", this::doRetrieving, "Retrieve evidence from knowledge base")
-            .addNode("PLANNING", this::doPlanning, "Plan resource composition and outline")
-            .addNode("GENERATING", this::doGenerating, "Generate all resource types")
-            .addNode("REVIEWING", this::doReviewing, "Review generated content for quality and safety")
-            .addNode("PUBLISHING", this::doPublishing, "Persist approved resources")
+            .addNode("PROFILING", this::doProfiling, "提取学习画像摘要")
+            .addNode("RETRIEVING", this::doRetrieving, "从知识库检索证据")
+            .addNode("PLANNING", this::doPlanning, "规划资源结构和子主题")
+            .addNode("PLAN_DRIVEN", this::doPlanDriven, "跳过 LLM，使用预规划条目")
+            .addNode("GENERATING", this::doGenerating, "通过子生成器生成资源")
+            .addNode("REVIEWING", this::doReviewing, "审查生成内容质量")
+            .addNode("PUBLISHING", this::doPublishing, "发布已批准的资源")
             .addNode("FALLBACK", this::doFallback, "Generate with limited evidence (degraded mode)")
             .addEdge("PROFILING", "RETRIEVING")
             .addEdge("PLANNING", "GENERATING")
+            .addEdge("PLAN_DRIVEN", "GENERATING")
             .addConditionalEdge("FALLBACK", this::routeAfterFallback)
             .addConditionalEdge("RETRIEVING", this::routeAfterRetrieving)
             .addConditionalEdge("GENERATING", this::routeAfterGenerating)
@@ -84,7 +102,7 @@ public class ResourceGenerationGraph {
     }
 
     // ================================================================
-    // Node implementations
+    // 节点实现
     // ================================================================
 
     private ResourceGenerationState doProfiling(ResourceGenerationState s) {
@@ -111,6 +129,13 @@ public class ResourceGenerationGraph {
     }
 
     private ResourceGenerationState doRetrieving(ResourceGenerationState s) {
+        // 预定计划路径（聊天 items 或学习路径）：跳过集中检索，各生成器自行按需检索
+        if (s.planContext != null) {
+            s.retrieval = ResourceGenerationState.RetrievalData.empty();
+            advance(s, "RETRIEVING", 35, "Skipping central retrieval — each generator will retrieve as needed");
+            return s;
+        }
+
         log.info("=== RETRIEVING NODE START === topic={}, resourceTypes={}", s.topic, s.resourceTypes);
         advance(s, "RETRIEVING", 15, "Retrieving course evidence...");
         AgentContext ctx = buildContext(s);
@@ -169,19 +194,76 @@ public class ResourceGenerationGraph {
 
         var result = curriculumPlanner.plan(
             s.profileSummary, retrieval.mergedSources(), s.topic, s.resourceTypes,
-            feedback.planFeedback(), ctx);
+            feedback.planFeedback(), ctx, s.generationMeta);
         if (!result.success()) {
             log.error("Planning failed: {}", result.errorMessage());
             fail(s, "PLAN_ERROR", result.errorMessage(), false);
             return s;
         }
         s.planning = s.planning.withResourcePlan(result.output()).incrementRetry();
-        // Initialize sub-topic iteration for incremental publishing
+        // 初始化子主题迭代以支持增量发布
         int subTopicCount = result.output().subTopics().size();
         s.subTopicProgress = s.subTopicProgress.start(subTopicCount);
         log.info("Planning completed. SubTopics: {}, Items: {}", subTopicCount, result.output().items().size());
         advance(s, "PLANNING", 55,
             "Planned " + result.output().items().size() + " resources");
+        return s;
+    }
+
+    /**
+     * 直接从预规划条目构建资源计划——无需 LLM 调用。
+     * 每个 PrePlannedItem（对应一个 activity）可能包含多种资源类型，
+     * 每种类型创建一个 ResourcePlanItem，共享同一个 subTopicIndex 和 activityId。
+     */
+    private ResourceGenerationState doPlanDriven(ResourceGenerationState s) {
+        var preItems = s.planContext.items();
+        log.info("=== PLAN_DRIVEN NODE START === pre-planned items: {}", preItems.size());
+        advance(s, "PLAN_DRIVEN", 35, "Building resource plan from " + preItems.size() + " pre-planned activities...");
+
+        List<ResourceGenerationState.ResourcePlanItem> items = new ArrayList<>();
+        List<ResourceGenerationState.SubTopic> subTopics = new ArrayList<>();
+        int itemIdx = 0;
+
+        for (int piIdx = 0; piIdx < preItems.size(); piIdx++) {
+            var pi = preItems.get(piIdx);
+
+            // 每个 PrePlannedItem 作为一个子主题
+            subTopics.add(new ResourceGenerationState.SubTopic(
+                piIdx, pi.title(), pi.description(),
+                pi.knowledgePoints() != null ? pi.knowledgePoints() : List.of(),
+                pi.estimatedMinutes() > 0 ? pi.estimatedMinutes() : 15,
+                pi.difficulty() != null ? pi.difficulty() : "medium"));
+
+            // 每个 resourceType 创建一个 ResourcePlanItem，共享同一 subTopicIndex + activityId
+            List<String> types = pi.resourceTypes();
+            if (types == null || types.isEmpty()) {
+                log.warn("PrePlannedItem '{}' has no resourceTypes, skipping", pi.title());
+                continue;
+            }
+            for (String type : types) {
+                items.add(new ResourceGenerationState.ResourcePlanItem(
+                    type,
+                    pi.title() + " - " + type,
+                    pi.difficulty() != null ? pi.difficulty() : "medium",
+                    pi.estimatedMinutes() > 0 ? pi.estimatedMinutes() / types.size() : 15,
+                    "markdown",
+                    pi.knowledgePoints() != null ? pi.knowledgePoints() : List.of(),
+                    pi.description() != null ? pi.description() : "",
+                    piIdx,
+                    pi.activityId()));
+                itemIdx++;
+            }
+        }
+
+        var plan = new ResourceGenerationState.ResourcePlan(
+            s.topic, subTopics, items,
+            List.of("AI-customized based on your learning needs"), List.of());
+
+        s.planning = new ResourceGenerationState.PlanningData(plan, 0);
+        s.subTopicProgress = s.subTopicProgress.start(subTopics.size());
+
+        log.info("Plan-driven setup complete. SubTopics: {}, Items: {}", subTopics.size(), items.size());
+        advance(s, "PLAN_DRIVEN", 55, "Plan built from " + items.size() + " resources across " + subTopics.size() + " activities");
         return s;
     }
 
@@ -197,7 +279,7 @@ public class ResourceGenerationGraph {
         AgentContext ctx = buildContext(s);
         ctx.put("forceLowConfidence", retrieval.forceLowConfidence());
 
-        // Determine which items to generate
+        // 确定需要生成的项
         boolean isRegeneration = feedback.regenerateTypes() != null && !feedback.regenerateTypes().isEmpty();
         List<ResourceGenerationState.ResourcePlanItem> itemsToGenerate;
         if (isRegeneration) {
@@ -207,7 +289,7 @@ public class ResourceGenerationGraph {
                 .toList();
             log.info("Regenerating {} types: {}", regenerateTypes.size(), regenerateTypes);
         } else {
-            // Scope to current sub-topic for incremental publishing
+            // 限定到当前子主题以实现增量发布
             int stIndex = progress.currentIndex();
             itemsToGenerate = planning.resourcePlan().items().stream()
                 .filter(i -> i.subTopicIndex() == stIndex)
@@ -222,25 +304,41 @@ public class ResourceGenerationGraph {
             return s;
         }
 
-        // Broadcast sub-topic start
+        // 广播子主题开始
         broadcastSubTopicStarted(s);
+
+        // 构建并发出清单供前端追踪
+        GenerationChecklist checklist = buildChecklist(s, itemsToGenerate);
+        if (s.eventBroadcaster != null) {
+            s.eventBroadcaster.broadcastEvent(s.taskId, "checklist.created", checklist.toFrontendFormat());
+        }
 
         advance(s, "GENERATING", 55, "Generating " + itemsToGenerate.size() + " resources in parallel...");
 
-        // Collect pattern — no shared mutable state
-        record GenOutcome(String type, boolean success, ResourceGenerationState.GeneratedContent content) {}
+        // 在分发前将所有项标记为 GENERATING（前端可见性）
+        if (checklist != null) {
+            itemsToGenerate.forEach(item -> checklist.markGenerating(item.title()));
+            s.eventBroadcaster.broadcastEvent(s.taskId, "checklist.updated", checklist.toFrontendFormat());
+        }
+
+        // 收集模式 — 无共享可变状态
+        record GenOutcome(String type, String title, boolean success, ResourceGenerationState.GeneratedContent content) {}
         final boolean regenerate = isRegeneration;
         List<CompletableFuture<GenOutcome>> futures = itemsToGenerate.stream()
             .map(item -> CompletableFuture.supplyAsync(() -> {
                 log.info("{} resource type: {}, title: {}",
                     regenerate ? "Revising" : "Generating", item.type(), item.title());
+                // 广播 agent.generation.started 事件
+                if (s.eventBroadcaster != null) {
+                    s.eventBroadcaster.broadcastEvent(s.taskId, "agent.generation.started",
+                        Map.of("jobId", s.taskId + "-" + item.type(), "resourceType", item.type(), "title", item.title()));
+                }
                 var typeSources = retrieval.evidenceByType().getOrDefault(item.type(), List.of());
                 String reviewFeedback = feedback.reviewFeedbackByType() != null
                     ? feedback.reviewFeedbackByType().get(item.type()) : null;
                 try {
                     AgentResult<ResourceGenerationState.GeneratedContent> result;
                     if (regenerate) {
-                        // Targeted revision based on review feedback
                         var original = gen.artifacts().get(item.type());
                         result = resourceGenerator.revise(item, typeSources, s.profileSummary,
                             retrieval.forceLowConfidence(), reviewFeedback, original, ctx);
@@ -250,25 +348,41 @@ public class ResourceGenerationGraph {
                     }
                     if (result.success()) {
                         resourceReady(s, item.type(), result.output().title(),
+                            result.output().content(),
                             result.output().confidence(),
                             result.output().sources() != null ? result.output().sources().size() : 0);
+                        if (checklist != null) checklist.markDone(item.title());
+                        if (s.eventBroadcaster != null) {
+                            s.eventBroadcaster.broadcastEvent(s.taskId, "agent.generation.done",
+                                Map.of("jobId", s.taskId + "-" + item.type(), "resourceType", item.type(), "title", item.title()));
+                        }
                         log.info("Successfully {} resource type: {}",
                             regenerate ? "revised" : "generated", item.type());
-                        return new GenOutcome(item.type(), true, result.output());
+                        return new GenOutcome(item.type(), item.title(), true, result.output());
                     } else {
+                        if (checklist != null) checklist.markFailed(item.title());
+                        if (s.eventBroadcaster != null) {
+                            s.eventBroadcaster.broadcastEvent(s.taskId, "agent.generation.failed",
+                                Map.of("jobId", s.taskId + "-" + item.type(), "resourceType", item.type(), "title", item.title()));
+                        }
                         log.warn("{} failed for type={}: {}",
                             regenerate ? "Revision" : "Generation", item.type(), result.errorMessage());
-                        return new GenOutcome(item.type(), false, null);
+                        return new GenOutcome(item.type(), item.title(), false, null);
                     }
                 } catch (Exception e) {
+                    if (checklist != null) checklist.markFailed(item.title());
+                    if (s.eventBroadcaster != null) {
+                        s.eventBroadcaster.broadcastEvent(s.taskId, "agent.generation.failed",
+                            Map.of("jobId", s.taskId + "-" + item.type(), "resourceType", item.type(), "title", item.title()));
+                    }
                     log.error("{} error for type={}: {}",
                         regenerate ? "Revision" : "Generation", item.type(), e.getMessage());
-                    return new GenOutcome(item.type(), false, null);
+                    return new GenOutcome(item.type(), item.title(), false, null);
                 }
             }, generatorPool))
             .toList();
 
-        // Merge results into the generation record
+        // 将结果合并到生成记录中
         ResourceGenerationState.GenerationData newGen = gen;
         for (var future : futures) {
             GenOutcome outcome = future.join();
@@ -284,7 +398,29 @@ public class ResourceGenerationGraph {
             newGen.artifacts().size(), newGen.failedTypes().size());
         advance(s, "GENERATING", 85,
             "Resources generated (" + newGen.artifacts().size() + "/" + itemsToGenerate.size() + " successful)");
+
+        // 广播最终清单状态
+        if (s.eventBroadcaster != null && checklist != null) {
+            s.eventBroadcaster.broadcastEvent(s.taskId, "checklist.updated", checklist.toFrontendFormat());
+        }
+
         return s;
+    }
+
+    /** 从本轮生成的资源计划条目构建清单。 */
+    private GenerationChecklist buildChecklist(ResourceGenerationState s,
+                                                List<ResourceGenerationState.ResourcePlanItem> items) {
+        List<GenerationChecklist.ChecklistItem> listItems = new ArrayList<>();
+        for (var item : items) {
+            listItems.add(new GenerationChecklist.ChecklistItem(
+                item.type(), item.title(),
+                item.type() + " resource: " + item.title(),
+                item.difficulty(), item.estimatedMinutes(), item.format(),
+                item.keyPoints(), item.personalizationNote(), 1));
+        }
+        return new GenerationChecklist(s.taskId,
+            s.planning != null && s.planning.resourcePlan() != null
+                ? s.planning.resourcePlan().topicOutline() : s.topic, listItems);
     }
 
     private ResourceGenerationState doReviewing(ResourceGenerationState s) {
@@ -296,7 +432,7 @@ public class ResourceGenerationGraph {
         advance(s, "REVIEWING", 85, "Reviewing generated content...");
         AgentContext ctx = buildContext(s);
 
-        // Scope to current sub-topic's artifacts
+        // 限定到当前子主题的产物
         var planning = s.planning;
         int stIndex = progress.currentIndex();
         var subTopicItemTypes = planning.resourcePlan().items().stream()
@@ -312,7 +448,7 @@ public class ResourceGenerationGraph {
 
         for (var entry : generation.artifacts().entrySet()) {
             String type = entry.getKey();
-            // Only review items belonging to the current sub-topic
+            // 仅审核属于当前子主题的项
             if (!subTopicItemTypes.contains(type)) {
                 continue;
             }
@@ -379,7 +515,7 @@ public class ResourceGenerationGraph {
         String packId = publish.packId() != null ? publish.packId() : UUID.randomUUID().toString();
         s.publish = publish.withPackId(packId);
 
-        // Persist resource_pack on first sub-topic only
+        // 仅在第一个子主题时持久化资源包
         if (progress.completedIndices().isEmpty()) {
             try {
                 List<String> pushReasons = planning.resourcePlan() != null
@@ -402,7 +538,7 @@ public class ResourceGenerationGraph {
 
         for (var entry : generation.artifacts().entrySet()) {
             String type = entry.getKey();
-            // Only publish items belonging to the current sub-topic
+            // 仅发布属于当前子主题的项
             if (!subTopicItemTypes.contains(type)) {
                 continue;
             }
@@ -420,8 +556,26 @@ public class ResourceGenerationGraph {
             if (result.success()) {
                 newPublish = newPublish.withPublishedType(type);
 
+                // 对视频类型启动后台轮询，等待 Manim 渲染完成
+                String itemId = null;
+                if ("video".equals(type)) {
+                    try {
+                        itemId = UUID.randomUUID().toString();
+                        String manimTaskId = extractManimTaskId(content.content());
+                        if (manimTaskId != null && !manimTaskId.isBlank()) {
+                            videoRenderPoller.startPolling(manimTaskId, itemId);
+                            log.info("启动视频渲染轮询: type={}, itemId={}, manimTaskId={}",
+                                type, itemId, manimTaskId);
+                        }
+                    } catch (Exception e) {
+                        log.warn("启动视频轮询失败: {}", e.getMessage());
+                    }
+                }
+
                 try {
-                    String itemId = UUID.randomUUID().toString();
+                    if (itemId == null) {
+                        itemId = UUID.randomUUID().toString();
+                    }
                     String reviewStatus = rev != null
                         ? (rev.action() == ResourceGenerationState.ReviewAction.PUBLISH ? "approved" : "rejected")
                         : "pending";
@@ -472,13 +626,20 @@ public class ResourceGenerationGraph {
         s.publish = newPublish;
         s.generation = newGen;
 
-        // Advance sub-topic progress and broadcast completion
+        // 推进子主题进度并广播完成
         s.subTopicProgress = progress.advance();
         broadcastSubTopicCompleted(s);
 
-        // Only mark SUCCEEDED when ALL sub-topics are done
+        // 仅在所有子主题完成且至少发布了一个资源时才标记为 SUCCEEDED
         if (s.subTopicProgress.allDone()) {
-            s.status = "SUCCEEDED";
+            if (newPublish.publishedTypes().isEmpty() && newGen.artifacts().isEmpty()) {
+                s.status = "FAILED";
+                s.errorCode = "NOTHING_PUBLISHED";
+                s.errorMessage = "All generated resources failed review — nothing was published";
+                log.error("Task {} allDone but zero items published — marking FAILED", s.taskId);
+            } else {
+                s.status = "SUCCEEDED";
+            }
             s.finishedAt = Instant.now();
         }
 
@@ -506,7 +667,7 @@ public class ResourceGenerationGraph {
                 s.resourceTypes.stream()
                     .map(t -> new ResourceGenerationState.ResourcePlanItem(
                         t, s.topic + " - " + t, "medium", 15, "markdown",
-                        List.of(), " Generated without course evidence (KB unavailable)", 0))
+                        List.of(), " Generated without course evidence (KB unavailable)", 0, null))
                     .toList(),
                 List.of("KB not available — use general knowledge"),
                 List.of()),
@@ -519,10 +680,15 @@ public class ResourceGenerationGraph {
     }
 
     // ================================================================
-    // Conditional routers
+    // 条件路由器
     // ================================================================
 
     private String routeAfterRetrieving(ResourceGenerationState s) {
+        // 计划驱动：直接使用预计划项，跳过 LLM 规划
+        if (s.planContext != null) {
+            log.info("Plan-driven mode — routing to PLAN_DRIVEN");
+            return "PLAN_DRIVEN";
+        }
         var retrieval = s.retrieval;
         if (retrieval.forceLowConfidence() && retrieval.totalSources() == 0) {
             log.info("KB not ready — routing to FALLBACK");
@@ -569,11 +735,11 @@ public class ResourceGenerationGraph {
             }
         }
 
-        // Permanent rejections — remove from artifacts
+        // 永久拒绝 — 从产物中移除
         ResourceGenerationState.GenerationData newGen = gen;
         for (String type : retryPermanentTypes) {
             newGen = newGen.withFailedType(type);
-            // Remove from artifacts by creating a new map without this type
+            // 通过创建不含该类型的新映射从产物中移除
             var filtered = new HashMap<>(newGen.artifacts());
             filtered.remove(type);
             newGen = new ResourceGenerationState.GenerationData(
@@ -591,7 +757,7 @@ public class ResourceGenerationGraph {
         String feedback = feedbackBuilder.toString();
         log.info("Review feedback: {} rejected types — {}", rejectedTypes.size(), feedback);
 
-        // Decision: replan or regenerate?
+        // 决策：重新规划还是重新生成？
         if (rejectedTypes.size() >= REPLAN_THRESHOLD && planning.planRetryCount() <= MAX_REPLAN) {
             log.info("Replanning due to {} rejected types (threshold: {})", rejectedTypes.size(), REPLAN_THRESHOLD);
             s.feedback = s.feedback.forReplan(
@@ -614,7 +780,7 @@ public class ResourceGenerationGraph {
             return "GENERATING";
         }
 
-        // Max retries exceeded — proceed with failures
+        // 超过最大重试次数 — 带失败继续执行
         log.warn("Max regenerate/replan exceeded — proceeding with {} failed types", rejectedTypes.size());
         for (String type : rejectedTypes) {
             newGen = newGen.withFailedType(type);
@@ -632,17 +798,17 @@ public class ResourceGenerationGraph {
     private String routeAfterPublishing(ResourceGenerationState s) {
         var progress = s.subTopicProgress;
         if (progress.hasMore()) {
-            // Clear feedback for the next sub-topic
+            // 为下一个子主题清除反馈
             s.feedback = ResourceGenerationState.FeedbackContext.empty();
             log.info("Advancing to sub-topic {}/{}", progress.currentIndex() + 1, progress.totalCount());
             return "GENERATING";
         }
         log.info("All {} sub-topics published", progress.totalCount());
-        return null; // terminal — graph ends
+        return null; // 终止 — 图结束
     }
 
     // ================================================================
-    // Helpers
+    // 辅助方法
     // ================================================================
 
     private void advance(ResourceGenerationState s, String stage, int percent, String message) {
@@ -677,9 +843,13 @@ public class ResourceGenerationGraph {
         }
     }
 
-    private void resourceReady(ResourceGenerationState s, String type, String title, String confidence, int sourceCount) {
+    private static final int SSE_CONTENT_MAX_LENGTH = 20000;
+
+    private void resourceReady(ResourceGenerationState s, String type, String title, String content, String confidence, int sourceCount) {
+        String truncatedContent = content != null && content.length() > SSE_CONTENT_MAX_LENGTH
+            ? content.substring(0, SSE_CONTENT_MAX_LENGTH) : content;
         if (s.eventBroadcaster != null) {
-            s.eventBroadcaster.resourceReady(s.taskId, type, title, confidence, sourceCount);
+            s.eventBroadcaster.resourceReady(s.taskId, type, title, truncatedContent, confidence, sourceCount);
         }
         if (persistenceService != null) {
             persistenceService.recordResourceReady(s.taskId, type, title, confidence, sourceCount);
@@ -731,9 +901,25 @@ public class ResourceGenerationGraph {
     }
 
     private AgentContext buildContext(ResourceGenerationState s) {
+        var observation = s.eventBroadcaster != null
+            ? new SseAgentObservation(s.taskId, s.eventBroadcaster)
+            : AgentObservation.NOOP;
         return AgentContext.builder(s.taskId, s.userId)
             .courseId(s.courseId)
+            .observation(observation)
             .build();
+    }
+
+    private String extractManimTaskId(String contentJson) {
+        if (contentJson == null || contentJson.isBlank()) return null;
+        try {
+            var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(contentJson);
+            var idNode = node.get("manimTaskId");
+            return idNode != null ? idNode.asText() : null;
+        } catch (Exception e) {
+            log.debug("解析manimTaskId失败: {}", e.getMessage());
+            return null;
+        }
     }
 
     @FunctionalInterface

@@ -1,6 +1,6 @@
 package com.learnthink.core.agent.impl;
 
-import com.learnthink.core.agent.framework.AgentContext;
+import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.config.PromptLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,15 +19,12 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Plan-then-Generate architecture — Phase 1: ConversationPlanner.
+ * Plan-then-Generate 架构 — 第一阶段：对话规划器
+ * <p>分析用户意图并规划回复结构。所有输出进入思考链（{@code agent.thought} SSE 事件），
+ * 由 {@code ReplyGenerator} 消费后生成对外显示的回复。</p>
  *
- * <p>Analyzes user intent and plans the reply structure.
- * All output goes to the thinking chain ({@code agent.thought} SSE events),
- * consumed by {@code ReplyGenerator} which produces the visible reply.</p>
- *
- * <p>Key difference from {@link ConversationAgent}: this agent's output is
- * <b>never</b> shown as the visible reply. It is a "thinker" that feeds
- * structured plans to the generator.</p>
+ * <p>与 {@link ConversationAgent} 的关键区别：该 Agent 的输出<b>不会</b>直接显示为回复，
+ * 它只是一个"思考者"，将结构化计划喂给生成器。</p>
  */
 @Component
 public class ConversationPlanner {
@@ -45,10 +42,10 @@ public class ConversationPlanner {
     }
 
     /**
-     * Stream the planner's analysis and plan.
-     * The caller (ChatServiceImpl) is responsible for parsing the
-     * {@code [ANALYSIS]}, {@code [PLAN]}, and {@code ---PLAN_END---} markers
-     * from the streaming text and emitting appropriate SSE events.
+     * 流式输出规划器的分析和计划
+     * <p>调用方（ChatServiceImpl）负责从流式文本中解析
+     * {@code [ANALYSIS]}、{@code [PLAN]} 和 {@code ---PLAN_END---} 标记，
+     * 并发射相应的 SSE 事件。</p>
      */
     public Flux<ChatResponse> streamPlan(ConversationInput input, AgentContext ctx) {
         String systemPrompt = input.systemPromptOverride() != null && !input.systemPromptOverride().isBlank()
@@ -63,6 +60,10 @@ public class ConversationPlanner {
         ToolCallback ragToolCallback = ctx.get("rag_tool");
         if (ragToolCallback != null) {
             promptSpec = promptSpec.toolCallbacks(ragToolCallback);
+        }
+        ToolCallback bookInfoToolCallback = ctx.get("book_info_tool");
+        if (bookInfoToolCallback != null) {
+            promptSpec = promptSpec.toolCallbacks(bookInfoToolCallback);
         }
         return promptSpec.stream().chatResponse()
                 .doFinally(signalType -> {

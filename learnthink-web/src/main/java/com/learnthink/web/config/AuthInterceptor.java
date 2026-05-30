@@ -31,6 +31,20 @@ public class AuthInterceptor implements HandlerInterceptor {
             );
             return false;
         }
+
+        // 管理员路径需要 admin 角色
+        if (request.getRequestURI().startsWith("/admin/")) {
+            if (!"admin".equals(UserContextUtil.getCurrentUserRole())) {
+                log.warn("Non-admin access to admin path: {} {}", request.getMethod(), request.getRequestURI());
+                response.setStatus(403);
+                response.setContentType(MediaType.APPLICATION_JSON_VALUE + ";charset=UTF-8");
+                response.getWriter().write(
+                    objectMapper.writeValueAsString(Map.of("code", 403, "message", "权限不足，需要管理员权限"))
+                );
+                return false;
+            }
+        }
+
         return true;
     }
 

@@ -154,29 +154,41 @@ ON DUPLICATE KEY UPDATE result=result;
 
 
 -- ============================================================
--- 7. 学习路径
+-- 7. 学习计划（v3.0）
 -- ============================================================
-INSERT INTO learning_paths (id, user_id, course_id, current_version) VALUES
-    ('lp-001', 'user-test-001', 'course-ai-001', 1)
-ON DUPLICATE KEY UPDATE current_version=current_version;
+INSERT INTO learning_plans (id, user_id, course_id, profile_version, current_version, plan_json, status) VALUES
+    ('lplan-001', 'user-test-001', 'course-ai-001', 3, 1, '{
+  "plan_id": "lplan-001",
+  "modules": [
+    {"module_id": "mod-1", "title": "搜索算法基础", "knowledge_points": [{"kp_id": "kp-001", "name": "盲目搜索"}], "scope": "core", "depth": "standard", "prerequisites": [], "estimated_hours": 0.5, "status": "done", "mastery": 0.92},
+    {"module_id": "mod-2", "title": "A*搜索算法", "knowledge_points": [{"kp_id": "kp-002", "name": "启发式搜索"}], "scope": "core", "depth": "standard", "prerequisites": ["mod-1"], "estimated_hours": 0.75, "status": "done", "mastery": 0.85},
+    {"module_id": "mod-3", "title": "贝叶斯分类器", "knowledge_points": [{"kp_id": "kp-003", "name": "贝叶斯分类"}], "scope": "core", "depth": "deep", "prerequisites": ["mod-2"], "estimated_hours": 1.0, "status": "in_progress", "mastery": 0.55},
+    {"module_id": "mod-4", "title": "决策树与随机森林", "knowledge_points": [{"kp_id": "kp-004", "name": "决策树"}], "scope": "core", "depth": "standard", "prerequisites": ["mod-3"], "estimated_hours": 0.75, "status": "locked", "mastery": 0.0},
+    {"module_id": "mod-5", "title": "神经网络基础", "knowledge_points": [{"kp_id": "kp-005", "name": "神经网络"}], "scope": "core", "depth": "overview", "prerequisites": ["mod-4"], "estimated_hours": 1.0, "status": "locked", "mastery": 0.0}
+  ],
+  "edges": [
+    {"from": "mod-1", "to": "mod-2"}, {"from": "mod-2", "to": "mod-3"},
+    {"from": "mod-3", "to": "mod-4"}, {"from": "mod-4", "to": "mod-5"}
+  ],
+  "summary": {"total_modules": 5, "core_modules": 5, "supplementary_modules": 0, "total_hours": 4.0, "completion_estimate": "约2周"}
+}', 'ready')
+ON DUPLICATE KEY UPDATE plan_json=plan_json;
 
+INSERT INTO learning_plan_versions (id, plan_id, user_id, course_id, version, generated_from_profile_version_id, plan_json) VALUES
+    ('lpv-001', 'lplan-001', 'user-test-001', 'course-ai-001', 1, 'pv-003', '{"plan_id":"lplan-001","modules":[...]}')
+ON DUPLICATE KEY UPDATE plan_json=plan_json;
 
-INSERT INTO learning_path_versions (id, user_id, course_id, version, generated_from_profile_version_id, path_json) VALUES
-    ('lpv-001', 'user-test-001', 'course-ai-001', 1, 'pv-003',
-     '{
-       "nodes": [
-         {"node_id":"n1","title":"搜索算法基础","knowledge_point":"盲目搜索","status":"done","resource_pack_id":null,"estimated_minutes":30},
-         {"node_id":"n2","title":"A*搜索算法","knowledge_point":"启发式搜索","status":"done","resource_pack_id":null,"estimated_minutes":45},
-         {"node_id":"n3","title":"贝叶斯分类器","knowledge_point":"贝叶斯分类","status":"doing","resource_pack_id":"pack-001","estimated_minutes":60},
-         {"node_id":"n4","title":"决策树与随机森林","knowledge_point":"决策树","status":"todo","resource_pack_id":null,"estimated_minutes":45},
-         {"node_id":"n5","title":"神经网络基础","knowledge_point":"神经网络","status":"todo","resource_pack_id":null,"estimated_minutes":60}
-       ],
-       "edges": [{"from":"n1","to":"n2"},{"from":"n2","to":"n3"},{"from":"n3","to":"n4"},{"from":"n4","to":"n5"}],
-       "adjustments": [
-         {"at":"2026-05-10T09:00:00+08:00","reason":"A*搜索测验正确率仅55%，插入复习节点","diff":{"inserted_node_id":"n2b"}}
-       ]
-     }')
-ON DUPLICATE KEY UPDATE path_json=path_json;
+INSERT INTO sub_plans (id, plan_id, module_id, version, sub_plan_json, generation_status) VALUES
+    ('sp-001', 'lplan-001', 'mod-3', 1, '{
+  "activities": [
+    {"activity_id": "act-3-1", "type": "learn", "title": "贝叶斯定理回顾", "description": "复习条件概率与贝叶斯公式", "order": 1, "estimated_minutes": 15, "status": "done", "result": {"score": 0.9, "time_spent": 12, "completed_at": "2026-05-15T10:30:00+08:00"}},
+    {"activity_id": "act-3-2", "type": "quiz", "title": "贝叶斯分类基础测验", "description": "检验对朴素贝叶斯分类器的理解", "order": 2, "estimated_minutes": 20, "status": "in_progress", "retry_count": 0},
+    {"activity_id": "act-3-3", "type": "explore", "title": "贝叶斯在垃圾邮件过滤中的应用", "description": "拓展阅读：实际工程案例", "order": 3, "estimated_minutes": 10, "status": "ready"}
+  ],
+  "stats": {"completion_pct": 0.33, "avg_quiz_score": 0.9, "total_time_spent": 12},
+  "adjustments": []
+}', 'ready')
+ON DUPLICATE KEY UPDATE sub_plan_json=sub_plan_json;
 
 
 -- ============================================================

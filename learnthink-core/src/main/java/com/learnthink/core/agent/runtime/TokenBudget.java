@@ -1,7 +1,7 @@
-package com.learnthink.core.agent.framework;
+package com.learnthink.core.agent.runtime;
 
 /**
- * Token budget for an agent invocation. Prevents runaway LLM calls.
+ * Agent 调用的 Token 预算，防止 LLM 调用失控
  */
 public record TokenBudget(
     int maxTotalTokens,

@@ -99,4 +99,16 @@ public class CourseController {
             return Result.error(400, e.getMessage());
         }
     }
+
+    /**
+     * 获取课程教材信息（书名、作者、简介、目录）
+     */
+    @GetMapping("/{id}/textbook")
+    public Result<Map<String, Object>> getTextbookInfo(@PathVariable String id) {
+        Map<String, Object> info = courseService.getTextbookInfo(id);
+        if (info == null) {
+            return Result.error(404, "该课程暂无教材信息");
+        }
+        return Result.success(info);
+    }
 }

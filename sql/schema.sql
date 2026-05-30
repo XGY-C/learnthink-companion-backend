@@ -1,7 +1,7 @@
 -- ============================================================
 -- 学思伴行（LearnThink Companion）MySQL 8.0 数据库初始化脚本
--- 版本：v2.0
--- 日期：2026-05-10
+-- 版本：v2.2
+-- 日期：2026-05-28
 -- 用法：mysql -u root -p < sql/schema.sql
 -- ============================================================
 
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS users (
     major VARCHAR(100) COMMENT '专业方向',
     grade VARCHAR(20) COMMENT '年级',
     phone VARCHAR(20) COMMENT '手机号（预留）',
+    status VARCHAR(20) DEFAULT 'enabled' COMMENT 'enabled / disabled',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_users_email (email)
@@ -38,8 +39,12 @@ CREATE TABLE IF NOT EXISTS courses (
     name VARCHAR(200) NOT NULL,
     description TEXT,
     emoji VARCHAR(10) DEFAULT '📚' COMMENT '课程图标',
+    grade VARCHAR(20) DEFAULT NULL COMMENT '适用年级',
+    subject VARCHAR(50) DEFAULT NULL COMMENT '学科分类',
+    enabled TINYINT(1) DEFAULT 1 COMMENT '启用/停用',
     deleted_at DATETIME DEFAULT NULL COMMENT '逻辑删除时间',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
@@ -163,7 +168,8 @@ CREATE TABLE IF NOT EXISTS task_events (
 -- Agent 思考链记录
 CREATE TABLE IF NOT EXISTS agent_thinking_traces (
     id CHAR(36) PRIMARY KEY,
-    task_id CHAR(36) NOT NULL,
+    task_id CHAR(36) NULL COMMENT '任务ID（任务流使用，对话流为 NULL。v3.4 起可空）',
+    chat_id CHAR(36) NULL COMMENT '会话ID（对话流使用，引用 profile_chats.id。v3.4 新增）',
     agent_name VARCHAR(50) NOT NULL COMMENT 'Agent 标识：Retriever / Planner / Generator / Reviewer',
     agent_role VARCHAR(50) COMMENT 'Agent 角色描述',
     phase VARCHAR(50) COMMENT '流水线阶段',
@@ -172,13 +178,17 @@ CREATE TABLE IF NOT EXISTS agent_thinking_traces (
     thought TEXT COMMENT '思考过程',
     decision TEXT COMMENT '决策结论',
     confidence_level VARCHAR(10) COMMENT 'high / medium / low',
+    round_num INT COMMENT '对应对话轮次（从1开始），用于历史消息重建思考链',
     trigger VARCHAR(30) COMMENT 'autonomous / response_to_agent / system_prompt',
     in_response_to CHAR(36) COMMENT '回复目标 trace ID',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_att_task (task_id),
+    INDEX idx_att_chat (chat_id),
+    INDEX idx_att_chat_round (chat_id, round_num),
     INDEX idx_att_task_agent (task_id, agent_name),
     INDEX idx_att_task_created (task_id, created_at),
-    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY (chat_id) REFERENCES profile_chats(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
@@ -235,12 +245,13 @@ CREATE TABLE IF NOT EXISTS resource_items (
     status VARCHAR(20) DEFAULT 'pending' COMMENT 'pending / ready / failed / rejected',
     content_ref VARCHAR(500) COMMENT '对象存储 key',
     content_mime VARCHAR(50) COMMENT 'text/markdown / application/json',
-    confidence_score DECIMAL(3,2) COMMENT '置信度 0.00~1.00',
+    confidence VARCHAR(10) COMMENT '置信度等级 high / medium / low',
     quality_score DECIMAL(3,2) COMMENT '质量评分 0.00~100.00',
     metadata_json JSON COMMENT '难度、标签、估时等扩展字段',
     sources_json JSON COMMENT '证据列表 [{doc_id, title, chunk_id, quote, locator, relevance}]',
     review_status VARCHAR(20) DEFAULT 'pending' COMMENT 'pending / approved / rejected',
     review_summary TEXT,
+    subtopic_index INT NOT NULL DEFAULT 0 COMMENT '子主题索引（0=主题级, 1..N=子主题）',
     deleted_at DATETIME COMMENT '软删除时间（NULL=未删除）',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -249,6 +260,7 @@ CREATE TABLE IF NOT EXISTS resource_items (
     INDEX idx_ri_pack_type_status (pack_id, type, status),
     INDEX idx_ri_status (status),
     INDEX idx_ri_type_status (type, status),
+    INDEX idx_resource_items_subtopic (pack_id, subtopic_index),
     FOREIGN KEY (pack_id) REFERENCES resource_packs(id) ON DELETE CASCADE,
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -257,8 +269,8 @@ CREATE TABLE IF NOT EXISTS resource_items (
 -- 审校记录
 CREATE TABLE IF NOT EXISTS review_records (
     id CHAR(36) PRIMARY KEY,
-    resource_item_id CHAR(36) NOT NULL,
-    resource_pack_id CHAR(36) NOT NULL COMMENT '冗余字段，便于按包查询审校结果',
+    resource_item_id CHAR(36) COMMENT '关联资源项（可为空，允许部分审校场景）',
+    resource_pack_id CHAR(36) COMMENT '冗余字段，便于按包查询审校结果',
     task_id CHAR(36) NOT NULL,
     result VARCHAR(20) COMMENT 'approved / rejected',
     reasons_json JSON COMMENT '结构化驳回原因 [{type, detail}]',
@@ -267,16 +279,19 @@ CREATE TABLE IF NOT EXISTS review_records (
     INDEX idx_rr_resource (resource_item_id),
     INDEX idx_rr_pack (resource_pack_id),
     INDEX idx_rr_task (task_id),
-    FOREIGN KEY (resource_item_id) REFERENCES resource_items(id) ON DELETE CASCADE,
-    FOREIGN KEY (resource_pack_id) REFERENCES resource_packs(id) ON DELETE CASCADE,
+    FOREIGN KEY (resource_item_id) REFERENCES resource_items(id) ON DELETE SET NULL,
+    FOREIGN KEY (resource_pack_id) REFERENCES resource_packs(id) ON DELETE SET NULL,
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
 -- ============================================================
--- 5. 学习路径（版本化）
+-- 5. 学习计划（版本化，v3.0）
+--    替代旧版 learning_paths / learning_path_versions
 -- ============================================================
--- 路径主表（当前指针）
+
+-- ── 旧版路径表（v1.x 遗留，已被 learning_plans 替代）──
+
 CREATE TABLE IF NOT EXISTS learning_paths (
     id CHAR(36) PRIMARY KEY,
     user_id CHAR(36) NOT NULL,
@@ -286,30 +301,90 @@ CREATE TABLE IF NOT EXISTS learning_paths (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uk_lp_user_course (user_id, course_id),
     INDEX idx_lp_user (user_id),
-    CONSTRAINT fk_lp_profiles FOREIGN KEY (user_id, course_id)
+    INDEX course_id (course_id),
+    CONSTRAINT fk_lp_profiles FOREIGN KEY (user_id, course_id) REFERENCES profiles(user_id, course_id) ON DELETE RESTRICT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS learning_path_versions (
+    id CHAR(36) PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    course_id CHAR(36) NOT NULL,
+    version INT NOT NULL,
+    generated_from_profile_version_id CHAR(36) COMMENT '关联 profile_versions.id',
+    path_json JSON COMMENT '完整路径 JSON',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_lpv_user_course_version (user_id, course_id, version),
+    INDEX idx_lpv_user (user_id),
+    INDEX idx_lpv_user_course (user_id, course_id),
+    INDEX course_id (course_id),
+    INDEX generated_from_profile_version_id (generated_from_profile_version_id),
+    CONSTRAINT fk_lpv_paths FOREIGN KEY (user_id, course_id) REFERENCES learning_paths(user_id, course_id) ON DELETE RESTRICT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE RESTRICT,
+    FOREIGN KEY (generated_from_profile_version_id) REFERENCES profile_versions(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- ── 新版计划表 ──
+-- 大计划主表（当前指针，每用户每课程最多一条活跃记录）
+CREATE TABLE IF NOT EXISTS learning_plans (
+    id CHAR(36) PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    course_id CHAR(36) NOT NULL,
+    profile_version INT NOT NULL COMMENT '生成时所依据的画像版本号',
+    current_version INT DEFAULT 1 COMMENT '当前计划版本号',
+    plan_json JSON COMMENT '完整计划 JSON（modules, edges, summary）',
+    status VARCHAR(20) DEFAULT 'generating' COMMENT 'pending_decision / decided / generating / ready / completed / archived',
+    chat_id CHAR(36) DEFAULT NULL COMMENT '关联的对话会话ID，用于历史加载还原',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_lplan_user_course (user_id, course_id),
+    INDEX idx_lplan_user (user_id),
+    INDEX idx_lplan_status (status),
+    INDEX idx_lplan_chat (chat_id),
+    CONSTRAINT fk_lplan_profiles FOREIGN KEY (user_id, course_id)
         REFERENCES profiles(user_id, course_id) ON DELETE RESTRICT,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
     FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
--- 路径版本快照
-CREATE TABLE IF NOT EXISTS learning_path_versions (
+-- 大计划版本快照（每次重新生成时追加一行）
+CREATE TABLE IF NOT EXISTS learning_plan_versions (
     id CHAR(36) PRIMARY KEY,
+    plan_id CHAR(36) NOT NULL COMMENT '关联 learning_plans.id',
     user_id CHAR(36) NOT NULL,
     course_id CHAR(36) NOT NULL,
     version INT NOT NULL,
-    generated_from_profile_version_id CHAR(36),
-    path_json JSON COMMENT '{nodes: [], edges: [], adjustments: []}',
+    generated_from_profile_version_id CHAR(36) COMMENT '关联 profile_versions.id',
+    plan_json JSON COMMENT '该版本的完整计划 JSON',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_lpv_user_course_version (user_id, course_id, version),
-    INDEX idx_lpv_user (user_id),
-    INDEX idx_lpv_user_course (user_id, course_id),
-    CONSTRAINT fk_lpv_paths FOREIGN KEY (user_id, course_id)
-        REFERENCES learning_paths(user_id, course_id) ON DELETE RESTRICT,
+    UNIQUE KEY uk_lpv_plan_version (plan_id, version),
+    INDEX idx_lpv2_plan (plan_id),
+    INDEX idx_lpv2_user (user_id),
+    INDEX course_id (course_id),
+    FOREIGN KEY (plan_id) REFERENCES learning_plans(id) ON DELETE RESTRICT,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
     FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE RESTRICT,
     FOREIGN KEY (generated_from_profile_version_id) REFERENCES profile_versions(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- 子计划表（每个模块一条，存储该模块的活动序列）
+CREATE TABLE IF NOT EXISTS sub_plans (
+    id CHAR(36) PRIMARY KEY,
+    plan_id CHAR(36) NOT NULL COMMENT '关联 learning_plans.id',
+    module_id VARCHAR(20) NOT NULL COMMENT '模块标识（与 plan_json 中 moduleId 对应）',
+    version INT DEFAULT 1,
+    sub_plan_json JSON COMMENT '子计划 JSON（activities, stats, matchSummary）',
+    generation_status VARCHAR(20) DEFAULT 'pending' COMMENT 'pending / generating / ready / failed',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_sp_plan_module (plan_id, module_id),
+    INDEX idx_sp_plan (plan_id),
+    INDEX idx_sp_status (generation_status),
+    FOREIGN KEY (plan_id) REFERENCES learning_plans(id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
@@ -322,7 +397,8 @@ CREATE TABLE IF NOT EXISTS quiz_attempts (
     user_id CHAR(36) NOT NULL,
     course_id CHAR(36) NOT NULL,
     topic VARCHAR(200),
-    node_id VARCHAR(50) COMMENT '关联路径节点',
+    node_id VARCHAR(50) COMMENT '关联路径节点（v2.0，已弃用）',
+    activity_id CHAR(36) COMMENT '关联 activity（v3.0）',
     pack_id CHAR(36),
     answers_json JSON COMMENT '用户作答',
     score DECIMAL(5,2),
@@ -332,6 +408,7 @@ CREATE TABLE IF NOT EXISTS quiz_attempts (
     INDEX idx_qa_user_topic (user_id, topic),
     INDEX idx_qa_user_created (user_id, created_at),
     INDEX idx_qa_user_course_created (user_id, course_id, created_at),
+    INDEX idx_qa_activity (activity_id),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
     FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE RESTRICT,
     FOREIGN KEY (pack_id) REFERENCES resource_packs(id) ON DELETE SET NULL
@@ -371,8 +448,25 @@ CREATE TABLE IF NOT EXISTS knowledge_documents (
     INDEX idx_kd_course (course_id),
     INDEX idx_kd_course_type (course_id, source_type),
     UNIQUE KEY uk_kd_course_hash (course_id, doc_hash),
+    INDEX idx_kd_parent (parent_id),
     FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- 书籍基本信息（v5.1 — 从教材 MD 中提取，含 AI 生成知识图谱）
+CREATE TABLE IF NOT EXISTS book_info (
+    id CHAR(36) PRIMARY KEY,
+    document_id CHAR(36) NOT NULL COMMENT '关联父文档ID（PDF/MD教材）',
+    title VARCHAR(255) NOT NULL DEFAULT '' COMMENT '书名',
+    author VARCHAR(255) NOT NULL DEFAULT '' COMMENT '作者',
+    introduction TEXT COMMENT '内容简介（内容提要/前言）',
+    toc JSON COMMENT '目录结构 [{title, chapterIndex}]',
+    knowledge_graph JSON COMMENT 'AI生成的AntV G6知识图谱 {nodes, edges}',
+    kp_tree JSON COMMENT 'AI生成的知识树JSON结构 {name, kp_type, children:[...]}',
+    extracted_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '提取时间',
+    FOREIGN KEY (document_id) REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+    UNIQUE KEY uk_document_id (document_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='书籍基本信息';
 
 
 -- ============================================================

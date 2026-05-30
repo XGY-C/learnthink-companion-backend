@@ -6,9 +6,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learnthink.common.dto.profile.ProfileChatRequest;
 import com.learnthink.common.dto.profile.ProfileChatResponse;
 import com.learnthink.common.dto.profile.ProfileVersionItemDto;
-import com.learnthink.core.agent.framework.AgentContext;
+import com.learnthink.core.agent.runtime.AgentContext;
+import com.learnthink.core.agent.impl.BookInfoTool;
+import com.learnthink.core.agent.impl.BookInfoToolCallback;
 import com.learnthink.core.agent.impl.ConversationAgent;
 import com.learnthink.core.config.PromptLoader;
+import com.learnthink.core.domain.entity.BookInfo;
 import com.learnthink.core.domain.entity.Profile;
 import com.learnthink.core.domain.entity.ProfileChat;
 import com.learnthink.core.domain.entity.ProfileVersion;
@@ -76,10 +79,11 @@ public class ProfileServiceImpl implements ProfileService {
     private final ObjectMapper objectMapper;
     private final PromptLoader promptLoader;
     private final ConversationAgent conversationAgent;
+    private final BookInfoTool bookInfoTool;
     private final KpAnchorService kpAnchorService;
     private final ExecutorService profileUpdateExecutor = Executors.newFixedThreadPool(2);
 
-    // Separate small pool for KP anchoring to avoid blocking profile update threads
+    // 独立的 KP 锚定线程池，避免阻塞画像更新线程
     private final ExecutorService kpAnchorExecutor = Executors.newFixedThreadPool(2);
 
     /** Per-(user+course) lock for safe concurrent profile writes. */
@@ -98,6 +102,7 @@ public class ProfileServiceImpl implements ProfileService {
                               ObjectMapper objectMapper,
                               PromptLoader promptLoader,
                               ConversationAgent conversationAgent,
+                              BookInfoTool bookInfoTool,
                               KpAnchorService kpAnchorService) {
         this.profileChatMapper = profileChatMapper;
         this.profileMapper = profileMapper;
@@ -107,6 +112,7 @@ public class ProfileServiceImpl implements ProfileService {
         this.objectMapper = objectMapper;
         this.promptLoader = promptLoader;
         this.conversationAgent = conversationAgent;
+        this.bookInfoTool = bookInfoTool;
         this.kpAnchorService = kpAnchorService;
     }
 
@@ -140,7 +146,10 @@ public class ProfileServiceImpl implements ProfileService {
         AgentContext ctx = AgentContext.builder(chat.getId(), userId)
             .courseId(request.getCourseId())
             .build();
-        
+
+        BookInfoToolCallback bookInfoCallback = new BookInfoToolCallback(bookInfoTool, request.getCourseId());
+        ctx.put("book_info_tool", bookInfoCallback);
+
         log.info("调用 ConversationAgent 生成回复");
         var convResult = conversationAgent.execute(
             new ConversationAgent.ConversationInput(request.getCourseId(), messages, messages.size() / 2 + 1, systemPrompt),
@@ -703,10 +712,37 @@ public class ProfileServiceImpl implements ProfileService {
             }
         }
 
+        String chapterSummary = buildChapterSummary(courseId);
+
         if (courseName != null) {
-            return "课程: " + courseName + profileContext;
+            return "课程: " + courseName + chapterSummary + profileContext;
         }
-        return "课程ID: " + courseId + profileContext + "（需通过对话了解学生的专业和课程）";
+        return "课程ID: " + courseId + chapterSummary + profileContext + "（需通过对话了解学生的专业和课程）";
+    }
+
+    private String buildChapterSummary(String courseId) {
+        try {
+            BookInfo bookInfo = bookInfoTool.resolveBookInfo(courseId);
+            if (bookInfo == null || bookInfo.getToc() == null) return "";
+            List<Map<String, Object>> tocList = objectMapper.readValue(bookInfo.getToc(),
+                new TypeReference<List<Map<String, Object>>>() {});
+            if (tocList == null || tocList.isEmpty()) return "";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < tocList.size() && i < 20; i++) {
+                Map<String, Object> node = tocList.get(i);
+                String title = (String) node.getOrDefault("title", "");
+                if (!title.isEmpty()) {
+                    if (sb.isEmpty()) sb.append("\n章节概览：");
+                    else sb.append(" | ");
+                    sb.append(title);
+                }
+            }
+            if (tocList.size() > 20) sb.append(" | ...");
+            return sb.toString();
+        } catch (Exception e) {
+            log.warn("构建章节概览失败: {}", e.getMessage());
+            return "";
+        }
     }
 
     private String buildProfileContext(String userId, String courseId) {

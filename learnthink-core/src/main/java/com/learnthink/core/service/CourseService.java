@@ -34,4 +34,10 @@ public interface CourseService {
      * 退课
      */
     void leaveCourse(String userId, String courseId);
+
+    /**
+     * 获取课程教材基本信息（书名、作者、简介、目录）
+     * @return textbook info map，无教材数据时返回 null
+     */
+    Map<String, Object> getTextbookInfo(String courseId);
 }

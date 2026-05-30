@@ -1,21 +1,21 @@
 package com.learnthink.core.agent.graph;
 
 /**
- * Observes state graph execution for tracing and monitoring.
+ * 观察状态图执行，用于跟踪和监控。
  */
 public interface GraphObserver<S> {
-    /** Called before a node starts executing */
+    /** 在节点开始执行之前调用 */
     default void onNodeStart(String nodeName, S state, int visitCount) {}
 
-    /** Called after a node completes executing */
+    /** 在节点完成执行之后调用 */
     default void onNodeComplete(String nodeName, S state, long elapsedMs) {}
 
-    /** Called when a conditional router decides the next node */
+    /** 当条件路由器决定下一个节点时调用 */
     default void onRouting(String fromNode, String toNode, S state) {}
 
-    /** Called when the graph completes */
+    /** 当图执行完成时调用 */
     default void onGraphComplete(S finalState, long totalElapsedMs) {}
 
-    /** Called when the graph fails */
+    /** 当图执行失败时调用 */
     default void onGraphError(String nodeName, S state, Throwable error) {}
 }

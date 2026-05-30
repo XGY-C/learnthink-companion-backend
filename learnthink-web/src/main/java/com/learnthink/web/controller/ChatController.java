@@ -25,41 +25,27 @@ public class ChatController {
     private final ChatService chatService;
 
     /**
-     * Start or resume a profile-building chat session for a course.
+     * 开始或恢复课程的画像构建对话会话。
      */
     @PostMapping("/start")
     public Result<ChatStartResponse> startChat(@RequestBody ChatStartRequest request) {
         String userId = UserContextUtil.getCurrentUserId();
-        System.out.println(">>> CHAT START: userId=" + userId + " courseId=" + request.getCourseId());
         log.info("Start chat: userId={}, courseId={}", userId, request.getCourseId());
         ChatStartResponse response = chatService.startChat(userId, request);
         return Result.success(response);
     }
 
     /**
-     * Send a message in an existing chat session, get AI response (non-streaming fallback).
-     */
-    @PostMapping("/{chatId}/send")
-    public Result<ChatSendResponse> sendMessage(@PathVariable String chatId,
-                                                 @RequestBody ChatSendRequest request) {
-        String userId = UserContextUtil.getCurrentUserId();
-        log.info("Send message: userId={}, chatId={}", userId, chatId);
-        ChatSendResponse response = chatService.sendMessage(userId, chatId, request);
-        return Result.success(response);
-    }
-
-    /**
-     * Streaming send — AI response returned token-by-token via SSE.
+     * 流式发送 — AI 响应通过 SSE 逐 token 返回。
      */
     @PostMapping(value = "/{chatId}/send/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamSend(@PathVariable String chatId, @RequestBody ChatSendRequest request) {
         String userId = UserContextUtil.getCurrentUserId();
-        System.out.println(">>> CHAT STREAM: userId=" + userId + " chatId=" + chatId + " content=" + request.getContent());
         log.info("Stream send: userId={}, chatId={}", userId, chatId);
 
         SseEmitter emitter = new SseEmitter(120000L);
 
-        // 减小 SSE 响应缓冲区，确保每个 token 立即 flush
+        // 减小 SSE 响应缓冲区，确保每个 token 立即刷新
         try {
             HttpServletResponse resp = ((ServletRequestAttributes) RequestContextHolder.getRequestAttributes()).getResponse();
             if (resp != null) resp.setBufferSize(512);
@@ -74,7 +60,7 @@ public class ChatController {
                         String msg = error.getMessage() != null ? error.getMessage() : "stream error";
                         emitter.send(SseEmitter.event().name("error").data(msg));
                     } catch (IOException ignored) {
-                        // ignore
+                        // 忽略
                     } finally {
                         emitter.complete();
                     }
@@ -89,7 +75,7 @@ public class ChatController {
     }
 
     /**
-     * Get all messages for a chat session.
+     * 获取对话会话的所有消息。
      */
     @GetMapping("/{chatId}/messages")
     public Result<ChatMessagesResponse> getMessages(@PathVariable String chatId) {
@@ -99,7 +85,7 @@ public class ChatController {
     }
 
     /**
-     * List chat sessions for the current user in a course.
+     * 列出当前用户在课程中的对话会话。
      */
     @GetMapping("/sessions")
     public Result<List<ChatSessionDto>> getSessions(@RequestParam String courseId) {
@@ -109,7 +95,7 @@ public class ChatController {
     }
 
     /**
-     * Delete a chat session.
+     * 删除对话会话。
      */
     @DeleteMapping("/{chatId}")
     public Result<Void> deleteSession(@PathVariable String chatId) {
@@ -119,7 +105,7 @@ public class ChatController {
     }
 
     /**
-     * Manually trigger profile analysis from chat history.
+     * 手动触发从对话历史中分析画像。
      */
     @PostMapping("/{chatId}/analyze")
     public Result<ProfileSummaryDto> analyzeProfile(@PathVariable String chatId) {
@@ -137,7 +123,7 @@ public class ChatController {
                 emitter.send(SseEmitter.event().name("chunk").data(event.getData()));
             }
         } catch (IOException e) {
-            // Client disconnected — ignore
+            // 客户端断连，忽略
         }
     }
 }

@@ -69,7 +69,9 @@ public class PlanResponse {
         private String title;
         private String description;
         private List<String> requires;
+        @Deprecated
         private ResourceDto resource;
+        private List<ResourceDto> resources;
         private Integer estimatedMinutes;
         private Integer order;
         private CompletionCriteriaDto completionCriteria;

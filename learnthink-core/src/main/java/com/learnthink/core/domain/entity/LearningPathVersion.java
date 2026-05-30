@@ -21,7 +21,7 @@ public class LearningPathVersion {
 
     private Integer version;
 
-    private Integer generatedFromProfileVersion;
+    private String generatedFromProfileVersionId;
 
     /**
      * nodes/edges/adjustments

@@ -9,6 +9,7 @@ import com.learnthink.core.domain.entity.ResourceItem;
 import com.learnthink.core.domain.entity.ResourcePack;
 import com.learnthink.core.repository.ResourceItemMapper;
 import com.learnthink.core.repository.ResourcePackMapper;
+import com.learnthink.core.service.VideoRenderPoller;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
@@ -23,6 +24,7 @@ public class ResourceController {
     private final ResourcePackMapper resourcePackMapper;
     private final ResourceItemMapper resourceItemMapper;
     private final ObjectMapper objectMapper;
+    private final VideoRenderPoller videoRenderPoller;
 
     @GetMapping("/resources/packs")
     public Result<List<Map<String, Object>>> listPacks(@RequestParam String courseId) {
@@ -71,7 +73,7 @@ public class ResourceController {
             return Result.error("RESOURCE_NOT_FOUND");
         }
 
-        // Reset status to pending for regeneration
+        // 重置状态为 pending 以触发重新生成
         item.setStatus("pending");
         item.setReviewStatus("pending");
         resourceItemMapper.updateById(item);
@@ -82,6 +84,11 @@ public class ResourceController {
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> toResourceDto(ResourceItem item) {
+        // 兜底：正在渲染中的视频，按需查询 Manim API 更新 URL
+        videoRenderPoller.resolveVideoUrl(item);
+        // resolve 可能更新了 DB，重新加载确保拿到最新数据
+        item = resourceItemMapper.selectById(item.getId());
+
         Map<String, Object> dto = new HashMap<>();
         dto.put("id", item.getId());
         dto.put("type", item.getType());
@@ -100,7 +107,18 @@ public class ResourceController {
                     new TypeReference<Map<String, Object>>() {});
                 dto.put("qualityScore", meta.getOrDefault("quality_score", 75));
                 if (meta.containsKey("content")) {
-                    dto.put("content", meta.get("content"));
+                    Object contentObj = meta.get("content");
+                    dto.put("content", contentObj);
+                    // 视频类型：从嵌套 JSON 中提取 videoUrl 作为顶层字段
+                    if ("video".equals(item.getType()) && contentObj instanceof String) {
+                        try {
+                            Map<String, Object> inner = objectMapper.readValue((String) contentObj,
+                                new TypeReference<Map<String, Object>>() {});
+                            if (inner.containsKey("videoUrl")) {
+                                dto.put("videoUrl", inner.get("videoUrl"));
+                            }
+                        } catch (Exception ignored) { /* JSON 解析失败，忽略 */ }
+                    }
                 }
             }
         } catch (Exception e) {

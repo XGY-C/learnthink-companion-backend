@@ -1,6 +1,6 @@
 package com.learnthink.core.agent.impl;
 
-import com.learnthink.core.agent.framework.*;
+import com.learnthink.core.agent.runtime.*;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,31 +10,29 @@ import java.time.Instant;
 import java.util.Map;
 
 /**
- * Master agent — globally routes and schedules all sub-agents.
+ * 主控 Agent — 全局路由和调度所有子 Agent
  *
- * <h3>Design principles (from architecture doc §3):</h3>
+ * <h3>设计原则（参见架构文档 §3）：</h3>
  * <ul>
- *   <li><b>Rule-driven, not LLM-driven</b>: routing decisions are deterministic (read Context → match edge conditions).
- *       LLM routing would add latency, token cost, and non-determinism.</li>
- *   <li><b>Flow arbitration, not content arbitration</b>: OrchestratorAgent decides WHO runs next, not WHAT the answer is.
- *       Content disputes are resolved by "send back to upstream" rather than "I'll judge".</li>
- *   <li><b>Lightweight</b>: pure in-memory operations, no LLM calls. Actual latency < 5ms.</li>
+ *   <li><b>规则驱动，非LLM驱动</b>：路由决策是确定性的（读取 Context → 匹配边条件）。
+ *       LLM 路由会带来延迟、Token 消耗和不确定性。</li>
+ *   <li><b>仲裁流程，而非仲裁内容</b>：OrchestratorAgent 决定下一步谁来执行，而非答案是什么。
+ *       内容争议通过"送回上游"而非"我来评判"来解决。</li>
+ *   <li><b>轻量</b>：纯内存操作，无 LLM 调用。实际延迟 &lt; 5ms。</li>
  * </ul>
  *
- * <h3>Autonomy level: L3 (Judgment)</h3>
- * <p>OrchestratorAgent autonomously judges whether preconditions are met and decides flow direction.</p>
+ * <h3>自治级别：L3（判断）</h3>
+ * <p>OrchestratorAgent 自主判断前置条件是否满足并决定流程方向。</p>
  */
 @Component
-public class OrchestratorAgent implements Agent<ResourceGenerationState, ResourceGenerationState> {
+public class OrchestratorAgent {
 
     private static final Logger log = LoggerFactory.getLogger(OrchestratorAgent.class);
 
-    @Override
     public String name() {
         return "OrchestratorAgent";
     }
 
-    @Override
     public AgentResult<ResourceGenerationState> execute(ResourceGenerationState state, AgentContext ctx) {
         log.info("=== OrchestratorAgent START === stage={}, status={}", state.stage, state.status);
         Instant start = Instant.now();
@@ -42,9 +40,9 @@ public class OrchestratorAgent implements Agent<ResourceGenerationState, Resourc
         ctx.observation().onPrompt(name(), "Route decision for stage=" + state.stage,
             Map.of("status", state.status, "percent", state.percent));
 
-        // OrchestratorAgent does not modify state — it only records the routing decision.
-        // The actual routing is performed by StateGraph's conditional edges.
-        // This agent exists to make the routing logic visible and traceable.
+        // OrchestratorAgent 不修改状态——仅记录路由决策
+        // 实际路由由 StateGraph 的条件边执行
+        // 该 Agent 的存在仅为了使路由逻辑可见且可追踪
 
         String decision = determineNextPhase(state, ctx);
         log.info("Routing decision: {} -> {}", state.stage, decision);
@@ -63,19 +61,19 @@ public class OrchestratorAgent implements Agent<ResourceGenerationState, Resourc
     }
 
     /**
-     * Deterministic routing logic — reads Context, matches conditions, returns next phase.
-     * This is the "brain" of the multi-agent system, but it's a rule engine, not an LLM.
+     * 确定性路由逻辑——读取 Context、匹配条件、返回下一阶段
+     * <p>这是多 Agent 系统的"大脑"，但它是规则引擎，而非 LLM。</p>
      */
     private String determineNextPhase(ResourceGenerationState state, AgentContext ctx) {
         String stage = state.stage != null ? state.stage : "PENDING";
         String status = state.status != null ? state.status : "PENDING";
 
-        // Terminal states — no further routing
+        // 终态——不再继续路由
         if ("SUCCEEDED".equals(status) || "FAILED".equals(status) || "CANCELLED".equals(status)) {
             return "END";
         }
 
-        // Entry point
+        // 入口点
         if ("PENDING".equals(status) || "PENDING".equals(stage)) {
             return "PROFILING";
         }
@@ -96,7 +94,7 @@ public class OrchestratorAgent implements Agent<ResourceGenerationState, Resourc
             case "PLANNING" -> "GENERATING";
             case "GENERATING" -> "REVIEWING";
             case "REVIEWING" -> {
-                // Check context for review results
+                // 检查上下文中的审查结果
                 @SuppressWarnings("unchecked")
                 var reviewResults = (Map<String, ResourceGenerationState.ReviewResult>)
                     ctx.memory().get("reviewResults");
@@ -111,9 +109,9 @@ public class OrchestratorAgent implements Agent<ResourceGenerationState, Resourc
                 int reviewRetryCount = ctx.get("reviewRetryCount") != null ?
                     (int) ctx.get("reviewRetryCount") : 0;
                 if (reviewRetryCount >= 2) {
-                    yield "PUBLISHING"; // max retries exhausted
+                    yield "PUBLISHING"; // 最大重试次数已耗尽
                 }
-                yield "GENERATING"; // regenerate rejected
+                yield "GENERATING"; // 重新生成被拒绝的内容
             }
             case "PUBLISHING" -> "END";
             case "FALLBACK" -> "GENERATING";
@@ -121,6 +119,5 @@ public class OrchestratorAgent implements Agent<ResourceGenerationState, Resourc
         };
     }
 
-    @Override
     public boolean isRetryable() { return false; }
 }

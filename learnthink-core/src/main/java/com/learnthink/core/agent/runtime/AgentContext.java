@@ -1,11 +1,11 @@
-package com.learnthink.core.agent.framework;
+package com.learnthink.core.agent.runtime;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Context passed to every agent during execution.
- * Contains task identity, shared memory (the "blackboard"), budget, and observability hooks.
+ * Agent 执行上下文
+ * <p>包含任务标识、共享内存（"黑板"）、Token 预算和可观测性钩子。</p>
  */
 public class AgentContext {
     private final String taskId;
@@ -26,7 +26,16 @@ public class AgentContext {
         this.cancelled = builder.cancelled;
     }
 
-    // -- Memory access (the blackboard) --
+    // -- 内存访问（黑板）--
+
+    public <T> T get(String key, Class<T> type) {
+        Object value = memory.get(key);
+        if (value == null) return null;
+        if (type.isInstance(value)) return type.cast(value);
+        throw new ClassCastException(
+            "Blackboard key '" + key + "' is " + value.getClass().getSimpleName()
+            + ", not " + type.getSimpleName());
+    }
 
     @SuppressWarnings("unchecked")
     public <T> T get(String key) { return (T) memory.get(key); }
@@ -35,7 +44,7 @@ public class AgentContext {
 
     public boolean has(String key) { return memory.containsKey(key); }
 
-    // -- Getters --
+    // -- 字段访问器 --
 
     public String taskId() { return taskId; }
     public String userId() { return userId; }
@@ -58,7 +67,7 @@ public class AgentContext {
         private TokenBudget budget;
         private boolean cancelled;
 
-        private Builder(String taskId, String userId) {
+        public Builder(String taskId, String userId) {
             this.taskId = taskId;
             this.userId = userId;
         }

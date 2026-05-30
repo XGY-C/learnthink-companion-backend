@@ -7,8 +7,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * Video generation AI configuration.
- * Centralizes ChatClient beans with their specific system prompts.
+ * 视频生成 AI 配置
+ * <p>集中管理 ChatClient Bean 及其特定的系统提示词。</p>
  */
 @Configuration
 @RequiredArgsConstructor
@@ -17,8 +17,8 @@ public class VideoAIConfig {
     private final PromptLoader promptLoader;
     
     /**
-     * Video script generator — converts project brief to structured teaching script.
-     * Uses generation preset for creative output (temperature=0.8).
+     * 视频脚本生成器——将项目简介转换为结构化教学脚本
+     * <p>使用 generation 预设进行创意输出（temperature=0.8）。</p>
      */
     @Bean("videoScriptChatClient")
     public ChatClient videoScriptChatClient(
@@ -30,8 +30,8 @@ public class VideoAIConfig {
     }
     
     /**
-     * Scene JSON generator — converts script to Manim scene specifications.
-     * Uses generation preset for structured JSON output.
+     * 场景 JSON 生成器——将脚本转换为 Manim 场景规范
+     * <p>使用 generation 预设进行结构化 JSON 输出。</p>
      */
     @Bean("videoSceneChatClient")
     public ChatClient videoSceneChatClient(

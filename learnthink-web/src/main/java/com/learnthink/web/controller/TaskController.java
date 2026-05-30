@@ -79,11 +79,11 @@ public class TaskController {
             item.put("startedAt", task.getStartedAt() != null ? task.getStartedAt().toString() : null);
             item.put("finishedAt", task.getFinishedAt() != null ? task.getFinishedAt().toString() : null);
 
-            // Parse resource types from requestedResourceTypes JSON
+            // 从 requestedResourceTypes JSON 中解析资源类型
             List<String> resourceTypes = parseResourceTypes(task.getRequestedResourceTypes());
             item.put("resourceTypes", resourceTypes);
 
-            // Override stage/percent with Redis hot data for running tasks
+            // 针对运行中的任务，用 Redis 热数据覆盖 stage/percent
             if ("RUNNING".equals(task.getStatus())) {
                 Map<Object, Object> redisStatus = redis.opsForHash().entries("task:" + task.getId() + ":status");
                 if (!redisStatus.isEmpty()) {
@@ -92,7 +92,7 @@ public class TaskController {
                 }
             }
 
-            // Look up pack and resource counts for completed tasks
+            // 查询已完成任务的资源包和资源数量
             if ("SUCCEEDED".equals(task.getStatus())) {
                 try {
                     var pack = resourcePackMapper.selectOne(
@@ -154,7 +154,7 @@ public class TaskController {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("taskId", taskId);
 
-        // Always query MySQL for authoritative state (status, stage, percent, error, pack_id)
+        // 始终从 MySQL 查询权威状态（status, stage, percent, error, pack_id）
         Task task = taskMapper.selectById(taskId);
         if (task == null) {
             return Result.error("TASK_NOT_FOUND", "Task not found");
@@ -169,7 +169,7 @@ public class TaskController {
         result.put("error_code", task.getErrorCode());
         result.put("error_message", task.getErrorMessage());
 
-        // Override with Redis hot data if available (more current stage/progress)
+        // 如有 Redis 热数据则覆盖（更实时的 stage/progress）
         Map<Object, Object> redisStatus = redis.opsForHash().entries("task:" + taskId + ":status");
         if (!redisStatus.isEmpty()) {
             result.put("stage", redisStatus.getOrDefault("stage", result.get("stage")));
@@ -177,7 +177,7 @@ public class TaskController {
             result.put("updated_at", redisStatus.getOrDefault("updated_at", ""));
         }
 
-        // Look up resource pack for completed tasks
+        // 查询已完成任务的资源包
         try {
             var pack = resourcePackMapper.selectOne(
                 new LambdaQueryWrapper<ResourcePack>()

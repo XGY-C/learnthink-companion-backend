@@ -122,19 +122,19 @@ class ResourceGenerationStateTest {
         assertTrue(progress.hasMore());
         assertFalse(progress.allDone());
 
-        // Advance to sub-topic 1
+        // 前进到子主题 1
         var p2 = progress.advance();
         assertEquals(1, p2.currentIndex());
         assertTrue(p2.hasMore());
         assertTrue(p2.completedIndices().contains(0));
 
-        // Advance to sub-topic 2
+        // 前进到子主题 2
         var p3 = p2.advance();
         assertEquals(2, p3.currentIndex());
         assertTrue(p3.completedIndices().contains(0));
         assertTrue(p3.completedIndices().contains(1));
 
-        // Advance past last
+        // 前进到最后一个之后
         var p4 = p3.advance();
         assertEquals(3, p4.currentIndex());
         assertFalse(p4.hasMore());

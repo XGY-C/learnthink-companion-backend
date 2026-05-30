@@ -2,7 +2,7 @@ package com.learnthink.core.agent.impl;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.learnthink.core.agent.framework.AgentTool;
+import com.learnthink.core.agent.runtime.AgentTool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -10,15 +10,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * RAG knowledge base retrieval as a shared AgentTool.
- *
- * <p>Any Agent with this tool in its registry can independently search the knowledge base.
- * Permission model (enforced at Agent registration time):
+ * RAG 知识库检索工具（共享 AgentTool）
+ * <p>任何注册了该工具的 Agent 都可以独立搜索知识库。
+ * 权限模型（在 Agent 注册时强制）：
  * <ul>
- *   <li>EvidenceRetriever — READ_WRITE (primary retrieval + supplementary retrieval)</li>
- *   <li>ContentReviewer — READ (fact-checking: targeted retrieval for specific claims)</li>
- *   <li>TutorAgent — READ (Q&A: retrieve relevant materials to support answers)</li>
- *   <li>ResourceGenerator — READ (optional: self-retrieve specific details during generation)</li>
+ *   <li>EvidenceRetriever — READ_WRITE（主检索 + 补充检索）</li>
+ *   <li>ContentReviewer — READ（事实核查：针对特定声明的定向检索）</li>
+ *   <li>TutorAgent — READ（问答：检索相关材料以支持回答）</li>
+ *   <li>ResourceGenerator — READ（可选：生成过程中自行检索具体细节）</li>
  * </ul>
  */
 public class RagTool implements AgentTool {
@@ -66,7 +65,7 @@ public class RagTool implements AgentTool {
             Map<String, Object> args = mapper.readValue(jsonArgs, Map.class);
             String courseId = (String) args.get("course_id");
             String query = (String) args.get("query");
-            int k = args.containsKey("k") ? ((Number) args.get("k")).intValue() : 8;
+            int k = args.containsKey("k") ? ((Number) args.get("k")).intValue() : 200;
             String topic = (String) args.getOrDefault("topic", null);
 
             log.info("RagTool executing retrieve - courseId: {}, query: '{}', k: {}, topic: {}", 
@@ -86,7 +85,7 @@ public class RagTool implements AgentTool {
         }
     }
 
-    /** Convenience: typed retrieval for Java callers */
+    /** 便捷方法：为 Java 调用者提供的类型化检索 */
     public EvidenceRetriever.RagClient.RagResponse retrieve(String courseId, String query, String topic, int k) {
         log.info("RagTool.retrieve called - courseId: {}, query: '{}', k: {}, topic: {}", 
             courseId, query, k, topic);

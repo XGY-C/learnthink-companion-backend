@@ -12,16 +12,14 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 /**
- * Spring AI {@link ToolCallback} wrapper for RAG knowledge base retrieval.
+ * Spring AI {@link ToolCallback} 包装器——用于 RAG 知识库检索
  *
- * <p>Registered per-call (not as a Spring bean) so it only appears in the
- * conversation LLM's tool set — not in sufficiency evaluation, intent
- * detection, or other internal LLM calls.
+ * <p>按次注册（不作为 Spring Bean），因此仅出现在对话 LLM 的工具集中——
+ * 不会出现在画像充分性评估、意图检测或其他内部 LLM 调用中。
  *
- * <p>When the conversation LLM decides to call this tool during streaming,
- * the {@code onCall} and {@code onResult} hooks fire synchronously during
- * tool execution. Callers use these hooks to emit SSE thought events into
- * the streaming response in real time.
+ * <p>当对话 LLM 在流式处理中决定调用此工具时，
+ * {@code onCall} 和 {@code onResult} 钩子会在工具执行期间同步触发。
+ * 调用方使用这些钩子将 SSE 思考事件实时发射到流式响应中。
  */
 public class RagToolCallback implements ToolCallback {
 
@@ -34,10 +32,10 @@ public class RagToolCallback implements ToolCallback {
     private final Consumer<String> onResult;
 
     /**
-     * @param ragTool  shared RAG retrieval tool
-     * @param courseId course UUID, injected at construction time
-     * @param onCall   runs before retrieval (emit RETRIEVE thought), may be null
-     * @param onResult runs after retrieval with JSON result string (emit RAG thought), may be null
+     * @param ragTool  共享的 RAG 检索工具
+     * @param courseId 课程 UUID，构造时注入
+     * @param onCall   检索前执行（发射 RETRIEVE 思考事件），可为 null
+     * @param onResult 检索后执行，传入 JSON 结果字符串（发射 RAG 思考事件），可为 null
      */
     public RagToolCallback(RagTool ragTool, String courseId,
                             List<Runnable> onCall,
