@@ -23,7 +23,6 @@ import org.springframework.web.client.RestTemplate;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -95,101 +94,57 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
         sceneJson = mergeFinalJson(script, sceneJson, ttsResults);
         log.info("合并后的分镜脚本为：{}", sceneJson);
         
-        // 6.异步提交视频渲染任务，立即返回任务ID
-        String taskId = submitVideoRenderTaskAsync(sceneJson, projectBrief);
+        // 6.同步提交视频渲染任务（Python 侧已改为异步，立即返回 taskId）
+        String taskId = submitVideoRenderTask(sceneJson, projectBrief);
         log.info("视频渲染任务已提交，taskId: {}", taskId);
-        
-        // 7.返回包含任务ID的临时响应
+
+        // 7.返回包含真实 taskId 的响应（videoUrl 由后台轮询填充）
         ExplanationVideoDTO ev = new ExplanationVideoDTO();
         ev.setTitle(projectBrief.getTopic());
         ev.setDuration(projectBrief.getTargetDurationSec());
-        ev.setVideoUrl("task:" + taskId); // 使用 task: 前缀标识异步任务
+        ev.setManimTaskId(taskId);
+        ev.setVideoUrl(null); // 渲染完成后由轮询更新
         return ev;
     }
 
     /**
-     * 异步提交视频渲染任务，立即返回taskId
+     * 同步提交视频渲染任务到 Manim API（Python 侧已改为异步，秒级返回）。
      * @param sceneJson 分镜脚本
      * @param projectBrief 项目简介
-     * @return 任务ID
+     * @return 真实的 Manim 任务 ID
      */
-    private String submitVideoRenderTaskAsync(String sceneJson, ProjectBrief projectBrief) {
+    private String submitVideoRenderTask(String sceneJson, ProjectBrief projectBrief) {
         try {
-            // 1. 构建请求体
             ManimVideoRenderRequest request = new ManimVideoRenderRequest();
             request.setProjectBrief(projectBrief);
-            
-            // 2. 解析并转换timedScenes(复用原有逻辑)
             Object timedScenes = buildTimedScenes(sceneJson);
             request.setTimedScenes(timedScenes);
-            
-            // 3. 发送异步HTTP请求
+
             String url = manimApiBaseUrl + "/v1/video/render";
-            log.info("异步调用Manim视频API: {}", url);
-            
+            log.info("提交Manim视频渲染任务: {}", url);
+
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
-            
             String requestBody = objectMapper.writeValueAsString(request);
             HttpEntity<String> entity = new HttpEntity<>(requestBody, headers);
-            
-            // 使用异步RestTemplate或CompletableFuture
-            CompletableFuture<ManimVideoRenderResponse> future = CompletableFuture.supplyAsync(() -> {
-                try {
-                    log.info("========== 开始异步视频渲染请求 ==========");
-                    log.info("请求URL: {}", url);
-                    log.info("请求体长度: {} bytes", requestBody.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
-                    
-                    ResponseEntity<ManimVideoRenderResponse> response = restTemplate.postForEntity(
-                        url, entity, ManimVideoRenderResponse.class
-                    );
-                    
-                    log.info("Manim API响应状态码: {}", response.getStatusCode());
-                    log.info("Manim API响应头: {}", response.getHeaders());
-                    
-                    ManimVideoRenderResponse renderResponse = response.getBody();
-                    if (renderResponse != null) {
-                        log.info("视频渲染响应 - taskId: {}, success: {}, status: {}", 
-                            renderResponse.getTaskId(), 
-                            renderResponse.getSuccess(), 
-                            renderResponse.getStatus());
-                        
-                        if (Boolean.TRUE.equals(renderResponse.getSuccess())) {
-                            log.info("✅ 视频渲染任务提交成功");
-                            log.info("   - taskId: {}", renderResponse.getTaskId());
-                            log.info("   - videoUrl: {}", renderResponse.getVideoUrl());
-                            log.info("   - ossObjectKey: {}", renderResponse.getOssObjectKey());
-                            log.info("   - message: {}", renderResponse.getMessage());
-                            log.info("   - attempts: {}", renderResponse.getAttempts());
-                            log.info("   - taskDir: {}", renderResponse.getTaskDir());
-                        } else {
-                            log.error("❌ 视频渲染任务提交失败");
-                            log.error("   - message: {}", renderResponse.getMessage());
-                            log.error("   - attempts: {}", renderResponse.getAttempts());
-                        }
-                    } else {
-                        log.warn("⚠️ Manim API返回body为null");
-                    }
-                    
-                    log.info("========================================");
-                    return renderResponse;
-                } catch (Exception e) {
-                    log.error("========== ❌ 异步视频渲染任务失败 ==========");
-                    log.error("异常类型: {}", e.getClass().getName());
-                    log.error("异常消息: {}", e.getMessage());
-                    log.error("堆栈跟踪:", e);
-                    log.error("========================================");
-                    throw new RuntimeException(e);
-                }
-            });
-            
-            // 立即返回，不等待结果
-            String tempTaskId = "pending_" + System.currentTimeMillis();
-            log.info("异步视频渲染任务已提交，临时taskId: {}", tempTaskId);
-            return tempTaskId;
-            
+
+            ResponseEntity<ManimVideoRenderResponse> response = restTemplate.postForEntity(
+                url, entity, ManimVideoRenderResponse.class
+            );
+
+            ManimVideoRenderResponse renderResponse = response.getBody();
+            if (renderResponse == null || renderResponse.getTaskId() == null) {
+                log.error("Manim API 返回异常: {}", response.getStatusCode());
+                throw new BusinessException(ErrorCode.VIDEO_GENERATION_FAILED, "提交视频任务失败：未返回 taskId");
+            }
+
+            log.info("视频渲染任务提交成功: taskId={}, status={}", renderResponse.getTaskId(), renderResponse.getStatus());
+            return renderResponse.getTaskId();
+
+        } catch (BusinessException e) {
+            throw e;
         } catch (Exception e) {
-            log.error("提交异步视频渲染任务异常", e);
+            log.error("提交视频渲染任务异常", e);
             throw new BusinessException(ErrorCode.VIDEO_GENERATION_FAILED, "提交任务失败: " + e.getMessage());
         }
     }

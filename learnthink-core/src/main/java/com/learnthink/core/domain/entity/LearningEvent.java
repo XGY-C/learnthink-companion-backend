@@ -18,7 +18,12 @@ public class LearningEvent {
     private String userId;
 
     /**
-     * resource_opened/quiz_submitted/node_completed
+     * 可为空：非课程特定事件（如登录）不关联课程
+     */
+    private String courseId;
+
+    /**
+     * resource_opened/quiz_submitted/node_completed/resource_shared
      */
     private String eventType;
 

@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
@@ -59,7 +60,7 @@ public class ResourceItem {
     /**
      * 质量评分 0.00~100.00
      */
-    private Double qualityScore;
+    private BigDecimal qualityScore;
 
     /**
      * approved/rejected/pending
@@ -70,6 +71,8 @@ public class ResourceItem {
 
     /** Sub-topic index (0 = topic-level, 1..N = sub-topic) */
     private Integer subtopicIndex;
+
+    private LocalDateTime deletedAt;
 
     private LocalDateTime createdAt;
 

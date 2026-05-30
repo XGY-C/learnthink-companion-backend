@@ -10,13 +10,13 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 
 /**
- * Compiled executor for a {@link StateGraph}. Supports:
+ * {@link StateGraph} 的编译执行器。支持：
  * <ul>
- *   <li>Sequential node execution with state transformation</li>
- *   <li>Conditional routing — each node can decide where to go next via router functions</li>
- *   <li>Cycle support — nodes can be revisited up to {@code maxCycles} times (enables feedback loops)</li>
- *   <li>Observability — pluggable observers for tracing each step</li>
- *   <li>Cancellation — cancellable via external signal</li>
+ *   <li>带状态转换的顺序节点执行</li>
+ *   <li>条件路由 — 每个节点可通过 router 函数决定下一步去向</li>
+ *   <li>循环支持 — 节点最多可被重新访问 {@code maxCycles} 次（支持反馈循环）</li>
+ *   <li>可观察性 — 可插拔的观察器用于追踪每一步</li>
+ *   <li>取消 — 可通过外部信号取消</li>
  * </ul>
  */
 public class GraphRunner<S> {
@@ -42,12 +42,12 @@ public class GraphRunner<S> {
         return this;
     }
 
-    /** Execute the graph, returning the final state */
+    /** 执行图，返回最终状态 */
     public S execute(S initialState) {
         return execute(initialState, null);
     }
 
-    /** Execute the graph on a given executor, returning the final state */
+    /** 在指定的执行器上执行图，返回最终状态 */
     public S execute(S initialState, ExecutorService executor) {
         Instant start = Instant.now();
         S state = initialState;
@@ -66,7 +66,7 @@ public class GraphRunner<S> {
                 return state;
             }
 
-            // Cycle protection
+            // 循环保护
             int visits = visitCount.merge(currentNode, 1, Integer::sum);
             if (visits > graph.getMaxCycles()) {
                 log.warn("Node '{}' visited {} times, exceeding max cycles. Breaking.", currentNode, visits);
@@ -98,7 +98,7 @@ public class GraphRunner<S> {
                 throw new GraphException(currentNode, e.getMessage(), e);
             }
 
-            // Determine next node
+            // 确定下一个节点
             String nextNode = resolveNextNode(currentNode, state);
             if (nextNode != null) {
                 notifyRouting(currentNode, nextNode, state);
@@ -112,12 +112,12 @@ public class GraphRunner<S> {
         return state;
     }
 
-    /** Cancel graph execution at the next node boundary */
+    /** 在下一个节点边界处取消图执行 */
     public void cancel() {
         this.cancelled = true;
     }
 
-    // -- Private helpers --
+    // -- 私有辅助方法 --
 
     private S executeWithTimeout(GraphNode<S> node, S state, ExecutorService executor) throws Exception {
         if (executor != null) {
@@ -132,17 +132,17 @@ public class GraphRunner<S> {
 
         for (GraphEdge<S> edge : outEdges) {
             if (edge.isConditional()) {
-                // Use the router function to determine next node from state
+                // 使用 router 函数根据状态确定下一个节点
                 String next = edge.router().apply(state);
                 if (next != null && !next.isEmpty()) {
                     return next;
                 }
             } else {
-                // Unconditional transition
+                // 无条件转移
                 return edge.to();
             }
         }
-        return null; // Terminal node
+        return null; // 终止节点
     }
 
     private void notifyNodeStart(String name, S state, int visitCount) {

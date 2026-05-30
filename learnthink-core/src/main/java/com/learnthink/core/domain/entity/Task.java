@@ -16,8 +16,14 @@ public class Task {
     @TableId(type = IdType.ASSIGN_UUID)
     private String id;
 
+    /**
+     * 用户ID
+     */
     private String userId;
 
+    /**
+     * 课程ID
+     */
     private String courseId;
 
     /**
@@ -25,6 +31,9 @@ public class Task {
      */
     private String taskType;
 
+    /**
+     * 主题/话题
+     */
     private String topic;
 
     /**
@@ -49,17 +58,38 @@ public class Task {
      */
     private String status;
 
+    /**
+     * 任务阶段
+     */
     private String stage;
 
+    /**
+     * 完成百分比
+     */
     private Integer percent;
 
+    /**
+     * 错误码
+     */
     private String errorCode;
 
+    /**
+     * 错误信息
+     */
     private String errorMessage;
 
+    /**
+     * 创建时间
+     */
     private LocalDateTime createdAt;
 
+    /**
+     * 开始时间
+     */
     private LocalDateTime startedAt;
 
+    /**
+     * 完成时间
+     */
     private LocalDateTime finishedAt;
 }

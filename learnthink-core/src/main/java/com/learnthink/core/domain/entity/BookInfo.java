@@ -28,5 +28,11 @@ public class BookInfo {
     /** JSON: [{"title":"第1章 xxx","chapterIndex":1}, ...] */
     private String toc;
 
+    /** AntV G6 知识图谱 JSON: {nodes: [...], edges: [...]} */
+    private String knowledgeGraph;
+
+    /** AI 生成的知识点树 JSON 快照: {name, kp_type, children:[...]} */
+    private String kpTree;
+
     private LocalDateTime extractedAt;
 }

@@ -1,7 +1,7 @@
 package com.learnthink.core.agent.impl;
 
-import com.learnthink.core.agent.framework.AgentContext;
-import com.learnthink.core.agent.framework.AgentResult;
+import com.learnthink.core.agent.runtime.AgentContext;
+import com.learnthink.core.agent.runtime.AgentResult;
 import com.learnthink.core.agent.impl.generators.*;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import org.slf4j.Logger;
@@ -13,16 +13,16 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Orchestrates generation by delegating to type-specialized sub-generators.
+ * 资源生成编排器——将生成任务委派给类型特化的子生成器
  *
  * <pre>
  *   ResourceGenerator
- *     ├── DocumentGenerator   (explanatory articles)
- *     ├── ExerciseGenerator   (quizzes & practice problems)
- *     ├── ReadingGenerator    (extended reading lists)
- *     ├── CodeGenerator       (code examples & walkthroughs)
- *     ├── MindmapGenerator    (concept maps in JSON)
- *     └── VideoGenerator      (explanation videos via TTS + Manim rendering)
+ *     ├── DocumentGenerator   （讲解性文章）
+ *     ├── ExerciseGenerator   （习题与练习）
+ *     ├── ReadingGenerator    （扩展阅读列表）
+ *     ├── CodeGenerator       （代码示例与演练）
+ *     ├── MindmapGenerator    （JSON 格式概念图）
+ *     └── VideoGenerator      （讲解视频，通过 TTS + Manim 渲染）
  * </pre>
  */
 @Component
@@ -51,9 +51,9 @@ public class ResourceGenerator {
     }
 
     /**
-     * Generate content for a specific resource type, delegating to the specialized sub-generator.
+     * 为指定资源类型生成内容，委派给特化的子生成器
      *
-     * @param reviewFeedback if regenerating after a review rejection, the reviewer's feedback
+     * @param reviewFeedback 审查拒绝后重新生成时的审查反馈
      */
     public AgentResult<ResourceGenerationState.GeneratedContent> generate(
         ResourceGenerationState.ResourcePlanItem planItem,
@@ -96,7 +96,7 @@ public class ResourceGenerator {
     }
 
     /**
-     * Targeted revision based on review feedback. Delegates to the specialized sub-generator's revise().
+     * 基于审查反馈进行定向修订。委派给特化子生成器的 revise() 方法。
      */
     public AgentResult<ResourceGenerationState.GeneratedContent> revise(
         ResourceGenerationState.ResourcePlanItem planItem,
@@ -122,8 +122,8 @@ public class ResourceGenerator {
     }
 
     /**
-     * Whether the given resource type requires evidence sources.
-     * Delegates to the type's {@link TypeGenerator#requiresSourceCoverage()}.
+     * 判断指定资源类型是否需要证据来源
+     * 委派给 {@link TypeGenerator#requiresSourceCoverage()}。
      */
     boolean requiresSourceCoverage(String type) {
         TypeGenerator gen = generators.get(type);

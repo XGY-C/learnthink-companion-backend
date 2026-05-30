@@ -1,42 +1,41 @@
 package com.learnthink.core.agent.impl.generators;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.learnthink.core.agent.framework.AgentContext;
+import com.learnthink.core.agent.impl.AutonomousGenerator;
+import com.learnthink.core.agent.impl.RagTool;
+import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import com.learnthink.core.domain.dto.ExplanationVideoDTO;
 import com.learnthink.core.domain.dto.ProjectInput;
 import com.learnthink.core.service.ExplanationVideoService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
 
 /**
- * Generates explanation videos by delegating to {@link ExplanationVideoService}.
- *
- * <p>Unlike text-based generators that produce content via LLM directly,
- * this generator invokes the full video production pipeline:
- * <ol>
- *   <li>AI script generation</li>
- *   <li>AI scene storyboard generation</li>
- *   <li>Parallel TTS audio synthesis</li>
- *   <li>Manim rendering via external API</li>
- * </ol>
- *
- * <p>The generated content is stored as JSON containing the video URL and metadata,
- * enabling the frontend to embed or link the rendered video directly.
+ * 讲解视频生成器——将视频生成委派给 {@link ExplanationVideoService}
+ * <p>为保持与其他生成器的类型一致性而继承 {@link AutonomousGenerator}，
+ * 但跳过了自主 LLM 循环——视频制作使用专用的多步骤流水线
+ *（脚本 → 场景 → TTS → Manim 渲染）。</p>
  */
 @Component
-public class VideoGenerator implements TypeGenerator {
+public class VideoGenerator extends AutonomousGenerator implements TypeGenerator {
 
     private static final Logger log = LoggerFactory.getLogger(VideoGenerator.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final ExplanationVideoService explanationVideoService;
 
-    public VideoGenerator(ExplanationVideoService explanationVideoService) {
+    public VideoGenerator(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
+            RagTool ragTool,
+            ExplanationVideoService explanationVideoService) {
+        super(chatClientBuilder.build(), List.of(), ragTool);
         this.explanationVideoService = explanationVideoService;
     }
 
@@ -59,29 +58,30 @@ public class VideoGenerator implements TypeGenerator {
             item.title(), reviewFeedback != null ? "with feedback" : "initial");
 
         try {
-            // Build ProjectInput from planner item + student profile
             ProjectInput input = buildProjectInput(item, profile);
             String userId = context.userId();
 
             log.info("Calling ExplanationVideoService.generateVideo() for topic={}, userId={}",
                 input.getTopic(), userId);
             ExplanationVideoDTO video = explanationVideoService.generateVideo(input, userId);
-            log.info("Video generation succeeded: title={}, url={}, duration={}s",
-                video.getTitle(), video.getVideoUrl(), video.getDuration());
+            log.info("Video task submitted: title={}, manimTaskId={}, duration={}s",
+                video.getTitle(), video.getManimTaskId(), video.getDuration());
 
-            // Serialize video metadata as JSON content
-            String contentJson = MAPPER.createObjectNode()
-                .put("videoUrl", video.getVideoUrl())
+            var contentNode = MAPPER.createObjectNode()
                 .put("title", video.getTitle())
                 .put("duration", video.getDuration() != null ? video.getDuration() : 0)
                 .put("type", "explanation_video")
-                .toString();
+                .put("manimTaskId", video.getManimTaskId());
+            if (video.getVideoUrl() != null) {
+                contentNode.put("videoUrl", video.getVideoUrl());
+            }
+            String contentJson = contentNode.toString();
 
             return new ResourceGenerationState.GeneratedContent(
                 video.getTitle(), contentJson, "application/json", sources,
                 forceLowConfidence ? "low" : "medium",
                 Map.of("generator", "VideoGenerator",
-                       "videoUrl", video.getVideoUrl(),
+                       "manimTaskId", video.getManimTaskId() != null ? video.getManimTaskId() : "",
                        "duration", video.getDuration())
             );
 
@@ -102,8 +102,35 @@ public class VideoGenerator implements TypeGenerator {
         AgentContext context) {
 
         log.info("=== VideoGenerator REVISE === title={}, feedback={}", item.title(), reviewFeedback);
-        // Video rendering does not support targeted revision — regenerate fully
         return generate(item, sources, profile, forceLowConfidence, reviewFeedback, context);
+    }
+
+    // ---- AutonomousGenerator abstract methods (unused — video delegates to ExplanationVideoService) ----
+
+    @Override
+    protected String doGenerate(GenerationTask task, List<ResourceGenerationState.SourceItem> sources, AgentContext ctx) {
+        throw new UnsupportedOperationException("VideoGenerator uses ExplanationVideoService, not LLM generation");
+    }
+
+    @Override
+    protected String doRevise(GenerationTask task, List<ResourceGenerationState.SourceItem> sources,
+                              String currentContent, String reviewFeedback, AgentContext ctx) {
+        throw new UnsupportedOperationException("VideoGenerator uses ExplanationVideoService, not LLM revision");
+    }
+
+    @Override
+    protected String getSelfReviewSystemPrompt(String resourceType) {
+        return "";
+    }
+
+    @Override
+    protected boolean shouldRetrieveMore(GenerationTask task, List<ResourceGenerationState.SourceItem> currentSources) {
+        return false;
+    }
+
+    @Override
+    protected String getGenerationSystemPrompt(GenerationTask task, List<ResourceGenerationState.SourceItem> sources) {
+        return "";
     }
 
     private static ProjectInput buildProjectInput(

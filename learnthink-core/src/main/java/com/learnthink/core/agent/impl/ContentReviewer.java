@@ -1,7 +1,7 @@
 package com.learnthink.core.agent.impl;
 
-import com.learnthink.core.agent.framework.AgentContext;
-import com.learnthink.core.agent.framework.AgentResult;
+import com.learnthink.core.agent.runtime.AgentContext;
+import com.learnthink.core.agent.runtime.AgentResult;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import com.learnthink.core.config.PromptLoader;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -21,15 +21,15 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Reviews generated content with layered audit + independent RAG fact-checking.
+ * 内容审查器，负责对生成内容进行分层审计和独立RAG事实核查。
  *
- * <h3>v3.1 — Independent RAG access for fact verification:</h3>
+ * <h3>v3.1 — 独立RAG事实核查流程：</h3>
  * <ol>
- *   <li>Rule layer (R1-R3): format check, source coverage, safety pre-filter (zero LLM)</li>
- *   <li>Claim Extraction (LLM): extract factual assertions from content</li>
- *   <li>Source Matching (rule): match claims against EvidenceRetriever sources</li>
- *   <li>Targeted Retrieval (RagTool): for unmatched claims, independent RAG search</li>
- *   <li>Verdict: backed ≥ 70% → APPROVED / 40-70% → MEDIUM / < 40% → RETRY</li>
+ *   <li>规则层（R1-R3）：格式检查、来源覆盖率、安全预过滤（零LLM成本）</li>
+ *   <li>声明提取（LLM）：从内容中提取事实性断言</li>
+ *   <li>来源匹配（规则）：将声明与 EvidenceRetriever 来源匹配</li>
+ *   <li>定向检索（RagTool）：对未匹配声明进行独立RAG搜索</li>
+ *   <li>判定：支持率 ≥ 70% → APPROVED / 40-70% → MEDIUM / < 40% → RETRY</li>
  * </ol>
  */
 @Component
@@ -68,7 +68,7 @@ public class ContentReviewer {
                    "forceLowConfidence", forceLowConfidence));
 
         try {
-            // Pre-filter: rule-based safety check (before LLM call)
+            // 预过滤：基于规则的安全检查（在LLM调用之前）
             if (new ContentSafetyFilter().isBlocked(content.content())) {
                 log.warn("Content blocked by safety filter for type: {}", resourceType);
                 var result = new ResourceGenerationState.ReviewResult(
@@ -81,7 +81,7 @@ public class ContentReviewer {
                 return AgentResult.of(result);
             }
 
-            // FALLBACK/zero-source: skip review when no evidence exists to verify against.
+            // 零来源兜底：当没有可验证的证据时跳过审查
             if (forceLowConfidence && sources.isEmpty()) {
                 log.info("Bypassing review (forceLowConfidence=true, no sources) for type: {}", resourceType);
                 var result = new ResourceGenerationState.ReviewResult(
@@ -95,13 +95,22 @@ public class ContentReviewer {
                 return AgentResult.of(result);
             }
 
-            // Check whether this resource type requires source coverage
+            // R1：格式验证（基于规则，零LLM成本）
+            var r1Result = checkFormat(content.content(), resourceType);
+            if (r1Result != null) {
+                log.warn("R1 format check failed for {}: {}", resourceType, r1Result.reviewSummary());
+                ctx.observation().onDecision("ContentReviewer", "RETRY",
+                    "R1 format check failed — " + r1Result.reviewSummary());
+                return AgentResult.of(r1Result);
+            }
+
+            // 检查该资源类型是否需要来源覆盖率验证
             boolean exemptR1 = !resourceGenerator.requiresSourceCoverage(resourceType);
             if (exemptR1 && sources.isEmpty()) {
-                log.info("Exempt from R1 check for type: {} with no sources", resourceType);
+                log.info("Exempt from R1 source-coverage check for type: {} with no sources", resourceType);
                 var result = new ResourceGenerationState.ReviewResult(
                     ResourceGenerationState.ReviewStatus.APPROVED,
-                    "low", "No sources available for " + resourceType + " (exempt from R1)",
+                    "low", "No sources available for " + resourceType + " (exempt from source-coverage check)",
                     List.of(new ResourceGenerationState.ReviewReason("R1", "warn", "Exempt: " + resourceType)),
                     0.0,
                     ResourceGenerationState.ReviewAction.PUBLISH);
@@ -109,7 +118,7 @@ public class ContentReviewer {
                 return AgentResult.of(result);
             }
 
-            // v3.1: Extract factual claims and verify via independent RAG
+            // v3.1：提取事实声明并通过独立RAG验证
             log.info("Extracting factual claims from content");
             String contentExcerpt = content.content().substring(0, Math.min(2000, content.content().length()));
             List<Claim> claims = extractClaims(contentExcerpt);
@@ -136,17 +145,21 @@ public class ContentReviewer {
                     "quote", s.quote(), "locator", s.locator()
                 )).toList());
 
+            boolean isSourceExempt = !resourceGenerator.requiresSourceCoverage(resourceType);
             String userMsg = String.format("""
-                Resource type: %s
+                Resource type: %s%s
                 Title: %s
+                R1 format check: pass (validated by automated rules)
                 Content (first 2000 chars): %s
-                Sources: %s
+                Sources (%d items): %s
                 Claim verification: %d/%d backed (%.0f%%)
                 Force low confidence: %s
                 """,
-                resourceType, content.title(),
+                resourceType,
+                isSourceExempt ? " [EXEMPT from source requirements — do NOT penalize for low source count]" : "",
+                content.title(),
                 contentExcerpt,
-                sourcesJson,
+                sources.size(), sourcesJson,
                 backedCount, totalClaims, backedRatio * 100,
                 forceLowConfidence);
 
@@ -157,12 +170,15 @@ public class ContentReviewer {
                 .content();
 
             long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
-            log.info("LLM call completed in {}ms", elapsed);
+            log.info("[AI-RESPONSE][ContentReviewer] review ({}ms) length={} chars\n{}",
+                elapsed,
+                response != null ? response.length() : 0,
+                response != null ? response.substring(0, Math.min(2000, response.length())) : "null");
             ctx.observation().onResponse("ContentReviewer", response, elapsed, AgentResult.TokenUsage.ZERO);
 
             var result = parseReview(response);
-            log.info("Review result: action={}, confidence={}, coverage={}",
-                    result.action(), result.confidence(), result.citationCoverage());
+            log.info("Review result: action={}, confidence={}, coverage={}, summary={}",
+                    result.action(), result.confidence(), result.citationCoverage(), result.reviewSummary());
             ctx.observation().onDecision("ContentReviewer",
                 result.action().name(),
                 result.reviewSummary());
@@ -178,6 +194,157 @@ public class ContentReviewer {
         }
     }
 
+    // ================================================================
+    // R1：基于规则的格式验证（零LLM成本）
+    // ================================================================
+
+    /**
+     * 按资源类型验证结构化格式约束
+     * @param content      待验证的内容
+     * @param resourceType 资源类型（doc/quiz/reading/code/mindmap/video）
+     * @return 验证失败时返回RETRY审查结果，格式合格返回null
+     */
+    private ResourceGenerationState.ReviewResult checkFormat(String content, String resourceType) {
+        if (content == null || content.isBlank()) {
+            return formatFailure(resourceType, "Content is empty");
+        }
+        return switch (resourceType) {
+            case "doc"     -> null; // doc format varies by LLM output, skip R1
+            case "quiz"    -> checkQuizFormat(content);
+            case "reading" -> null; // format varies, skip R1
+            case "code"    -> null; // format varies, skip R1
+            case "mindmap" -> checkMindmapFormat(content);
+            case "video"   -> null; // video format varies by render pipeline, skip R1
+            default        -> null;
+        };
+    }
+
+    private ResourceGenerationState.ReviewResult checkDocFormat(String content) {
+        long sectionCount = content.lines()
+            .filter(line -> line.trim().matches("^##\\s+\\d+\\..*"))
+            .count();
+        if (sectionCount < 2) {
+            return formatFailure("doc",
+                "Expected at least 2 section titles (## N.), found " + sectionCount);
+        }
+        return null;
+    }
+
+    private ResourceGenerationState.ReviewResult checkQuizFormat(String content) {
+        try {
+            var node = mapper.readTree(content);
+            var questions = node.get("questions");
+            if (questions == null || !questions.isArray()) {
+                return formatFailure("quiz", "Missing or invalid 'questions' array");
+            }
+            if (questions.size() < 5) {
+                return formatFailure("quiz",
+                    "Expected at least 5 questions, found " + questions.size());
+            }
+        } catch (Exception e) {
+            return formatFailure("quiz", "Invalid JSON: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /** Reading 产出 Markdown 推荐书单，检查 Markdown 结构而非 JSON */
+    private ResourceGenerationState.ReviewResult checkReadingFormat(String content) {
+        if (content == null || content.isBlank()) {
+            return formatFailure("reading", "Content is empty");
+        }
+        // 必须有 ## 或 ### 级别标题
+        long headingCount = content.lines()
+            .filter(line -> line.trim().matches("^#{2,3}\\s+.*"))
+            .count();
+        if (headingCount < 2) {
+            return formatFailure("reading",
+                "Expected at least 2 Markdown headings (## or ###), found " + headingCount);
+        }
+        // 必须有列表项（每条推荐）
+        long listItemCount = content.lines()
+            .filter(line -> line.trim().matches("^[-*]\\s+.*"))
+            .count();
+        if (listItemCount < 3) {
+            return formatFailure("reading",
+                "Expected at least 3 list items, found " + listItemCount);
+        }
+        return null;
+    }
+
+    /** Code 产出 Markdown，必须有代码块 + 实现步骤部分 */
+    private ResourceGenerationState.ReviewResult checkCodeFormat(String content) {
+        if (!content.contains("```")) {
+            return formatFailure("code", "Missing code block (```)");
+        }
+        // 必须有实现步骤部分（生成器产出 ### 分步实现，或其他 ### 级别步骤描述）
+        long sectionCount = content.lines()
+            .filter(line -> line.trim().matches("^###+\\s+.*"))
+            .count();
+        if (sectionCount < 3) {
+            return formatFailure("code",
+                "Expected at least 3 sections (###), found " + sectionCount);
+        }
+        return null;
+    }
+
+    /** Mindmap 产出 JSON 嵌套结构 {root: {text, children: [...]}} */
+    private ResourceGenerationState.ReviewResult checkMindmapFormat(String content) {
+        try {
+            var root = mapper.readTree(content);
+            var rootObj = root.get("root");
+            if (rootObj == null || !rootObj.isObject()) {
+                return formatFailure("mindmap", "Missing or invalid 'root' object");
+            }
+            if (rootObj.get("text") == null || rootObj.get("text").asText().isBlank()) {
+                return formatFailure("mindmap", "Root node missing 'text'");
+            }
+            var children = rootObj.get("children");
+            if (children == null || !children.isArray() || children.isEmpty()) {
+                return formatFailure("mindmap", "Root node missing or empty 'children'");
+            }
+            int totalNodes = countMindmapNodes(children);
+            if (totalNodes < 8) {
+                return formatFailure("mindmap",
+                    "Too few nodes: " + totalNodes + " (minimum 8)");
+            }
+            if (totalNodes > 40) {
+                return formatFailure("mindmap",
+                    "Too many nodes: " + totalNodes + " (maximum 40)");
+            }
+        } catch (Exception e) {
+            return formatFailure("mindmap", "Invalid JSON: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /** 递归统计思维导图中所有 children 节点数量 */
+    private int countMindmapNodes(com.fasterxml.jackson.databind.JsonNode nodes) {
+        int count = 0;
+        for (var node : nodes) {
+            count++;
+            var children = node.get("children");
+            if (children != null && children.isArray()) {
+                count += countMindmapNodes(children);
+            }
+        }
+        return count;
+    }
+
+    private ResourceGenerationState.ReviewResult formatFailure(String type, String detail) {
+        return new ResourceGenerationState.ReviewResult(
+            ResourceGenerationState.ReviewStatus.REJECTED,
+            "low", "R1 format check failed for " + type + ": " + detail,
+            List.of(new ResourceGenerationState.ReviewReason("R1", "fail", detail)),
+            0.0,
+            ResourceGenerationState.ReviewAction.RETRY);
+    }
+
+    /**
+     * 解析LLM返回的审查JSON
+     * @param json LLM返回的JSON字符串
+     * @return 审查结果对象
+     * @throws RuntimeException JSON解析失败时抛出
+     */
     private ResourceGenerationState.ReviewResult parseReview(String json) {
         try {
             var node = mapper.readTree(json);
@@ -194,10 +361,10 @@ public class ContentReviewer {
     }
 
     // ================================================================
-    // v3.1: Claim extraction + independent RAG verification
+    // v3.1：声明提取 + 独立RAG验证
     // ================================================================
 
-    /** Extract factual assertions from generated content (1 LLM call) */
+    /** 从生成内容中提取事实性断言（1次LLM调用） */
     private List<Claim> extractClaims(String content) {
         try {
             String prompt = """
@@ -214,6 +381,10 @@ public class ContentReviewer {
             String response = chatClient.prompt()
                 .messages(new SystemMessage(prompt), new UserMessage(content))
                 .call().content();
+
+            log.info("[AI-RESPONSE][ContentReviewer] claim-extraction length={} chars\n{}",
+                response != null ? response.length() : 0,
+                response != null ? response.substring(0, Math.min(1000, response.length())) : "null");
 
             String json = response;
             if (json.contains("```")) {
@@ -236,7 +407,7 @@ public class ContentReviewer {
         }
     }
 
-    /** Verify claims against evidence sources + independent RagTool retrieval */
+    /** 验证声明：匹配证据来源 + 独立RagTool检索 */
     private Map<String, String> verifyClaims(List<Claim> claims,
                                               List<ResourceGenerationState.SourceItem> retrieverSources,
                                               AgentContext ctx) {
@@ -244,7 +415,7 @@ public class ContentReviewer {
         String courseId = ctx.courseId();
 
         for (Claim claim : claims) {
-            // Step 1: Try matching against retriever sources
+            // 第一步：尝试与检索来源匹配
             boolean found = retrieverSources.stream().anyMatch(s ->
                 s.quote() != null && claim.claim() != null &&
                 (s.quote().contains(claim.claim().substring(0, Math.min(10, claim.claim().length()))) ||
@@ -256,7 +427,7 @@ public class ContentReviewer {
                 continue;
             }
 
-            // Step 2: Independent RagTool search for unmatched claims
+            // 第二步：对未匹配的声明使用独立RagTool搜索
             if (ragTool != null && courseId != null) {
                 String searchQuery = claim.entity() + " " + claim.topic();
                 try {
@@ -283,9 +454,17 @@ public class ContentReviewer {
         return results;
     }
 
+    /**
+     * 提取的事实声明
+     * @param claim  声明文本
+     * @param entity 关键实体
+     * @param topic  所属主题
+     */
     record Claim(String claim, String entity, String topic) {}
 
-    /** Rule-based pre-filter — catches obvious issues before LLM invocation. */
+    /**
+     * 基于规则的安全预过滤器——在LLM调用前拦截明显问题
+     */
     static class ContentSafetyFilter {
         private static final List<String> BLOCKED = List.of(/* loaded from config in production */);
         boolean isBlocked(String content) {

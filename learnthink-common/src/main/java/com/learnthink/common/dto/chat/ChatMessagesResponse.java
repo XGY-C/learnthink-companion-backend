@@ -17,4 +17,10 @@ public class ChatMessagesResponse {
     private boolean planGenerationReady;
     private Map<String, Object> planGenerationMeta;
     private List<ActiveTaskDto> activeTasks;
+    /**
+     * 当 learning_plans 中存在 pending_decision/decided/completed 状态的计划时，
+     * 直接返回完整 plan JSON（含 plan_id、status、modules、edges、summary），
+     * 供前端 PlanEditor 渲染，避免重新调用 /plan/preview（LLM 非确定性）。
+     */
+    private Map<String, Object> pendingPlan;
 }

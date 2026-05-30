@@ -4,11 +4,16 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.learnthink.core.domain.entity.Course;
 import com.learnthink.core.domain.entity.Profile;
 import com.learnthink.core.domain.entity.UserCourseEnrollment;
+import com.learnthink.core.domain.entity.BookInfo;
+import com.learnthink.core.domain.entity.KnowledgeDocument;
+import com.learnthink.core.repository.BookInfoMapper;
 import com.learnthink.core.repository.CourseMapper;
+import com.learnthink.core.repository.KnowledgeDocumentMapper;
 import com.learnthink.core.repository.ProfileMapper;
 import com.learnthink.core.repository.UserCourseEnrollmentMapper;
 import com.learnthink.core.service.CourseService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -16,13 +21,35 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
+
+/**
+ * 课程服务实现类，提供课程相关的业务逻辑处理
+ */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class CourseServiceImpl implements CourseService {
 
+    /**
+     * 课程数据访问接口
+     */
     private final CourseMapper courseMapper;
+    /**
+     * 用户课程选课数据访问接口
+     */
     private final UserCourseEnrollmentMapper enrollmentMapper;
+    /**
+     * 用户画像数据访问接口
+     */
     private final ProfileMapper profileMapper;
+    /**
+     * 知识文档数据访问接口
+     */
+    private final KnowledgeDocumentMapper knowledgeDocumentMapper;
+    /**
+     * 教材信息数据访问接口
+     */
+    private final BookInfoMapper bookInfoMapper;
 
     @Override
     public List<Map<String, Object>> getMyCourses(String userId) {
@@ -33,23 +60,28 @@ public class CourseServiceImpl implements CourseService {
                         .orderByDesc(UserCourseEnrollment::getEnrolledAt)
         );
 
+        // 如果没有选课记录，返回空列表
         if (enrollments.isEmpty()) {
             return Collections.emptyList();
         }
 
+        // 提取课程ID列表
         List<String> courseIds = enrollments.stream()
                 .map(UserCourseEnrollment::getCourseId)
                 .collect(Collectors.toList());
 
+        // 查询课程信息（过滤已删除的课程）
         List<Course> courses = courseMapper.selectList(
                 new LambdaQueryWrapper<Course>()
                         .in(Course::getId, courseIds)
                         .isNull(Course::getDeletedAt)
         );
 
+        // 将课程列表转换为Map，方便后续查找
         Map<String, Course> courseMap = courses.stream()
                 .collect(Collectors.toMap(Course::getId, c -> c));
 
+        // 构建返回结果
         List<Map<String, Object>> result = new ArrayList<>();
         for (UserCourseEnrollment enrollment : enrollments) {
             Course course = courseMap.get(enrollment.getCourseId());
@@ -89,6 +121,7 @@ public class CourseServiceImpl implements CourseService {
                 .isNull(Course::getDeletedAt)
                 .orderByDesc(Course::getCreatedAt);
 
+        // 如果用户已选课程不为空，则排除已选课程
         if (!enrolledIds.isEmpty()) {
             wrapper.notIn(Course::getId, enrolledIds);
         }
@@ -99,6 +132,7 @@ public class CourseServiceImpl implements CourseService {
     @Override
     public Map<String, Object> getCourseDetail(String courseId, String userId) {
         Course course = courseMapper.selectById(courseId);
+
         if (course == null || course.getDeletedAt() != null) {
             return null;
         }
@@ -119,6 +153,7 @@ public class CourseServiceImpl implements CourseService {
         Map<String, Object> detail = new LinkedHashMap<>();
         detail.put("id", course.getId());
         detail.put("name", course.getName());
+        // 构建返回结果
         detail.put("description", course.getDescription());
         detail.put("emoji", course.getEmoji() != null ? course.getEmoji() : "📚");
         detail.put("enrolledCount", enrolledCount);
@@ -183,5 +218,42 @@ public class CourseServiceImpl implements CourseService {
         }
 
         enrollmentMapper.deleteById(enrollment.getId());
+    }
+
+    @Override
+    public Map<String, Object> getTextbookInfo(String courseId) {
+        log.info("getTextbookInfo: courseId={}", courseId);
+
+        List<KnowledgeDocument> docs = knowledgeDocumentMapper.selectList(
+                new LambdaQueryWrapper<KnowledgeDocument>()
+                        .eq(KnowledgeDocument::getCourseId, courseId)
+                        .eq(KnowledgeDocument::getSourceType, "主教材")
+        );
+        if (docs.isEmpty()) {
+            log.warn("getTextbookInfo: no KnowledgeDocument with source_type='主教材' for courseId={}", courseId);
+            return null;
+        }
+
+        for (KnowledgeDocument doc : docs) {
+            BookInfo book = bookInfoMapper.selectOne(
+                    new LambdaQueryWrapper<BookInfo>()
+                            .eq(BookInfo::getDocumentId, doc.getId())
+            );
+            if (book == null) {
+                log.debug("getTextbookInfo: no BookInfo for docId={}, skip", doc.getId());
+                continue;
+            }
+            log.info("getTextbookInfo: found book title={}, author={}", book.getTitle(), book.getAuthor());
+
+            Map<String, Object> info = new LinkedHashMap<>();
+            info.put("title", book.getTitle() != null ? book.getTitle() : "");
+            info.put("author", book.getAuthor() != null ? book.getAuthor() : "");
+            info.put("introduction", book.getIntroduction() != null ? book.getIntroduction() : "");
+            info.put("toc", book.getToc() != null ? book.getToc() : "[]");
+            return info;
+        }
+
+        log.warn("getTextbookInfo: {} docs found, but none have book_info", docs.size());
+        return null;
     }
 }

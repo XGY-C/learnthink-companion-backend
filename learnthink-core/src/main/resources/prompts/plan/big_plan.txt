@@ -8,11 +8,8 @@
 ### 学生画像摘要
 {profile_summary}
 
-- 学习目标：{learning_goal}
-- 知识基础：{knowledge_basis}
-- 学习节奏：{learning_pace}
-- 兴趣方向：{interest_direction}
-- 专业上下文：{major_context}
+### 用户需求描述
+{user_requirement}
 
 ## 输出要求
 
@@ -22,8 +19,9 @@
 {
   "module_id": "m1",
   "title": "模块标题",
+  "description": "模块一：模块标题（scope中文名，depth中文名，X学时）\n\n学习内容：知识点1、知识点2、知识点3\n\n学习目标：掌握XX，理解XX，能够运用XX解决XX问题\n\n前置：基础要求（无则写'无基础要求'）",
   "knowledge_points": [
-    {"kp_id": "kp_id", "name": "知识点名称"}
+    {"kpId": "kp_id", "name": "知识点名称"}
   ],
   "scope": "core_curriculum",
   "prerequisites": ["m0"],
@@ -35,6 +33,12 @@
 }
 
 ### 约束规则
+
+0. **description 质量要求**：
+   - 每个 module 必须有 description 字段，一段精准自然语言文本
+   - 内容涵盖：模块编号与标题、scop/depth/学时、学习内容（列举知识点）、学习目标（可衡量）、前置要求
+   - description 将直接展示给用户查看和编辑，也作为后续为该模块生成详细学习活动的输入
+   - 请用中文撰写，语言流畅、信息完整
 
 1. **module 粒度**：
    - 每个 module 覆盖 2-4 个紧密关联的知识点

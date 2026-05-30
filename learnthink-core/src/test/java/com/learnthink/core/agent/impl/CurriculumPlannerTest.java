@@ -72,7 +72,7 @@ class CurriculumPlannerTest {
             }""";
 
         var node = mapper.readTree(json);
-        // Simulate fallback: if no subTopics, wrap as single sub-topic
+        // 模拟回退：若无子主题，则包装为单一子主题
         List<ResourceGenerationState.SubTopic> subTopics;
         if (node.has("subTopics") && node.get("subTopics").isArray()) {
             subTopics = mapper.convertValue(node.get("subTopics"),

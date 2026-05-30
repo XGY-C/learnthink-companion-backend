@@ -1,7 +1,7 @@
 package com.learnthink.core.agent.graph;
 
 /**
- * Thrown when graph execution encounters a fatal error.
+ * 当图执行遇到致命错误时抛出。
  */
 public class GraphException extends RuntimeException {
     private final String nodeName;

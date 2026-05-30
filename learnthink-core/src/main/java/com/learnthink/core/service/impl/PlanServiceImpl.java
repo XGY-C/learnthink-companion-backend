@@ -381,6 +381,10 @@ public class PlanServiceImpl implements PlanService {
         String weakTagsStr = String.join("、", weakTags.stream().limit(3).toList());
         String baseId = (String) failedActivity.get("activity_id");
 
+        // 查找同 sub-plan 中已有的 doc 资源包，复用其内容作为回顾材料
+        String fallbackPackId = findExistingDocPackId(activities);
+        boolean hasExistingDoc = fallbackPackId != null;
+
         // 插入 learn
         String learnId = baseId + "b_learn";
         Map<String, Object> learnActivity = new LinkedHashMap<>();
@@ -389,7 +393,9 @@ public class PlanServiceImpl implements PlanService {
         learnActivity.put("title", "回顾：" + weakTagsStr);
         learnActivity.put("description", "针对薄弱点的回顾学习");
         learnActivity.put("requires", new ArrayList<>());
-        learnActivity.put("resource", Map.of("source", "matched", "resource_pack_id", (String) null, "resource_type", "doc", "generation_status", (String) null));
+        learnActivity.put("resource", hasExistingDoc
+            ? Map.of("source", "matched", "resource_pack_id", fallbackPackId, "resource_type", "doc", "generation_status", (String) null)
+            : Map.of("source", "generated", "resource_pack_id", (String) null, "resource_type", "doc", "generation_status", "pending"));
         learnActivity.put("estimated_minutes", 20);
         learnActivity.put("order", failedOrder);
         learnActivity.put("completion_criteria", Map.of("type", "resource_open", "threshold", 10, "met", false));
@@ -607,6 +613,24 @@ public class PlanServiceImpl implements PlanService {
         return result.get("score") instanceof Number n ? n.doubleValue() : 0;
     }
 
+    /**
+     * 在同 sub-plan 的活动中查找已匹配的 doc 资源包 ID，
+     * 用于回退重学时复用已有学习材料。
+     */
+    private String findExistingDocPackId(List<Map<String, Object>> activities) {
+        for (Map<String, Object> act : activities) {
+            Map<String, Object> res = castMap(act.get("resource"));
+            if (res == null) continue;
+            String source = (String) res.get("source");
+            String type = (String) res.get("resource_type");
+            String packId = (String) res.get("resource_pack_id");
+            if ("matched".equals(source) && "doc".equals(type) && packId != null && !packId.isBlank()) {
+                return packId;
+            }
+        }
+        return null;
+    }
+
     // ==================== 查询构建 ====================
 
     private PlanResponse buildPlanResponse(LearningPlan plan) {
@@ -681,8 +705,18 @@ public class PlanServiceImpl implements PlanService {
 
             List<PlanResponse.ActivityDto> activityDtos = activities.stream().map(a -> {
                 Map<String, Object> resource = castMap(a.get("resource"));
+                List<Map<String, Object>> resourcesList = castMapList(a.get("resources"));
                 Map<String, Object> criteria = castMap(a.get("completionCriteria"));
                 Map<String, Object> result = castMap(a.get("result"));
+
+                List<PlanResponse.ResourceDto> resourceDtos = resourcesList != null ? resourcesList.stream()
+                    .map(r -> PlanResponse.ResourceDto.builder()
+                        .source((String) r.get("source"))
+                        .resourcePackId((String) r.get("resource_pack_id"))
+                        .resourceType((String) r.get("resource_type"))
+                        .generationStatus((String) r.get("generation_status"))
+                        .build())
+                    .toList() : null;
 
                 return PlanResponse.ActivityDto.builder()
                         .activityId((String) a.get("activity_id"))
@@ -696,6 +730,7 @@ public class PlanServiceImpl implements PlanService {
                                 .resourceType((String) resource.get("resource_type"))
                                 .generationStatus((String) resource.get("generation_status"))
                                 .build() : null)
+                        .resources(resourceDtos)
                         .estimatedMinutes(a.get("estimated_minutes") instanceof Number n ? n.intValue() : null)
                         .order(a.get("order") instanceof Number n ? n.intValue() : null)
                         .completionCriteria(criteria != null ? PlanResponse.CompletionCriteriaDto.builder()
@@ -762,7 +797,7 @@ public class PlanServiceImpl implements PlanService {
             Map<String, Object> spObj = objectMapper.readValue(currentSp.getSubPlanJson(), mapType());
             List<Map<String, Object>> activities = castMapList(spObj.get("activities"));
 
-            // Reset all activities to "ready" status (keep orders and resources)
+            // 将所有活动重置为 "ready" 状态（保留排序和资源）
             for (Map<String, Object> act : activities) {
                 act.put("retry_count", 0);
                 act.put("result", null);
@@ -818,12 +853,20 @@ public class PlanServiceImpl implements PlanService {
                 throw new IllegalArgumentException("Activity not found: " + activityId);
             }
 
-            // 标记资源为重新生成
+            // 标记资源为重新生成（兼容新旧格式）
             Map<String, Object> res = castMap(target.get("resource"));
             if (res != null) {
                 res.put("generation_status", "pending");
                 res.put("source", "generated");
                 res.put("resource_pack_id", null);
+            }
+            List<Map<String, Object>> resList = castMapList(target.get("resources"));
+            if (resList != null) {
+                for (Map<String, Object> r : resList) {
+                    r.put("generation_status", "pending");
+                    r.put("source", "generated");
+                    r.put("resource_pack_id", null);
+                }
             }
             target.put("retry_count", 0);
             target.put("result", null);
@@ -842,7 +885,18 @@ public class PlanServiceImpl implements PlanService {
 
             // 转换为 DTO
             Map<String, Object> resource = castMap(target.get("resource"));
+            List<Map<String, Object>> resourcesList = castMapList(target.get("resources"));
             Map<String, Object> criteria = castMap(target.get("completionCriteria"));
+
+            List<PlanResponse.ResourceDto> resourceDtos = resourcesList != null ? resourcesList.stream()
+                .map(r -> PlanResponse.ResourceDto.builder()
+                    .source((String) r.get("source"))
+                    .resourcePackId((String) r.get("resource_pack_id"))
+                    .resourceType((String) r.get("resource_type"))
+                    .generationStatus((String) r.get("generation_status"))
+                    .build())
+                .toList() : null;
+
             return PlanResponse.ActivityDto.builder()
                     .activityId((String) target.get("activity_id"))
                     .type((String) target.get("type"))
@@ -855,6 +909,7 @@ public class PlanServiceImpl implements PlanService {
                             .resourceType((String) resource.get("resource_type"))
                             .generationStatus((String) resource.get("generation_status"))
                             .build() : null)
+                    .resources(resourceDtos)
                     .estimatedMinutes(target.get("estimated_minutes") instanceof Number n ? n.intValue() : null)
                     .status((String) target.get("status"))
                     .retryCount(target.get("retry_count") instanceof Number n ? n.intValue() : 0)
@@ -882,18 +937,18 @@ public class PlanServiceImpl implements PlanService {
             for (Map<String, Object> m : modules) {
                 String status = (String) m.get("status");
                 if (status == null || "completed".equals(status)) {
-                    // Already completed or unknown — skip
+                    // 已完成或未知状态 — 跳过
                     continue;
                 }
                 if (!pastCurrent) {
-                    // This is the current module
+                    // 此为当前模块
                     pastCurrent = true;
                     continue;
                 }
-                // Future module — mark for refresh
+                // 未来模块 — 标记为需要刷新
                 m.put("status", "ready");
                 m.put("mastery", null);
-                // Also reset its sub-plan if exists
+                // 同时重置子计划（如果存在）
                 String subPlanId = (String) m.get("sub_plan_id");
                 if (subPlanId != null) {
                     SubPlan sp = subPlanMapper.selectById(subPlanId);

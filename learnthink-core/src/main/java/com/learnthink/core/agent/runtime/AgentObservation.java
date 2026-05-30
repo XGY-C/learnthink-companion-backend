@@ -1,23 +1,22 @@
-package com.learnthink.core.agent.framework;
+package com.learnthink.core.agent.runtime;
 
-import java.time.Instant;
 import java.util.Map;
 
 /**
- * Observability hook for agent execution — captures prompt, response, timing, and decisions.
+ * Agent 执行的可观测性钩子——捕获提示词、响应、耗时和决策
  */
 public interface AgentObservation {
     AgentObservation NOOP = new AgentObservation() {};
 
-    /** Called before the LLM call with the assembled prompt */
+    /** 在 LLM 调用前使用组装好的提示词调用 */
     default void onPrompt(String agentName, String prompt, Map<String, Object> params) {}
 
-    /** Called after the LLM call with the raw response */
+    /** 在 LLM 调用后使用原始响应调用 */
     default void onResponse(String agentName, String rawResponse, long elapsedMs, AgentResult.TokenUsage tokens) {}
 
-    /** Called when the agent makes a decision (e.g., routing, confidence level) */
+    /** 当 Agent 做出决策时调用（如路由、置信度级别） */
     default void onDecision(String agentName, String decision, String reason) {}
 
-    /** Called on error */
+    /** 出错时调用 */
     default void onError(String agentName, Throwable error) {}
 }

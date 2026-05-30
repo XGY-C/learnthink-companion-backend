@@ -4,15 +4,24 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learnthink.common.dto.chat.*;
-import com.learnthink.core.agent.framework.AgentContext;
-import com.learnthink.core.agent.framework.AgentObservation;
-import com.learnthink.core.agent.framework.AgentResult;
+import com.learnthink.common.dto.chat.ThinkingPhase;
+import com.learnthink.core.agent.runtime.AgentContext;
+import com.learnthink.core.agent.runtime.AgentObservation;
+import com.learnthink.core.agent.runtime.AgentResult;
+import com.learnthink.core.agent.PlannerOutput;
+import com.learnthink.core.agent.PlannerOutput.ResourceRequirements;
+import com.learnthink.core.agent.impl.BookInfoTool;
+import com.learnthink.core.agent.impl.BookInfoToolCallback;
 import com.learnthink.core.agent.impl.ConversationAgent;
 import com.learnthink.core.agent.impl.RagTool;
 import com.learnthink.core.agent.impl.ConversationPlanner;
 import com.learnthink.core.agent.impl.RagToolCallback;
 import com.learnthink.core.agent.impl.ReplyGenerator;
+import com.learnthink.core.agent.impl.UnifiedGenerator;
+import com.learnthink.core.config.LearnThinkProperties;
 import com.learnthink.core.config.PromptLoader;
+import com.learnthink.core.domain.entity.AgentThinkingTrace;
+import com.learnthink.core.domain.entity.BookInfo;
 import com.learnthink.core.domain.entity.Profile;
 import com.learnthink.core.domain.entity.ProfileChat;
 import com.learnthink.core.domain.entity.ProfileVersion;
@@ -22,6 +31,8 @@ import com.learnthink.core.domain.entity.Task;
 import com.learnthink.core.repository.CourseMapper;
 import com.learnthink.core.repository.ProfileChatMapper;
 import com.learnthink.core.repository.ProfileMapper;
+import com.learnthink.core.domain.entity.LearningPlan;
+import com.learnthink.core.repository.LearningPlanMapper;
 import com.learnthink.core.repository.ProfileVersionMapper;
 import com.learnthink.core.repository.ResourceItemMapper;
 import com.learnthink.core.repository.ResourcePackMapper;
@@ -30,6 +41,7 @@ import com.learnthink.core.service.ChatService;
 import com.learnthink.core.service.KpAnchorService;
 import com.learnthink.core.service.ProfileService;
 import com.learnthink.core.service.TaskPersistenceService;
+import com.learnthink.core.service.chat.ChatSessionService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -37,12 +49,14 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Flux;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.tool.ToolCallback;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -70,8 +84,10 @@ public class ChatServiceImpl implements ChatService {
     private final ProfileVersionMapper profileVersionMapper;
     private final CourseMapper courseMapper;
     private final TaskMapper taskMapper;
+    private final LearningPlanMapper learningPlanMapper;
     private final ResourcePackMapper resourcePackMapper;
     private final ResourceItemMapper resourceItemMapper;
+    private final ChatSessionService sessionService;
     private final ChatClient.Builder chatClientBuilder;
     private final ObjectMapper objectMapper;
     private final PromptLoader promptLoader;
@@ -79,9 +95,13 @@ public class ChatServiceImpl implements ChatService {
     private final ProfileService profileService;
     private final ConversationAgent conversationAgent;
     private final RagTool ragTool;
+    private final BookInfoTool bookInfoTool;
     private final ConversationPlanner conversationPlanner;
     private final ReplyGenerator replyGenerator;
+    private final UnifiedGenerator unifiedGenerator;
+    private final LearnThinkProperties learnThinkProperties;
     private final KpAnchorService kpAnchorService;
+    private final StringRedisTemplate redis;
     private final ExecutorService profileAnalysisExecutor = Executors.newFixedThreadPool(2);
 
     public ChatServiceImpl(ProfileChatMapper profileChatMapper,
@@ -89,6 +109,7 @@ public class ChatServiceImpl implements ChatService {
                            ProfileVersionMapper profileVersionMapper,
                            CourseMapper courseMapper,
                            TaskMapper taskMapper,
+                           LearningPlanMapper learningPlanMapper,
                            ResourcePackMapper resourcePackMapper,
                            ResourceItemMapper resourceItemMapper,
                            @Qualifier("chatChatClientBuilder") ChatClient.Builder chatClientBuilder,
@@ -98,14 +119,20 @@ public class ChatServiceImpl implements ChatService {
                            ProfileService profileService,
                            ConversationAgent conversationAgent,
                            RagTool ragTool,
+                           BookInfoTool bookInfoTool,
                            KpAnchorService kpAnchorService,
                            ConversationPlanner conversationPlanner,
-                           ReplyGenerator replyGenerator) {
+                           ReplyGenerator replyGenerator,
+                           UnifiedGenerator unifiedGenerator,
+                           LearnThinkProperties learnThinkProperties,
+                           ChatSessionService sessionService,
+                           StringRedisTemplate redis) {
         this.profileChatMapper = profileChatMapper;
         this.profileMapper = profileMapper;
         this.profileVersionMapper = profileVersionMapper;
         this.courseMapper = courseMapper;
         this.taskMapper = taskMapper;
+        this.learningPlanMapper = learningPlanMapper;
         this.resourcePackMapper = resourcePackMapper;
         this.resourceItemMapper = resourceItemMapper;
         this.chatClientBuilder = chatClientBuilder;
@@ -115,9 +142,14 @@ public class ChatServiceImpl implements ChatService {
         this.profileService = profileService;
         this.conversationAgent = conversationAgent;
         this.ragTool = ragTool;
+        this.bookInfoTool = bookInfoTool;
         this.kpAnchorService = kpAnchorService;
         this.conversationPlanner = conversationPlanner;
         this.replyGenerator = replyGenerator;
+        this.unifiedGenerator = unifiedGenerator;
+        this.learnThinkProperties = learnThinkProperties;
+        this.sessionService = sessionService;
+        this.redis = redis;
     }
 
     /**
@@ -159,187 +191,8 @@ public class ChatServiceImpl implements ChatService {
      *
      * @param userId  用户ID
      * @param chatId  会话ID
-     * @param request 消息内容及模式信息
      * @return 包含 AI 回复、画像状态及生成就绪标识的响应
      */
-    @Override
-    @Transactional
-    public ChatSendResponse sendMessage(String userId, String chatId, ChatSendRequest request) {
-        ProfileChat chat = profileChatMapper.selectById(chatId);
-        if (chat == null) {
-            chat = lazyCreateSession(chatId, userId, request.getCourseId());
-        } else if (!chat.getUserId().equals(userId)) {
-            throw new org.springframework.web.server.ResponseStatusException(
-                org.springframework.http.HttpStatus.NOT_FOUND, "Chat session not found");
-        }
-
-        List<Map<String, String>> messages = parseRawMessages(chat.getMessagesJson());
-
-        // 追加用户消息
-        String now = LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME);
-        messages.add(Map.of("role", "user", "content", request.getContent(), "at", now));
-
-        // === Step A: Detect generation intent BEFORE LLM call ===
-        // 意图探测：在调用 LLM 前通过关键词/语义判断用户是否需要生成学习资源，避免无效推理。
-        String chatMode = request.getMode() != null ? request.getMode() : "chat";
-        boolean planMode = "plan".equals(chatMode);
-
-        ConversationAgent.GenerationIntent genIntent;
-        boolean hasGenIntent;
-        if ("resource".equals(chatMode)) {
-            genIntent = conversationAgent.detectGenerationIntent(request.getContent(), messages);
-            hasGenIntent = genIntent != null && genIntent.wantsGeneration();
-        } else if (!planMode) {
-            genIntent = conversationAgent.detectGenerationIntent(request.getContent(), messages);
-            hasGenIntent = genIntent != null && genIntent.wantsGeneration();
-        } else {
-            genIntent = null;
-            hasGenIntent = false;
-        }
-
-        String systemPrompt = buildConversationSystemPrompt(userId, chat.getCourseId());
-        String modeHint = "";
-        if ("resource".equals(chatMode)) {
-            modeHint = "\n\n## 当前模式\n用户已切换至「资源生成」模式，请关注用户的资源需求。";
-        } else if (planMode) {
-            modeHint = "\n\n## 当前模式\n用户已切换至「学习规划」模式，请关注用户的学习目标和规划需求。";
-        }
-        // 如果用户想要资源生成，保留提示上下文但添加生成指令
-        if (hasGenIntent) {
-            systemPrompt = systemPrompt + modeHint + "\n\n## 当前请求\n用户请求生成学习资源。请用1-2句话简单确认（可引用课程和画像信息），然后询问具体需求。不要展开讲解任何知识点。";
-        } else {
-            systemPrompt = systemPrompt + modeHint;
-        }
-
-        int roundNum = messages.size() / 2 + 1;
-        AgentContext ctx = AgentContext.builder(chatId, userId)
-            .courseId(chat.getCourseId())
-            .build();
-
-        // ReAct: pass rag_retrieve tool via context so LLM decides when to search the KB
-        ToolCallback ragCallback = null;
-        if (chat.getCourseId() != null && !chat.getCourseId().isBlank()) {
-            ragCallback = new RagToolCallback(ragTool, chat.getCourseId(), null, null);
-        }
-        ctx.put("rag_tool", ragCallback);
-        var convResult = conversationAgent.execute(
-            new ConversationAgent.ConversationInput(chat.getCourseId(), messages, roundNum, systemPrompt),
-            ctx);
-
-        String aiResponse = convResult.success()
-            ? convResult.output().reply()
-            : "抱歉，我现在无法生成回复，请稍后再试。";
-        
-        log.info("========== AI回复（同步模式） ==========");
-        log.info("chatId: {}", chatId);
-        log.info("userId: {}", userId);
-        log.info("轮次: {}", roundNum);
-        log.info("回复长度: {} 字符", aiResponse.length());
-        log.info("回复内容:\n{}", aiResponse);
-        log.info("========================================");
-        
-        ConversationAgent.SufficiencyResult sufficiency = convResult.success()
-            ? convResult.output().sufficiency()
-            : new ConversationAgent.SufficiencyResult(false, 0, 0, List.of(), "");
-
-        // v3.1: 结构化充足度评估（由 ConversationAgent 提供）
-        boolean profileReady = sufficiency.sufficient();
-        String profileVersionId = null;
-        boolean generationReady = false;
-        Map<String, Object> generationMeta = null;
-
-        if (hasGenIntent) {
-            log.info("用户需要资源生成: chatId={}, prefs={}", chatId, genIntent.preferences());
-
-            String clarifying = conversationAgent.generateClarifyingQuestion(genIntent, sufficiency,
-                getCourseName(chat.getCourseId()));
-            if (clarifying != null) {
-                aiResponse = aiResponse + "\n\n" + clarifying;
-                generationReady = true;
-                generationMeta = Map.of("stage", "clarifying", "preferences", genIntent.preferences());
-            } else {
-                generationReady = true;
-                generationMeta = Map.of("stage", "ready", "preferences", genIntent.preferences());
-
-                // Async: trigger profile analysis + resource generation
-                // 异步触发画像分析与资源生成流水线，使用独立线程池隔离耗时操作。
-                String finalChatId = chatId;
-                String finalUserId = userId;
-                CompletableFuture.runAsync(() -> {
-                    try {
-                        ProfileSummaryDto summary = analyzeProfile(finalUserId, finalChatId);
-                        ProfileChat pc = profileChatMapper.selectById(finalChatId);
-                        if (pc != null) {
-                            pc.setProfileVersionId(summary.getProfileVersionId());
-                            profileChatMapper.updateById(pc);
-                        }
-                        log.info("生成流水线：画像已就绪, versionId={}", summary.getProfileVersionId());
-
-                        // 占位：触发 TaskOrchestrator.createTask()
-                        log.info("生成流水线：将为用户 {} 触发任务创建", finalUserId);
-                    } catch (Exception e) {
-                        log.error("生成流水线失败: {}", e.getMessage());
-                    }
-                }, profileAnalysisExecutor);
-            }
-        }
-
-        // === Step B: 若画像刚达到充足标准，主动提供资源生成选项 ===
-        if (profileReady && !hasGenIntent) {
-            String offer = conversationAgent.generateResourceOffer(sufficiency);
-            aiResponse = aiResponse + offer;
-            generationReady = true;
-            generationMeta = Map.of("stage", "offered",
-                "coveredCount", sufficiency.coveredCount(),
-                "confidence", sufficiency.overallConfidence());
-
-            // Async profile analysis (non-blocking)
-            // 异步画像分析：当画像达到充足标准时，后台增量更新维度数据，不阻塞主对话流。
-            String finalChatId = chatId;
-            String finalUserId = userId;
-            CompletableFuture.runAsync(() -> {
-                try {
-                    ProfileSummaryDto summary = analyzeProfile(finalUserId, finalChatId);
-                    ProfileChat pc = profileChatMapper.selectById(finalChatId);
-                    if (pc != null) {
-                        pc.setProfileVersionId(summary.getProfileVersionId());
-                        profileChatMapper.updateById(pc);
-                    }
-                    log.info("Async profile analysis complete: chatId={}", finalChatId);
-                } catch (Exception e) {
-                    log.error("异步画像分析失败: {}", e.getMessage());
-                }
-            }, profileAnalysisExecutor);
-
-            if (persistenceService != null) {
-                try {
-                    persistenceService.recordThinkingTrace(
-                        chatId, "ConversationAgent", "conversation",
-                        "CONVERSATION",
-                        "对话第" + (messages.size() / 2) + "轮，评估信息覆盖度",
-                        "已覆盖 " + sufficiency.coveredCount() + " 个维度，" +
-                            "置信度 " + String.format("%.0f%%", sufficiency.overallConfidence() * 100),
-                        "SUFFICIENT — 画像充足，向用户提供资源生成选项",
-                        sufficiency.coveredCount() >= 6 ? "high" : "medium");
-                } catch (Exception e) {
-                    log.warn("持久化思考轨迹失败: {}", e.getMessage());
-                }
-            }
-        }
-
-        String aiAt = LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME);
-        messages.add(Map.of("role", "assistant", "content", aiResponse, "at", aiAt));
-
-        // 保存会话状态
-        chat.setMessagesJson(toJson(messages));
-        profileChatMapper.updateById(chat);
-
-        List<ChatMessageDto> newMessages = List.of(
-            new ChatMessageDto("assistant", aiResponse, aiAt, null));
-
-        return new ChatSendResponse(chatId, newMessages, profileReady, profileVersionId, generationReady, generationMeta);
-    }
-
     @Override
     public ChatMessagesResponse getMessages(String userId, String chatId) {
         ProfileChat chat = profileChatMapper.selectById(chatId);
@@ -348,6 +201,10 @@ public class ChatServiceImpl implements ChatService {
                 org.springframework.http.HttpStatus.NOT_FOUND, "Chat session not found");
         }
         List<ChatMessageDto> messages = parseMessages(chat.getMessagesJson());
+
+        // v3.5: 若历史消息的 thinking 为 null 或仅有 2 步固定步骤，
+        // 尝试从 agent_thinking_traces 表中按 chat_id + round_num 重建完整思考链
+        reconstructThinkingForMessages(messages, chatId);
 
         // 查询关联的活跃任务
         List<Task> activeTasks = taskMapper.findByChatId(chatId);
@@ -358,6 +215,7 @@ public class ChatServiceImpl implements ChatService {
             dto.setTopic(task.getTopic());
             dto.setStatus(task.getStatus());
             dto.setStage(task.getStage());
+            dto.setTaskType(task.getTaskType());
             dto.setPercent(task.getPercent() != null ? task.getPercent() : 0);
             List<String> resourceTypes = parseResourceTypes(task.getRequestedResourceTypes());
             dto.setResourceTypes(resourceTypes);
@@ -385,14 +243,68 @@ public class ChatServiceImpl implements ChatService {
             activeTaskDtos.add(dto);
         }
 
-        // 检查生成就绪且无活跃任务（重建引导提示）
-        boolean generationReady = chat.getProfileVersionId() != null && activeTaskDtos.isEmpty();
-        Map<String, Object> generationMeta = null;
-        if (generationReady) {
-            generationMeta = Map.of("stage", "offered");
+        // 从历史消息中检测是否有未被处理的 plan offer（资源/学习计划）
+        boolean hasResourceOffer = false;
+        boolean hasPlanOffer = false;
+        Map<String, Object> planOfferMeta = null;
+        for (ChatMessageDto msg : messages) {
+            if (msg.getPlanOffer() instanceof Map<?, ?> po) {
+                String type = (String) po.get("type");
+                if ("resource".equals(type)) {
+                    hasResourceOffer = true;
+                } else if ("plan".equals(type)) {
+                    hasPlanOffer = true;
+                    planOfferMeta = (Map<String, Object>) po;
+                }
+            }
         }
 
-        return new ChatMessagesResponse(messages, generationReady, generationMeta, false, Map.of(), activeTaskDtos);
+        // 检查活跃任务中是否有 plan / resource 类型任务
+        // 只有 PENDING / RUNNING 状态才算"活跃"，SUCCEEDED / FAILED 不算
+        boolean hasActivePlanTask = activeTaskDtos.stream()
+            .anyMatch(t -> "plan_generate".equals(t.getTaskType())
+                && ("PENDING".equals(t.getStatus()) || "RUNNING".equals(t.getStatus())));
+        boolean hasActiveResourceTask = activeTaskDtos.stream()
+            .anyMatch(t -> "resource_generate".equals(t.getTaskType())
+                && ("PENDING".equals(t.getStatus()) || "RUNNING".equals(t.getStatus())));
+
+        // v3.1: 从 DB 加载已有计划，直接返回 pendingPlan 供前端 PlanEditor 渲染
+        // 避免重新调用 /plan/preview（LLM 非确定性），切换会话不丢编辑
+        Map<String, Object> pendingPlan = null;
+        LearningPlan existingPlan = learningPlanMapper.findByUserIdAndCourseId(userId, chat.getCourseId());
+        if (existingPlan != null) {
+            String planStatus = existingPlan.getStatus();
+            try {
+                pendingPlan = objectMapper.readValue(existingPlan.getPlanJson(),
+                        new TypeReference<Map<String, Object>>() {});
+                pendingPlan.put("plan_id", existingPlan.getId());
+                pendingPlan.put("status", planStatus);
+            } catch (Exception e) {
+                log.warn("Failed to parse plan JSON for planId={}: {}", existingPlan.getId(), e.getMessage());
+            }
+
+            // 只要 DB 中有计划，就清除消息中的 planOffer — 前端直接用 pendingPlan 渲染
+            // 避免前端历史加载时重复调用 /plan/preview
+            if (hasPlanOffer) {
+                for (ChatMessageDto msg : messages) {
+                    if (msg.getPlanOffer() instanceof Map<?, ?> po && "plan".equals(po.get("type"))) {
+                        msg.setPlanOffer(null);
+                    }
+                }
+                hasPlanOffer = false;
+            }
+        }
+
+        // 资源 offer：有 offer 且没有活跃资源任务 → 显示确认卡片
+        boolean generationReady = hasResourceOffer && !hasActiveResourceTask;
+        Map<String, Object> generationMeta = generationReady ? Map.of("stage", "offered") : null;
+
+        // 计划 offer：有 offer 且没有活跃 plan 任务且 DB 中无计划 → 显示 PlanEditor
+        boolean planGenerationReady = hasPlanOffer && !hasActivePlanTask && pendingPlan == null;
+        Map<String, Object> planGenerationMetaMap = planGenerationReady ? planOfferMeta : Map.of();
+
+        return new ChatMessagesResponse(messages, generationReady, generationMeta,
+            planGenerationReady, planGenerationMetaMap, activeTaskDtos, pendingPlan);
     }
 
     private List<String> parseResourceTypes(String json) {
@@ -494,6 +406,10 @@ public class ChatServiceImpl implements ChatService {
                 .call()
                 .content();
 
+            log.info("[AI-RESPONSE][ChatService] analyzeProfile length={} chars\n{}",
+                response != null ? response.length() : 0,
+                response != null ? response.substring(0, Math.min(2000, response.length())) : "null");
+
             // 解析 JSON 响应
             String json = response;
             if (json.contains("```json")) {
@@ -509,8 +425,7 @@ public class ChatServiceImpl implements ChatService {
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> dimensions = (List<Map<String, Object>>) analysis.get("dimensions");
 
-            // Validate: don't overwrite a good profile with a worse analysis
-            // 防回退校验：确保新提取的有效维度数不低于当前版本，防止画像质量波动。
+            // 防回退校验：确保新提取的有效维度数不低于当前版本，防止画像质量波动
             int newMeaningfulCount = countMeaningfulDimensions(dimensions);
             Profile existingProfile = profileMapper.selectOne(
                 new LambdaQueryWrapper<Profile>()
@@ -561,14 +476,12 @@ public class ChatServiceImpl implements ChatService {
                 profileMapper.updateById(profile);
             }
 
-            ProfileVersion pv = new ProfileVersion();
-            pv.setUserId(userId);
-            pv.setCourseId(chat.getCourseId());
-            pv.setVersion(newVersion);
-            pv.setDimensionsJson(objectMapper.writeValueAsString(dimensions));
-            pv.setSummaryJson(objectMapper.writeValueAsString(summary));
-            pv.setSourceChatIds(objectMapper.writeValueAsString(List.of(chatId)));
-            profileVersionMapper.insert(pv);
+            // 插入 ProfileVersion 并带有主键冲突重试机制
+            // @Transactional 在锁释放后提交，因此并发请求可能已插入相同版本号
+            // 使用数据库中的最新版本号重试，避免 DuplicateKeyException
+            ProfileVersion pv = insertProfileVersionWithRetry(
+                    userId, chat.getCourseId(), newVersion,
+                    dimensions, summary, chatId, 3);
 
             chat.setProfileVersionId(pv.getId());
             profileChatMapper.updateById(chat);
@@ -589,8 +502,8 @@ public class ChatServiceImpl implements ChatService {
                 }
             }
 
-            // v4.0: Trigger async KP anchoring
-            // 知识点锚定：将画像维度映射到课程具体的知识点节点，支持后续精准推荐。
+            // v4.0：触发异步知识点锚定
+            // 将画像维度映射到课程具体的知识点节点，支持后续精准推荐。
             triggerKpAnchoring(pv.getId(), chat.getCourseId(), dimensions);
 
             return new ProfileSummaryDto(pv.getId(), newVersion, summary,
@@ -651,8 +564,20 @@ public class ChatServiceImpl implements ChatService {
 
         // ── 构建带有观察钩子的 AgentContext，桥接到 SSE ──
         // 观察者模式：CollectingObservation 负责捕获 Agent 内部决策点，并将其转换为前端可渲染的 SSE 思考事件。
+        // 所有 agent.thought 事件均使用 ThinkingPhase 枚举，确保前后端阶段命名一致。
+        /**
+         * SSE事件收集观察者
+         * <p>捕获 Agent 内部决策点并转换为前端可渲染的 SSE 思考事件。
+         * onDecision 根据 decision 字符串自动推导 {@link ThinkingPhase} 枚举，
+         * 确保前后端阶段命名一致。</p>
+         */
         class CollectingObservation implements AgentObservation {
+            /** 已发射的 SSE 事件列表 */
             final List<SseEvent> sseEvents = new ArrayList<>();
+            /** 缓存的思考步骤数据（供异步持久化复用，避免重复构建步骤列表） */
+            final List<Map<String, String>> capturedThoughts = new ArrayList<>();
+            /** 结构化追踪数据（每阶段一行，用于 agent_thinking_traces 表逐行持久化） */
+            final List<Map<String, String>> thinkingTraces = new ArrayList<>();
 
             @Override
             public void onPrompt(String agentName, String prompt, Map<String, Object> params) {
@@ -661,73 +586,184 @@ public class ChatServiceImpl implements ChatService {
 
             @Override
             public void onResponse(String agentName, String rawResponse, long elapsedMs, AgentResult.TokenUsage tokens) {
-                sseEvents.add(toSseEvent("agent.thought", Map.of(
-                    "agentName", agentName,
-                    "agentRole", "conversation",
-                    "phase", "DECISION",
-                    "context", "LLM 回复生成完成",
-                    "observation", "LLM 回复生成完成，耗时 " + elapsedMs + "ms",
-                    "thought", rawResponse != null ? rawResponse : "流式生成正常",
-                    "decision", "",
-                    "confidenceLevel", "high",
-                    "timestamp", Instant.now().toString()
-                )));
+                emitThought(ThinkingPhase.DECISION, agentName, "conversation",
+                    "LLM 回复生成完成",
+                    "LLM 回复生成完成，耗时 " + elapsedMs + "ms",
+                    rawResponse != null ? rawResponse : "流式生成正常",
+                    "",
+                    "high");
             }
 
             @Override
             public void onDecision(String agentName, String decision, String reason) {
-                String phase;
-                if (decision == null) phase = "DECISION";
-                else if (decision.startsWith("CONTEXT")) phase = "CONTEXT";
-                else if (decision.startsWith("RETRIEVE")) phase = "RETRIEVE";
-                else if (decision.startsWith("RAG")) phase = "RAG";
-                else phase = "DECISION";
+                ThinkingPhase phase = derivePhase(decision);
+                String context = buildPhaseContext(phase);
+                String confidence = deriveConfidence(phase);
+                String obs = reason != null ? reason : "";
+                String thought = decision != null ? decision : "";
+                String dec = phase == ThinkingPhase.DECISION && decision != null ? decision : "";
+                emitThought(phase, agentName, "conversation", context, obs, thought, dec, confidence);
+            }
 
-                // 从实际数据推导置信度，而非硬编码
-                String confidenceLevel = deriveConfidence(phase);
-                // 使用真实数据构建上下文字符串
-                String context = buildContext(phase);
+            @Override
+            public void onError(String agentName, Throwable error) {
+                emitThought(ThinkingPhase.ERROR, agentName, "conversation",
+                    "Agent 执行异常",
+                    error.getMessage() != null ? error.getMessage() : "未知错误",
+                    "Agent " + agentName + " 执行出错",
+                    "",
+                    "low");
+            }
 
-                boolean isRealDecision = "DECISION".equals(phase);
+            /** 供外部代码（RagToolCallback 回调、PLANNING/REFLECT 发射点）直接写入思考事件。 */
+            public void emitThought(ThinkingPhase phase, String agentName, String agentRole,
+                                     String context, String observation, String thought,
+                                     String decision, String confidenceLevel) {
                 sseEvents.add(toSseEvent("agent.thought", Map.of(
                     "agentName", agentName,
-                    "agentRole", "conversation",
-                    "phase", phase,
+                    "agentRole", agentRole,
+                    "phase", phase.name(),
                     "context", context,
-                    "observation", reason != null ? reason : "",
-                    "thought", decision != null ? decision : "",
-                    "decision", isRealDecision && decision != null ? decision : "",
+                    "observation", observation,
+                    "thought", thought,
+                    "decision", decision,
                     "confidenceLevel", confidenceLevel,
                     "timestamp", Instant.now().toString()
                 )));
+                Map<String, String> step = toStepData(phase, context, observation, thought, decision, confidenceLevel);
+                if (step != null) {
+                    capturedThoughts.add(step);
+                }
+                thinkingTraces.add(Map.of(
+                    "agentName", agentName,
+                    "agentRole", agentRole,
+                    "phase", phase.name(),
+                    "context", context != null ? context : "",
+                    "observation", observation != null ? observation : "",
+                    "thought", thought != null ? thought : "",
+                    "decision", decision != null ? decision : "",
+                    "confidenceLevel", confidenceLevel != null ? confidenceLevel : "medium"
+                ));
             }
 
-            private String deriveConfidence(String phase) {
+            /** 仅记录步骤数据到 capturedThoughts（不发射 SSE）。
+             *  用于 SSE 时机由外部控制的场景（如 toolEventBuffer、preGenEvents），
+             *  确保持久化数据与流式事件同步而不产生重复 SSE 发射。 */
+            public void captureStep(ThinkingPhase phase, String context, String observation,
+                                     String thought, String decision, String confidenceLevel) {
+                Map<String, String> step = toStepData(phase, context, observation, thought, decision, confidenceLevel);
+                if (step != null) {
+                    capturedThoughts.add(step);
+                }
+                thinkingTraces.add(Map.of(
+                    "agentName", "ConversationAgent",
+                    "agentRole", "conversation",
+                    "phase", phase.name(),
+                    "context", context != null ? context : "",
+                    "observation", observation != null ? observation : "",
+                    "thought", thought != null ? thought : "",
+                    "decision", decision != null ? decision : "",
+                    "confidenceLevel", confidenceLevel != null ? confidenceLevel : "medium"
+                ));
+            }
+
+            private ThinkingPhase derivePhase(String decision) {
+                if (decision == null) return ThinkingPhase.DECISION;
+                if (decision.startsWith("CONTEXT")) return ThinkingPhase.CONTEXT;
+                if (decision.startsWith("RETRIEVE")) return ThinkingPhase.RETRIEVE;
+                if (decision.startsWith("RAG")) return ThinkingPhase.RAG;
+                return ThinkingPhase.DECISION;
+            }
+
+            private String deriveConfidence(ThinkingPhase phase) {
                 switch (phase) {
-                    case "CONTEXT":
+                    case CONTEXT:
+                    case REFLECT:
                         return profileCovered >= 4 ? "high" : "medium";
-                    case "DECISION":
+                    case DECISION:
                         return "high";
                     default:
                         return "medium";
                 }
             }
 
-            private String buildContext(String phase) {
+            private String buildPhaseContext(ThinkingPhase phase) {
                 switch (phase) {
-                    case "CONTEXT":
+                    case CONTEXT:
                         return "第" + roundNum + "轮对话"
                             + (courseName != null ? "，课程: " + courseName : "");
-                    case "DECISION":
+                    case DECISION:
                         return "LLM 回复生成完成";
+                    case PLANNING:
+                        return "意图分析与回复规划完成";
+                    case REFLECT:
+                        return "画像覆盖度评估，已覆盖 " + profileCovered + "/7 维度";
+                    case RETRIEVE:
+                        return "检测到知识性问题，LLM 决定检索课程知识库";
+                    case RAG:
+                        return "知识库检索完成";
+                    case ERROR:
+                        return "Agent 执行过程出现异常";
                     default:
                         return "";
                 }
             }
 
-            @Override
-            public void onError(String agentName, Throwable error) {
-                // 不作为思考事件发射
+            /** 将思考阶段转为持久化步骤数据（ThinkingStep JSON 子集，供 messages.thinking 字段使用） */
+            private Map<String, String> toStepData(ThinkingPhase phase, String context, String observation,
+                                                    String thought, String decision, String confidenceLevel) {
+                String label = phaseLabel(phase);
+                String icon = phaseIcon(phase);
+                if (label == null) return null;
+                StringBuilder detail = new StringBuilder();
+                if (context != null && !context.isEmpty()) detail.append(context);
+                if (observation != null && !observation.isEmpty()) {
+                    if (detail.length() > 0) detail.append(" — ");
+                    detail.append(observation);
+                }
+                Map<String, String> step = new LinkedHashMap<>();
+                step.put("label", label);
+                step.put("icon", icon);
+                step.put("done", "true");
+                step.put("phase", phase.name());
+                step.put("detail", detail.toString());
+                if (observation != null && !observation.isEmpty()) {
+                    step.put("observation", observation);
+                }
+                if (thought != null && !thought.isEmpty()) {
+                    step.put("thought", thought);
+                }
+                if (decision != null && !decision.isEmpty()) {
+                    step.put("decision", decision);
+                }
+                if (confidenceLevel != null && !confidenceLevel.isEmpty()) {
+                    step.put("confidenceLevel", confidenceLevel);
+                }
+                return step;
+            }
+
+            private String phaseLabel(ThinkingPhase phase) {
+                switch (phase) {
+                    case CONTEXT:  return "理解上下文";
+                    case RETRIEVE: return "检索知识库";
+                    case RAG:      return "检索分析";
+                    case PLANNING: return "意图分析与回复规划";
+                    case DECISION: return "决策判断";
+                    case REFLECT:  return "评估画像";
+                    default:       return null; // ERROR 等不持久化
+                }
+            }
+
+            private String phaseIcon(ThinkingPhase phase) {
+                switch (phase) {
+                    case CONTEXT:  return "📋";
+                    case RETRIEVE: return "🔗";
+                    case RAG:      return "🔍";
+                    case PLANNING: return "🔍";
+                    case DECISION: return "⚖️";
+                    case REFLECT:  return "🎯";
+                    default:       return "●";
+                }
             }
         }
 
@@ -737,31 +773,40 @@ public class ChatServiceImpl implements ChatService {
             .observation(chatObs)
             .build();
 
-        // ── Pre-stream: Detect generation intent (no LLM needed) ──
-        // 意图前置判定：在流式开始前完成资源/规划模式的意图识别，为 Prompt 注入提供依据。
+        // ── 预流处理：模式 + 对话分支 ──
+        // 说明：standard（Plan-then-Generate）模式下，“是否展示生成按钮/澄清文案”的决策
+        // 统一由 ConversationPlanner 的 [CONTROL] 输出给出；ChatServiceImpl 不再做额外的意图探测。
         String chatMode = request.getMode() != null ? request.getMode() : "chat";
         boolean planMode = "plan".equals(chatMode);
+        boolean unifiedMode = isUnifiedMode(request);
 
-        ConversationAgent.GenerationIntent genIntent;
-        boolean hasGenIntent;
-        if ("resource".equals(chatMode)) {
-            genIntent = conversationAgent.detectGenerationIntent(request.getContent(), messages);
-            hasGenIntent = genIntent != null && genIntent.wantsGeneration();
-        } else if (!planMode) {
-            // 聊天模式（默认）— 执行生成意图探测
-            genIntent = conversationAgent.detectGenerationIntent(request.getContent(), messages);
-            hasGenIntent = genIntent != null && genIntent.wantsGeneration();
+        // Unified 模式：传统路径（UnifiedGenerator 目前不产出 Planner 控制块）
+        final ConversationAgent.GenerationIntent genIntent;
+        final boolean hasGenIntent;
+        final String preClarifying;
+        if (unifiedMode) {
+            ConversationAgent.GenerationIntent tmpIntent = null;
+            boolean tmpHas = false;
+            boolean skipIntent = Boolean.TRUE.equals(request.getSkipGenerationIntent());
+            if (!skipIntent) {
+                if ("resource".equals(chatMode)) {
+                    tmpIntent = conversationAgent.detectGenerationIntent(request.getContent(), messages);
+                    tmpHas = tmpIntent != null && tmpIntent.wantsGeneration();
+                } else if (!planMode) {
+                    tmpIntent = conversationAgent.detectGenerationIntent(request.getContent(), messages);
+                    tmpHas = tmpIntent != null && tmpIntent.wantsGeneration();
+                }
+            }
+            genIntent = tmpIntent;
+            hasGenIntent = tmpHas;
+            preClarifying = tmpHas ? conversationAgent.generateClarifyingQuestion(tmpIntent, null, courseName) : null;
         } else {
-            // 规划模式：跳过资源生成意图探测
             genIntent = null;
             hasGenIntent = false;
+            preClarifying = null;
         }
 
-        // 提前解决澄清问题（不依赖充足度结果）
-        final String preClarifying = hasGenIntent
-            ? conversationAgent.generateClarifyingQuestion(genIntent, null, courseName) : null;
-
-        // ── Build pre-events: CONTEXT + RETRIEVE (emitted before streaming) ──
+        // ── 构建预置事件：CONTEXT + RETRIEVE（在流式传输前发送）──
         // 预置思考事件：在 LLM 开始吐字前，先向客户端同步当前的上下文环境与 RAG 检索结果。
         String contextObs = (courseName != null ? "课程: " + courseName : "课程已选择")
             + (profileCovered > 0 ? "，画像已覆盖 " + profileCovered + "/7 维度" : "，画像尚未建立");
@@ -785,6 +830,9 @@ public class ChatServiceImpl implements ChatService {
         // LLM 自主决定是否调用 rag_retrieve 工具，工具调用期间的 RETRIEVE/RAG
         // 思考事件通过此缓冲区实时转发到 SSE 流。
         List<SseEvent> toolEventBuffer = Collections.synchronizedList(new ArrayList<>());
+
+        // 累积 RAG 检索结果，后续注入 ReplyGenerator 的 {plan_result}
+        StringBuilder ragContentAccum = new StringBuilder();
         ToolCallback ragCallback = null;
         if (chat.getCourseId() != null && !chat.getCourseId().isBlank()) {
             ragCallback = new RagToolCallback(ragTool, chat.getCourseId(),
@@ -794,7 +842,7 @@ public class ChatServiceImpl implements ChatService {
                         toSseEvent("agent.thought", Map.of(
                             "agentName", "ConversationAgent",
                             "agentRole", "conversation",
-                            "phase", "RETRIEVE",
+                            "phase", ThinkingPhase.RETRIEVE.name(),
                             "context", "检测到知识性问题，LLM 决定检索课程知识库获取准确资料",
                             "observation", "正在检索课程知识库...",
                             "thought", "LLM 自主调用 rag_retrieve 工具",
@@ -803,6 +851,9 @@ public class ChatServiceImpl implements ChatService {
                             "timestamp", Instant.now().toString()
                         ))
                     );
+                    chatObs.captureStep(ThinkingPhase.RETRIEVE,
+                        "检测到知识性问题，LLM 决定检索课程知识库获取准确资料",
+                        "正在检索课程知识库...", "LLM 自主调用 rag_retrieve 工具", "", "high");
                 }),
                 result -> {
                     try {
@@ -814,7 +865,7 @@ public class ChatServiceImpl implements ChatService {
                         toolEventBuffer.add(toSseEvent("agent.thought", Map.of(
                             "agentName", "ConversationAgent",
                             "agentRole", "conversation",
-                            "phase", "RAG",
+                            "phase", ThinkingPhase.RAG.name(),
                             "context", "知识库检索完成，获取 " + count + " 条相关资料",
                             "observation", "检索到 " + count + " 条相关资料，LLM 将基于这些资料生成回答",
                             "thought", "RAG 检索完成并纳入回答上下文",
@@ -822,6 +873,15 @@ public class ChatServiceImpl implements ChatService {
                             "confidenceLevel", count >= 3 ? "high" : "medium",
                             "timestamp", Instant.now().toString()
                         )));
+                        chatObs.captureStep(ThinkingPhase.RAG,
+                            "知识库检索完成，获取 " + count + " 条相关资料",
+                            "检索到 " + count + " 条相关资料，LLM 将基于这些资料生成回答",
+                            "RAG 检索完成并纳入回答上下文", "", count >= 3 ? "high" : "medium");
+
+                        // 累积 RAG 检索原始内容，后续传给 ReplyGenerator
+                        if (sources instanceof List && !((List<?>) sources).isEmpty()) {
+                            appendRagContent(ragContentAccum, (List<?>) sources);
+                        }
                     } catch (Exception e) {
                         log.warn("Failed to parse RAG result for SSE event: {}", e.getMessage());
                     }
@@ -830,100 +890,133 @@ public class ChatServiceImpl implements ChatService {
 
         ctx.put("rag_tool", ragCallback);
 
-        // ── Phase 1: Planner — intent analysis + reply planning ──
-        // Planner uses ReAct (can call rag_retrieve), output streamed to thinking chain.
-        String modeHint = "";
-        if ("resource".equals(chatMode)) {
-            modeHint = "\n\n## 当前模式\n用户已切换至「资源生成」模式，请关注用户的资源需求。";
-        } else if (planMode) {
-            modeHint = "\n\n## 当前模式\n用户已切换至「学习规划」模式，请关注用户的学习目标和规划需求。";
-        }
-        String plannerPrompt = promptLoader.get("agent/planner_chat")
-            .replace("{course_context}", buildCourseContext(userId, chat.getCourseId()))
-            .replace("{profile_context}", buildProfileContext(userId, chat.getCourseId()));
-        if (!modeHint.isBlank()) {
-            plannerPrompt += modeHint;
-        }
-        ConversationPlanner.ConversationInput planInput =
-            new ConversationPlanner.ConversationInput(chat.getCourseId(), messages, roundNum, plannerPrompt);
+        BookInfoToolCallback bookInfoCallback = new BookInfoToolCallback(bookInfoTool, chat.getCourseId());
+        ctx.put("book_info_tool", bookInfoCallback);
 
-        StringBuilder plannerAccum = new StringBuilder();
-        Flux<SseEvent> plannerPhase = conversationPlanner.streamPlan(planInput, ctx)
-            .flatMap(chatResponse -> {
-                List<SseEvent> events = new ArrayList<>();
-                synchronized (toolEventBuffer) {
-                    events.addAll(toolEventBuffer);
-                    toolEventBuffer.clear();
-                }
-                String text = chatResponse.getResult() != null
-                    ? chatResponse.getResult().getOutput().getText()
-                    : null;
-                if (text != null && !text.isEmpty()) {
-                    plannerAccum.append(text);
-                }
-                return Flux.fromIterable(events);
-            });
+        // ── 对话模式分支 — 确定主流式阶段 ──
+        Flux<SseEvent> mainPhase;
+        if (unifiedMode) {
+            // 统一模式：单次 LLM 传递，包含思考 + 工具 + 回复生成
+            UnifiedGenerator.UnifiedInput unifiedInput = new UnifiedGenerator.UnifiedInput(
+                buildCourseContext(userId, chat.getCourseId()),
+                buildProfileContext(userId, chat.getCourseId()),
+                messages, roundNum, chatMode);
 
-        // ── Phase 2: Generator — final visible reply ──
-        // Generator has no tools, produces the text shown to the student.
-        // Runs after planner completes, using the extracted plan.
-        Flux<SseEvent> genPhase = Flux.defer(() -> {
-            String fullPlannerText = plannerAccum.toString();
-            log.info("Planner output received: {} chars", fullPlannerText.length());
-
-            // Parse markers from planner output
-            String analysisText = extractAnalysis(fullPlannerText);
-            String planContent = extractPlan(fullPlannerText);
-            log.info("Extracted — analysis: {} chars, plan: {} chars",
-                analysisText != null ? analysisText.length() : 0,
-                planContent != null ? planContent.length() : 0);
-
-            // Store full planner output for DB persistence (used in postStream)
-            ctx.put("planner_raw", fullPlannerText);
-
-            // Emit a single PLANNING thought event with complete planner output
-            // (combines both ANALYSIS and PLAN sections, consistent with thinking trace)
-            List<SseEvent> preGenEvents = new ArrayList<>();
-            String planningThought = planContent != null ? planContent : analysisText != null ? analysisText : fullPlannerText;
-            if (planningThought != null && !planningThought.isEmpty()) {
-                preGenEvents.add(toSseEvent("agent.thought", Map.of(
-                    "agentName", "ConversationPlanner",
-                    "agentRole", "conversation",
-                    "phase", "PLANNING",
-                    "context", "意图分析与回复规划完成",
-                    "observation", "",
-                    "thought", planningThought,
-                    "decision", "",
-                    "confidenceLevel", "high",
-                    "timestamp", Instant.now().toString()
-                )));
-            }
-
-            // Build generator input
-            String lastUserMsg = messages.get(messages.size() - 1).get("content");
-            ReplyGenerator.GenInput genInput = new ReplyGenerator.GenInput(
-                buildCourseContext(userId, session.getCourseId()),
-                buildProfileContext(userId, session.getCourseId()),
-                planContent != null ? planContent : fullPlannerText,
-                lastUserMsg);
-
-            // Generator stream — pure text, no tools
-            Flux<SseEvent> genStream = replyGenerator.streamReply(genInput)
+            mainPhase = unifiedGenerator.streamUnified(unifiedInput, ctx)
                 .flatMap(chatResponse -> {
+                    List<SseEvent> events = new ArrayList<>();
+                    synchronized (toolEventBuffer) {
+                        events.addAll(toolEventBuffer);
+                        toolEventBuffer.clear();
+                    }
                     String text = chatResponse.getResult() != null
                         ? chatResponse.getResult().getOutput().getText()
                         : null;
                     if (text != null && !text.isEmpty()) {
                         replyBuffer.append(text);
-                        return Flux.just(SseEvent.chunk(text));
+                        events.add(SseEvent.chunk(text));
                     }
-                    return Flux.empty();
+                    return Flux.fromIterable(events);
+                });
+        } else {
+            // 标准模式：规划-生成两阶段架构
+            // ── 阶段 1：规划器 — 意图分析 + 回复规划 ──
+            String modeHint = "";
+            if ("resource".equals(chatMode)) {
+                modeHint = "\n\n## 当前模式\n用户已切换至「资源生成」模式，请关注用户的资源需求。";
+            } else if (planMode) {
+                modeHint = "\n\n## 当前模式\n用户已切换至「学习规划」模式，请关注用户的学习目标和规划需求。";
+            }
+            String plannerPrompt = promptLoader.get("agent/planner_chat")
+                .replace("{course_context}", buildCourseContext(userId, chat.getCourseId()))
+                .replace("{profile_context}", buildProfileContext(userId, chat.getCourseId()));
+            if (!modeHint.isBlank()) {
+                plannerPrompt += modeHint;
+            }
+            ConversationPlanner.ConversationInput planInput =
+                new ConversationPlanner.ConversationInput(chat.getCourseId(), messages, roundNum, plannerPrompt);
+
+            StringBuilder plannerAccum = new StringBuilder();
+            Flux<SseEvent> plannerPhase = conversationPlanner.streamPlan(planInput, ctx)
+                .flatMap(chatResponse -> {
+                    List<SseEvent> events = new ArrayList<>();
+                    synchronized (toolEventBuffer) {
+                        events.addAll(toolEventBuffer);
+                        toolEventBuffer.clear();
+                    }
+                    String text = chatResponse.getResult() != null
+                        ? chatResponse.getResult().getOutput().getText()
+                        : null;
+                    if (text != null && !text.isEmpty()) {
+                        plannerAccum.append(text);
+                    }
+                    return Flux.fromIterable(events);
                 });
 
-            return Flux.concat(Flux.fromIterable(preGenEvents), genStream);
-        });
+            // ── 阶段 2：生成器 — 最终可见回复 ──
+            Flux<SseEvent> genPhase = Flux.defer(() -> {
+                String fullPlannerText = plannerAccum.toString();
+                log.info("[AI-RESPONSE][ConversationPlanner] total={} chars\n{}",
+                    fullPlannerText.length(),
+                    fullPlannerText.substring(0, Math.min(3000, fullPlannerText.length())));
 
-        // ── Post-stream: evaluate sufficiency, handle genIntent, save, emit done ──
+                String analysisText = extractAnalysis(fullPlannerText);
+                String planContent = extractPlan(fullPlannerText);
+                log.info("[AI-RESPONSE][ConversationPlanner] analysis={} chars, plan={} chars",
+                    analysisText != null ? analysisText.length() : 0,
+                    planContent != null ? planContent.length() : 0);
+
+                ctx.put("planner_raw", fullPlannerText);
+
+                List<SseEvent> preGenEvents = new ArrayList<>();
+                String planningThought = planContent != null ? planContent : analysisText != null ? analysisText : fullPlannerText;
+                if (planningThought != null && !planningThought.isEmpty()) {
+                    preGenEvents.add(toSseEvent("agent.thought", Map.of(
+                        "agentName", "ConversationPlanner",
+                        "agentRole", "conversation",
+                        "phase", ThinkingPhase.PLANNING.name(),
+                        "context", "意图分析与回复规划完成",
+                        "observation", "",
+                        "thought", planningThought,
+                        "decision", "",
+                        "confidenceLevel", "high",
+                        "timestamp", Instant.now().toString()
+                    )));
+                    chatObs.captureStep(ThinkingPhase.PLANNING,
+                        "意图分析与回复规划完成", "",
+                        planningThought, "", "high");
+                }
+
+                String lastUserMsg = messages.get(messages.size() - 1).get("content");
+                String planResult = planContent != null ? planContent : fullPlannerText;
+                if (ragContentAccum.length() > 0) {
+                    planResult = planResult + "\n\n[参考课程资料]\n" + ragContentAccum + "\n[/参考课程资料]";
+                }
+                ReplyGenerator.GenInput genInput = new ReplyGenerator.GenInput(
+                    buildCourseContext(userId, session.getCourseId()),
+                    buildProfileContext(userId, session.getCourseId()),
+                    planResult,
+                    lastUserMsg);
+
+                Flux<SseEvent> genStream = replyGenerator.streamReply(genInput)
+                    .flatMap(chatResponse -> {
+                        String text = chatResponse.getResult() != null
+                            ? chatResponse.getResult().getOutput().getText()
+                            : null;
+                        if (text != null && !text.isEmpty()) {
+                            replyBuffer.append(text);
+                            return Flux.just(SseEvent.chunk(text));
+                        }
+                        return Flux.empty();
+                    });
+
+                return Flux.concat(Flux.fromIterable(preGenEvents), genStream);
+            });
+
+            mainPhase = plannerPhase.concatWith(genPhase);
+        }
+
+        // ── 后置流式处理：评估充足度，处理生成意图，保存，发送完成信号 ──
         // 后置处理：流式结束后进行画像充足度终审，并根据结果拼装生成引导语或 DONE 信号。
         Flux<SseEvent> postStream = Flux.defer(() -> {
             String fullReply = replyBuffer.length() > 0
@@ -950,51 +1043,124 @@ public class ChatServiceImpl implements ChatService {
                     sufficiency.sufficient(), sufficiency.coveredCount(),
                     String.format("%.0f%%", sufficiency.overallConfidence() * 100));
 
-            // 处理生成意图（前置探测）+ 充足度结果
+            // 生成按钮/澄清文案：
+            // - standard 模式：优先使用 ConversationPlanner 的 [CONTROL] JSON（唯一权威来源）
+            // - unified 模式：沿用 legacy 意图探测（UnifiedGenerator 暂不产出 [CONTROL]）
             boolean generationReady = false;
             Map<String, Object> generationMeta = null;
-            StringBuilder extraText = new StringBuilder();
-
-            if (hasGenIntent) {
-                log.info("用户需要资源生成: chatId={}, prefs={}", chatId, genIntent.preferences());
-                // 无论是否经过澄清路径，均解析主题
-                String topic = conversationAgent.resolveTopic(
-                    courseName != null ? courseName : "当前课程", messages, null);
-                java.util.Map<String, Object> prefsWithTopic =
-                    new java.util.LinkedHashMap<>(genIntent.preferences());
-                prefsWithTopic.put("topic", topic);
-                if (preClarifying != null) {
-                    extraText.append("\n\n").append(preClarifying);
-                    generationReady = true;
-                    generationMeta = Map.of("stage", "clarifying", "preferences", prefsWithTopic);
-                    log.info(">>> GEN READY: stage=clarifying, prefs={}", prefsWithTopic);
-                } else {
-                    generationReady = true;
-                    generationMeta = Map.of("stage", "ready", "preferences", prefsWithTopic);
-                    log.info(">>> GEN READY: stage=ready, prefs={}", prefsWithTopic);
-                }
-            }
-
-            // 若未触发生成意图但充足度刚达标，提供资源生成选项
-            if (sufficiency.sufficient() && !hasGenIntent && !planMode) {
-                String offer = conversationAgent.generateResourceOffer(sufficiency);
-                extraText.append(offer);
-                generationReady = true;
-                generationMeta = Map.of("stage", "offered",
-                    "coveredCount", sufficiency.coveredCount(),
-                    "confidence", sufficiency.overallConfidence());
-            }
-
-            // 规划模式：当充足度达标时提供规划生成选项
             boolean planGenerationReady = false;
             Map<String, Object> planGenerationMeta = null;
-            if (planMode && sufficiency.sufficient()) {
-                String offer = "\n\n---\n\n🎯 你的学习画像已就绪！需要我为你生成一份个性化的学习路径规划吗？\n\n"
-                    + "我会根据你的目标和基础，规划完整的学习路线、推荐资源和节奏安排。";
-                extraText.append(offer);
-                planGenerationReady = true;
-                planGenerationMeta = Map.of("stage", "offered",
-                    "coveredCount", sufficiency.coveredCount());
+            StringBuilder extraText = new StringBuilder();
+
+            // 从 planner 输出中解析 [CONTROL]（standard 模式使用 PlannerOutput；
+            // unified 模式在 Phase 7 前回退到传统意图检测）
+            PlannerOutput plannerOutput = null;
+            if (!unifiedMode) {
+                String plannerRaw = ctx.get("planner_raw");
+                plannerOutput = PlannerOutput.fromPlannerText(plannerRaw);
+
+                if (plannerOutput != null && plannerOutput.isGenerationReady()) {
+                    generationReady = true;
+                    ResourceRequirements req = plannerOutput.resourceRequirements();
+                    generationMeta = new LinkedHashMap<>();
+                    generationMeta.put("stage", "offered");
+                    generationMeta.put("topic", req.topic());
+                    generationMeta.put("goalSummary", req.goalSummary());
+                    generationMeta.put("difficulty", req.difficulty());
+                    if (req.items() != null && !req.items().isEmpty()) {
+                        generationMeta.put("items", req.items().stream()
+                            .map(item -> Map.of("type", item.type(), "focus", item.focus()))
+                            .toList());
+                    }
+                    if (req.specialRequirements() != null) {
+                        generationMeta.put("specialRequirements", req.specialRequirements());
+                    }
+                    generationMeta.put("coveredCount", sufficiency.coveredCount());
+                    generationMeta.put("confidence", sufficiency.overallConfidence());
+                }
+
+                if (plannerOutput != null && plannerOutput.isPlanGenerationReady()) {
+                    planGenerationReady = true;
+                    var req = plannerOutput.planGenerationRequirements();
+                    planGenerationMeta = new LinkedHashMap<>();
+                    planGenerationMeta.put("stage", "offered");
+                    planGenerationMeta.put("coveredCount", sufficiency.coveredCount());
+                    if (req.requirementText() != null) {
+                        planGenerationMeta.put("requirementText", req.requirementText());
+                    }
+                }
+
+                if (plannerOutput == null) {
+                    // 兜底：planner 未输出有效的 [CONTROL]，仅设置标志位让弹窗处理
+                    if (sufficiency.sufficient() && !planMode) {
+                        generationReady = true;
+                        generationMeta = Map.of("stage", "offered",
+                            "coveredCount", sufficiency.coveredCount(),
+                            "confidence", sufficiency.overallConfidence());
+                    }
+                    if (planMode && sufficiency.sufficient()) {
+                        String offer = "\n\n---\n\n🎯 你的学习画像已就绪！需要我为你生成一份个性化的学习路径规划吗？\n\n"
+                            + "我会根据你的目标和基础，规划完整的学习路线、推荐资源和节奏安排。";
+                        extraText.append(offer);
+                        planGenerationReady = true;
+                        planGenerationMeta = Map.of("stage", "offered",
+                            "coveredCount", sufficiency.coveredCount());
+                    }
+                }
+            } else {
+                // Unified 模式：优先从完整回复中解析 [CONTROL]（Phase 7），
+                // 回退到传统意图检测
+                PlannerOutput unifiedPlanner = PlannerOutput.fromPlannerText(fullReply);
+                if (unifiedPlanner != null && unifiedPlanner.isGenerationReady()) {
+                    generationReady = true;
+                    ResourceRequirements req = unifiedPlanner.resourceRequirements();
+                    generationMeta = new LinkedHashMap<>();
+                    generationMeta.put("stage", "offered");
+                    generationMeta.put("topic", req.topic());
+                    generationMeta.put("goalSummary", req.goalSummary());
+                    generationMeta.put("difficulty", req.difficulty());
+                    if (req.items() != null && !req.items().isEmpty()) {
+                        generationMeta.put("items", req.items().stream()
+                            .map(item -> Map.of("type", item.type(), "focus", item.focus()))
+                            .toList());
+                    }
+                    if (req.specialRequirements() != null) {
+                        generationMeta.put("specialRequirements", req.specialRequirements());
+                    }
+                    generationMeta.put("coveredCount", sufficiency.coveredCount());
+                    generationMeta.put("confidence", sufficiency.overallConfidence());
+                } else if (hasGenIntent) {
+                    log.info("用户需要资源生成: chatId={}, prefs={}", chatId, genIntent.preferences());
+                    String topic = conversationAgent.resolveTopic(
+                        courseName != null ? courseName : "当前课程", messages, null);
+                    java.util.Map<String, Object> prefsWithTopic =
+                        new java.util.LinkedHashMap<>(genIntent.preferences());
+                    prefsWithTopic.put("topic", topic);
+                    if (preClarifying != null) {
+                        extraText.append("\n\n").append(preClarifying);
+                        generationReady = true;
+                        generationMeta = Map.of("stage", "clarifying", "preferences", prefsWithTopic);
+                    } else {
+                        generationReady = true;
+                        generationMeta = Map.of("stage", "ready", "preferences", prefsWithTopic);
+                    }
+                }
+
+                if (!generationReady && sufficiency.sufficient() && !planMode) {
+                    generationReady = true;
+                    generationMeta = Map.of("stage", "offered",
+                        "coveredCount", sufficiency.coveredCount(),
+                        "confidence", sufficiency.overallConfidence());
+                }
+
+                if (planMode && sufficiency.sufficient()) {
+                    String offer = "\n\n---\n\n🎯 你的学习画像已就绪！需要我为你生成一份个性化的学习路径规划吗？\n\n"
+                        + "我会根据你的目标和基础，规划完整的学习路线、推荐资源和节奏安排。";
+                    extraText.append(offer);
+                    planGenerationReady = true;
+                    planGenerationMeta = Map.of("stage", "offered",
+                        "coveredCount", sufficiency.coveredCount());
+                }
             }
 
             // 保存助手消息到数据库
@@ -1003,21 +1169,59 @@ public class ChatServiceImpl implements ChatService {
             asstMsg.put("role", "assistant");
             asstMsg.put("content", fullReply);
             asstMsg.put("at", aiAt);
-            // Store planner output (analysis + plan) alongside the clean reply
-            String plannerOutput = ctx.get("planner_raw");
-            if (plannerOutput != null && !plannerOutput.isEmpty()) {
-                asstMsg.put("planning", plannerOutput);
+            // 将 planner 输出（分析 + 计划）与干净回复一同存储
+            String plannerRaw = ctx.get("planner_raw");
+            if (plannerRaw != null && !plannerRaw.isEmpty()) {
+                asstMsg.put("planning", plannerRaw);
+            }
+            // 将方案建议（planOffer）嵌入消息持久化，前端刷新页面后可还原方案卡片
+            if (generationReady && generationMeta != null) {
+                Map<String, Object> planOffer = new LinkedHashMap<>();
+                planOffer.put("type", "resource");
+                planOffer.put("topic", generationMeta.getOrDefault("topic",
+                    // fallback: extract topic from last user message
+                    reverseFindUserMessage(messages)));
+                planOffer.put("goalSummary", generationMeta.get("goalSummary"));
+                planOffer.put("difficulty", generationMeta.get("difficulty"));
+                planOffer.put("items", generationMeta.get("items"));
+                planOffer.put("coveredCount", generationMeta.get("coveredCount"));
+                planOffer.put("confidence", generationMeta.get("confidence"));
+                planOffer.put("launchTopic", planOffer.get("topic"));
+                asstMsg.put("planOffer", toJson(planOffer));
+            }
+            if (planGenerationReady && planGenerationMeta != null) {
+                Map<String, Object> planOffer = new LinkedHashMap<>();
+                planOffer.put("type", "plan");
+                planOffer.put("requirementText", planGenerationMeta.getOrDefault("requirementText", ""));
+                planOffer.put("coveredCount", planGenerationMeta.get("coveredCount"));
+                String launchTopic = (String) planGenerationMeta.getOrDefault("topic",
+                    reverseFindUserMessage(messages));
+                planOffer.put("launchTopic", launchTopic);
+                asstMsg.put("planOffer", toJson(planOffer));
             }
             messages.add(asstMsg);
             int asstMsgIdx = messages.size() - 1;
             session.setMessagesJson(toJson(messages));
             profileChatMapper.updateById(session);
 
+            // 将 generationMeta 持久化到 Redis，供 TaskOrchestrator 在用户确认生成时使用
+            // 这解决了聊天 planner 对用户意图的理解（estimatedCount、difficulty 等）
+            // 在 POST /tasks/generate 时丢失的信息断层问题
+            if (generationReady && generationMeta != null && chatId != null) {
+                try {
+                    redis.opsForValue().set("genmeta:" + chatId,
+                        objectMapper.writeValueAsString(generationMeta),
+                        Duration.ofHours(1));
+                    log.info("Stored generationMeta to Redis for chatId={}", chatId);
+                } catch (Exception e) {
+                    log.warn("Failed to store generationMeta to Redis: {}", e.getMessage());
+                }
+            }
+
             // 构建后置流项目：缓冲的观察事件 + REFLECT 事件 + 额外文本 + 完成信号
             java.util.List<SseEvent> postItems = new java.util.ArrayList<>(postThoughtEvents);
 
-            // REFLECT event with sufficiency result (aligned with CONTEXT baseline)
-            // 画像反射事件：向客户端同步最终的维度覆盖情况，作为本轮对话的阶段性总结。
+            // 画像反射事件：向客户端同步最终的维度覆盖情况，作为本轮对话的阶段性总结
             int effectiveCovered = Math.max(profileCovered, sufficiency.coveredCount());
             int effectiveMissing = Math.max(0, 7 - effectiveCovered);
             String reflectMissing = effectiveMissing > 0 ? "，还缺" + effectiveMissing + "个维度" : "";
@@ -1025,18 +1229,23 @@ public class ChatServiceImpl implements ChatService {
             String reflectDecision = sufficiency.sufficient()
                 ? "SUFFICIENT — 画像充足"
                 : "CONTINUE — 继续收集画像信息";
+            String reflectThoughtStr = "覆盖度 " + effectiveCovered
+                + "/7，置信度 " + String.format("%.0f%%", sufficiency.overallConfidence() * 100);
             postItems.add(toSseEvent("agent.thought", Map.of(
                 "agentName", "ConversationAgent",
                 "agentRole", "conversation",
-                "phase", "REFLECT",
+                "phase", ThinkingPhase.REFLECT.name(),
                 "context", "画像覆盖度评估，已覆盖 " + effectiveCovered + "/7 维度",
                 "observation", reflectObs,
-                "thought", "覆盖度 " + effectiveCovered
-                    + "/7，置信度 " + String.format("%.0f%%", sufficiency.overallConfidence() * 100),
+                "thought", reflectThoughtStr,
                 "decision", reflectDecision,
                 "confidenceLevel", effectiveCovered >= 4 ? "high" : "medium",
                 "timestamp", Instant.now().toString()
             )));
+            chatObs.captureStep(ThinkingPhase.REFLECT,
+                "画像覆盖度评估，已覆盖 " + effectiveCovered + "/7 维度",
+                reflectObs, reflectThoughtStr, reflectDecision,
+                effectiveCovered >= 4 ? "high" : "medium");
 
             if (extraText.length() > 0) {
                 postItems.add(SseEvent.chunk(extraText.toString()));
@@ -1049,6 +1258,23 @@ public class ChatServiceImpl implements ChatService {
             doneData.put("generationMeta", generationMeta != null ? generationMeta : Map.of());
             doneData.put("planGenerationReady", planGenerationReady);
             doneData.put("planGenerationMeta", planGenerationMeta != null ? planGenerationMeta : Map.of());
+            // Unified 回复计划（Phase 2+）：standard 模式使用 PlannerOutput，unified 使用兜底
+            if (plannerOutput != null) {
+                var rp = plannerOutput.replyPlan();
+                doneData.put("replyPlan", Map.of(
+                    "strategy", rp != null ? rp.strategy() : "direct_answer",
+                    "shouldShowOffer", rp != null && rp.shouldShowOffer() && !plannerOutput.intent().needsClarification(),
+                    "keyPoints", rp != null && rp.keyPoints() != null ? rp.keyPoints() : List.of(),
+                    "tone", rp != null && rp.tone() != null ? rp.tone() : ""
+                ));
+            } else {
+                doneData.put("replyPlan", Map.of(
+                    "strategy", generationReady ? "offer_generation" : "direct_answer",
+                    "shouldShowOffer", generationReady,
+                    "keyPoints", List.of(),
+                    "tone", ""
+                ));
+            }
             log.info(">>> SSE DONE event: generationReady={}, meta={}", generationReady,
                 generationMeta != null ? generationMeta.get("stage") : "null");
             if (generationReady) {
@@ -1066,71 +1292,37 @@ public class ChatServiceImpl implements ChatService {
             final String fContextObs = contextObs;
             final String fCourseId = session.getCourseId();
 
+            final List<Map<String, String>> fCapturedThoughts = new ArrayList<>(chatObs.capturedThoughts);
+            final List<Map<String, String>> fThinkingTraces = new ArrayList<>(chatObs.thinkingTraces);
+            final int fRoundNum = roundNum;
+
             CompletableFuture.runAsync(() -> {
                 try {
+                    // ── 持久化思考链（逐行写入 agent_thinking_traces） ──
+                    // 每个 ThinkingPhase 独立一行，带 roundNum 标记供历史消息重建。
                     if (persistenceService != null) {
-                        persistenceService.recordThinkingTrace(
-                            fChatId, "ConversationAgent", "conversation",
-                            "CONVERSATION",
-                            "对话第" + (messages.size() / 2) + "轮，评估信息覆盖度",
-                            "已覆盖 " + fSufficiency.coveredCount() + "/7 维度，置信度 " +
-                                String.format("%.0f%%", fSufficiency.overallConfidence() * 100),
-                            fSufficiency.sufficient()
-                                ? "SUFFICIENT — 画像充足" : "CONTINUE — 继续收集画像信息",
-                            fSufficiency.coveredCount() >= 4 ? "medium" : "low");
+                        for (Map<String, String> trace : fThinkingTraces) {
+                            try {
+                                persistenceService.recordChatThinkingTrace(
+                                    fChatId,
+                                    trace.get("agentName"),
+                                    trace.get("agentRole"),
+                                    trace.get("phase"),
+                                    trace.get("context"),
+                                    trace.get("observation"),
+                                    trace.get("thought"),
+                                    trace.get("decision"),
+                                    trace.get("confidenceLevel"),
+                                    fRoundNum);
+                            } catch (Exception inner) {
+                                log.warn("单条思考链持久化失败 (phase={}): {}", trace.get("phase"), inner.getMessage());
+                            }
+                        }
                     }
 
-                    int asyncEffective = Math.max(profileCovered, fSufficiency.coveredCount());
-                    String missingInfo = asyncEffective < 7
-                        ? "，还缺" + (7 - asyncEffective) + "个维度"
-                        : "";
-
-                    java.util.List<Map<String, String>> steps = new java.util.ArrayList<>();
-                    steps.add(Map.of(
-                        "label", "理解上下文",
-                        "icon", "📋",
-                        "done", "true",
-                        "detail", fContextObs
-                    ));
-
-                    // Add RETRIEVE/RAG steps if tools were called during planning
-                    String ragTriggered = ctx.get("rag_triggered");
-                    if ("true".equals(ragTriggered)) {
-                        steps.add(Map.of(
-                            "label", "检索知识库",
-                            "icon", "🔗",
-                            "done", "true",
-                            "detail", "LLM 自主调用 rag_retrieve 工具检索课程知识库"
-                        ));
-                        String ragCount = ctx.get("rag_source_count");
-                        int count = ragCount != null ? Integer.parseInt(ragCount) : 0;
-                        steps.add(Map.of(
-                            "label", "检索分析",
-                            "icon", "🔍",
-                            "done", "true",
-                            "detail", "检索到 " + count + " 条相关资料，已纳入回答上下文"
-                        ));
-                    }
-
-                    // Add combined planning step (ANALYSIS + PLAN seen during SSE live stream)
-                    String fPlanning = messages.get(fAsstMsgIdx).get("planning");
-                    if (fPlanning != null && !fPlanning.isEmpty()) {
-                        steps.add(Map.of(
-                            "label", "意图分析与回复规划",
-                            "icon", "🔍",
-                            "done", "true",
-                            "detail", fPlanning
-                        ));
-                    }
-
-                    steps.add(Map.of(
-                        "label", "评估画像覆盖度",
-                        "icon", "🎯",
-                        "done", "true",
-                        "detail", "已覆盖 " + asyncEffective + "/7 维度" + missingInfo
-                    ));
+                    // ── 持久化 thinking JSON（供前端历史恢复） ──
                     String thinkingJson = objectMapper.writeValueAsString(Map.of(
-                        "steps", steps,
+                        "steps", fCapturedThoughts,
                         "expanded", false
                     ));
                     messages.get(fAsstMsgIdx).put("thinking", thinkingJson);
@@ -1138,12 +1330,11 @@ public class ChatServiceImpl implements ChatService {
                     profileChatMapper.updateById(session);
 
                     // 增量 delta 保存：每轮对话都做，无覆盖度阈值
-                    // 增量更新策略：无论画像是否充足，均尝试从最新对话中提取微小变化，保持画像实时性。
                     if (fCourseId != null && !fCourseId.isEmpty()) {
                         profileService.updateProfileDelta(fUserId, fCourseId, fMessages, fChatId);
                     }
                 } catch (Exception e) {
-                    log.warn("异步画像更新失败: {}", e.getMessage());
+                    log.warn("异步思考链持久化失败: {}", e.getMessage());
                 }
             }, profileAnalysisExecutor);
 
@@ -1151,9 +1342,8 @@ public class ChatServiceImpl implements ChatService {
         });
 
         return Flux.fromIterable(preEvents)
-            .concatWith(plannerPhase)
-            .concatWith(genPhase
-                .doOnError(e -> log.error("Generation phase failed, continuing to post-stream: {}", e.getMessage()))
+            .concatWith(mainPhase
+                .doOnError(e -> log.error("Main phase failed, continuing to post-stream: {}", e.getMessage()))
                 .onErrorResume(e -> Flux.empty()))
             .concatWith(postStream);
     }
@@ -1218,8 +1408,12 @@ public class ChatServiceImpl implements ChatService {
 
     /** 从课程表与画像版本中提取课程上下文 */
     private String buildCourseContext(String userId, String courseId) {
-        if (courseId == null) return "暂无课程信息（学生尚未选择课程）";
+        // 1. 如果没有课程ID，直接返回默认提示
+        if (courseId == null) {
+            return "暂无课程信息（学生尚未选择课程）";
+        }
 
+        // 2. 获取课程名称
         String courseName = null;
         try {
             var course = courseMapper.selectById(courseId);
@@ -1230,47 +1424,71 @@ public class ChatServiceImpl implements ChatService {
             log.warn("查找课程名称失败: {}", e.getMessage());
         }
 
-        String profileContext = "";
-        if (userId != null) {
-            try {
-                Profile profile = profileMapper.selectOne(
-                    new LambdaQueryWrapper<Profile>()
-                        .eq(Profile::getUserId, userId)
-                        .eq(Profile::getCourseId, courseId));
-                if (profile != null && profile.getCurrentVersion() != null && profile.getCurrentVersion() > 0) {
-                    ProfileVersion pv = profileVersionMapper.selectOne(
-                        new LambdaQueryWrapper<ProfileVersion>()
-                            .eq(ProfileVersion::getUserId, userId)
-                            .eq(ProfileVersion::getCourseId, courseId)
-                            .eq(ProfileVersion::getVersion, profile.getCurrentVersion()));
-                    if (pv != null && pv.getDimensionsJson() != null) {
-                        List<Map<String, Object>> dimList = objectMapper.readValue(pv.getDimensionsJson(),
-                            new TypeReference<List<Map<String, Object>>>() {});
-                        if (dimList != null) {
-                            for (var dim : dimList) {
-                                if ("major_context".equals(dim.get("key"))) {
-                                    @SuppressWarnings("unchecked")
-                                    Map<String, Object> value = (Map<String, Object>) dim.get("value");
-                                    if (value != null) {
-                                        String major = (String) value.getOrDefault("major", "");
-                                        String chapter = (String) value.getOrDefault("current_chapter", "");
-                                        if (!major.isEmpty()) profileContext += "，专业: " + major;
-                                        if (!chapter.isEmpty()) profileContext += "，当前章节: " + chapter;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("构建画像上下文失败: {}", e.getMessage());
-            }
-        }
+        // 3. 构建章节概览
+        String chapterSummary = buildChapterSummary(courseId);
 
+        // 4. 组装最终结果：仅返回课程名称 + 章节结构，画像信息由 buildProfileContext() 提供
+        StringBuilder resultSb = new StringBuilder();
         if (courseName != null) {
-            return "课程: " + courseName + profileContext;
+            resultSb.append("课程: ").append(courseName);
+        } else {
+            resultSb.append("课程ID: ").append(courseId);
         }
-        return "课程ID: " + courseId + profileContext + "（需通过对话了解学生的专业和课程）";
+        resultSb.append("\n章节目录：" + chapterSummary);
+
+        return resultSb.toString();
+    }
+
+    /**
+     * 从 BookInfo.toc JSON 中提取一级章节标题，拼接为轻量概览。
+     * 格式：\\n章节概览：Ch1 绪论 | Ch2 知识表示 | ...
+     */
+    private String buildChapterSummary(String courseId) {
+        try {
+            BookInfo bookInfo = bookInfoTool.resolveBookInfo(courseId);
+            if (bookInfo == null || bookInfo.getToc() == null) return "";
+            List<Map<String, Object>> tocList = objectMapper.readValue(bookInfo.getToc(),
+                    new TypeReference<List<Map<String, Object>>>() {});
+            if (tocList == null || tocList.isEmpty()) return "";
+
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < tocList.size(); i++) {
+                Map<String, Object> node = tocList.get(i);
+                String title = (String) node.getOrDefault("title", "");
+                if (!title.isEmpty()) {
+                    if (sb.isEmpty()) sb.append("\n章节概览：");
+                    else sb.append(" | ");
+                    sb.append(title);
+                }
+            }
+
+            return sb.toString();
+        } catch (Exception e) {
+            log.warn("构建章节概览失败: {}", e.getMessage());
+            return "";
+        }
+    }
+
+
+    /**
+     * 将 RAG 检索到的原始资料格式化为文本，注入 ReplyGenerator 的上下文。
+     * 每条资料包含：章节标题、标题路径、内容摘录。
+     */
+    @SuppressWarnings("unchecked")
+    private void appendRagContent(StringBuilder buf, List<?> sources) {
+        int idx = 1;
+        for (Object src : sources) {
+            if (!(src instanceof Map)) continue;
+            Map<String, Object> s = (Map<String, Object>) src;
+            String chapter = s.getOrDefault("chapterTitle", "").toString();
+            String heading = s.getOrDefault("headingPath", "").toString();
+            String quote = s.getOrDefault("quote", "").toString();
+            if (buf.length() > 0) buf.append("\n");
+            buf.append("资料").append(idx++).append("：");
+            if (!chapter.isEmpty()) buf.append("[").append(chapter).append("] ");
+            if (!heading.isEmpty() && !heading.equals(chapter)) buf.append(heading).append(" — ");
+            buf.append(quote);
+        }
     }
 
     /** 构建已知画像维度的摘要 */
@@ -1371,9 +1589,30 @@ private ProfileChat lazyCreateSession(String chatId, String userId, String cours
                         // 忽略解析失败
                     }
                 }
-                return new ChatMessageDto(m.get("role"), m.get("content"), m.get("at"), thinking);
+                Object planOffer = null;
+                String planOfferStr = m.get("planOffer");
+                if (planOfferStr != null && !planOfferStr.isBlank()) {
+                    try {
+                        planOffer = objectMapper.readValue(planOfferStr,
+                            new TypeReference<Map<String, Object>>() {});
+                    } catch (Exception e) {
+                        // 忽略解析失败
+                    }
+                }
+                return new ChatMessageDto(m.get("role"), m.get("content"), m.get("at"), thinking, planOffer);
             })
             .toList();
+    }
+
+    /** 从消息列表反向查找最后一条用户消息文本 */
+    private String reverseFindUserMessage(List<Map<String, String>> messages) {
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Map<String, String> m = messages.get(i);
+            if ("user".equals(m.get("role"))) {
+                return m.get("content");
+            }
+        }
+        return "";
     }
 
     private List<Map<String, String>> parseRawMessages(String json) {
@@ -1455,13 +1694,28 @@ private ProfileChat lazyCreateSession(String chatId, String userId, String cours
         return count;
     }
 
-    /** Extract text between [ANALYSIS] and [PLAN] markers from planner output. */
+    /**
+     * 判断是否使用统一对话模式。
+     * 优先级：请求级别覆盖 > 全局配置默认值。
+     */
+    private boolean isUnifiedMode(ChatSendRequest request) {
+        if (request.getDialogueMode() != null && !request.getDialogueMode().isBlank()) {
+            return "unified".equals(request.getDialogueMode());
+        }
+        return "unified".equals(learnThinkProperties.getDialogueMode());
+    }
+
+    /**
+     * 从 planner 输出中提取 [ANALYSIS] 与 [PLAN] 标记之间的文本
+     * @param text planner 原始输出
+     * @return 分析文本，无匹配返回 null
+     */
     private String extractAnalysis(String text) {
         if (text == null) return null;
         int analysisStart = text.indexOf("[ANALYSIS]");
         if (analysisStart < 0) return null;
         analysisStart += "[ANALYSIS]".length();
-        // skip trailing newlines
+        // 跳过结尾换行符
         while (analysisStart < text.length() && (text.charAt(analysisStart) == '\n' || text.charAt(analysisStart) == '\r')) {
             analysisStart++;
         }
@@ -1470,7 +1724,11 @@ private ProfileChat lazyCreateSession(String chatId, String userId, String cours
         return text.substring(analysisStart, planStart).trim();
     }
 
-    /** Extract text between [PLAN] and ---PLAN_END--- markers from planner output. */
+    /**
+     * 从 planner 输出中提取 [PLAN] 与 ---PLAN_END--- 标记之间的文本
+     * @param text planner 原始输出
+     * @return 计划文本，无匹配返回原文本
+     */
     private String extractPlan(String text) {
         if (text == null) return null;
         int planStart = text.indexOf("[PLAN]");
@@ -1482,5 +1740,210 @@ private ProfileChat lazyCreateSession(String chatId, String userId, String cours
         int planEnd = text.indexOf("---PLAN_END---", planStart);
         if (planEnd < 0) return text.substring(planStart).trim();
         return text.substring(planStart, planEnd).trim();
+    }
+
+
+
+    // ================================================================
+    // v3.5: 思考链历史重建 — 从 agent_thinking_traces 恢复完整思考链
+    // ================================================================
+
+    /**
+     * 遍历消息列表，对每条助手消息检测 thinking 是否缺失或不足（≤2步 或 缺少phase字段），
+     * 若是则从 agent_thinking_traces 表按 chat_id + round_num 查询并重建。
+     * <p>
+     * 为避免 N+1 查询，一次查出该会话全部 traces，按 round_num 分组后匹配。
+     */
+    private void reconstructThinkingForMessages(List<ChatMessageDto> messages, String chatId) {
+        // 一次查出该会话全部 traces
+        List<AgentThinkingTrace> allTraces = persistenceService.findTracesByChatId(chatId);
+        if (allTraces.isEmpty()) return;
+
+        // 按 round_num 分组（round_num 可能为 null，跳过）
+        Map<Integer, List<AgentThinkingTrace>> tracesByRound = new HashMap<>();
+        for (AgentThinkingTrace t : allTraces) {
+            if (t.getRoundNum() == null) continue;
+            tracesByRound.computeIfAbsent(t.getRoundNum(), k -> new ArrayList<>()).add(t);
+        }
+
+        int roundNum = 0;
+        for (ChatMessageDto msg : messages) {
+            if ("assistant".equals(msg.getRole())) {
+                roundNum++;
+                Object thinking = msg.getThinking();
+                if (thinking == null || isThinkingInsufficient(thinking)) {
+                    List<AgentThinkingTrace> roundTraces = tracesByRound.get(roundNum);
+                    if (roundTraces != null && !roundTraces.isEmpty()) {
+                        Map<String, Object> reconstructed = buildThinkingFromTraces(roundTraces);
+                        if (reconstructed != null) {
+                            msg.setThinking(reconstructed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 判断 thinking 数据是否"不足"：
+     * - null → 不足
+     * - steps ≤ 2 → 不足（同步路径的固定文本）
+     * - steps 缺少 phase 字段 → 不足（旧格式，无观察/思考/决策独立字段）
+     */
+    private boolean isThinkingInsufficient(Object thinking) {
+        if (thinking == null) return true;
+        if (thinking instanceof Map<?, ?> map) {
+            Object steps = map.get("steps");
+            if (steps instanceof List<?> list) {
+                if (list.size() <= 2) return true;
+                // 检查步骤是否缺少 phase 字段（旧格式标记）
+                for (Object item : list) {
+                    if (item instanceof Map<?, ?> step) {
+                        if (!step.containsKey("phase")) return true;
+                    }
+                }
+                return false;
+            }
+            return true;
+        }
+        return true;
+    }
+
+    /** 将 agent_thinking_traces 行记录重建为 ThinkingRecord 格式的 Map */
+    private Map<String, Object> buildThinkingFromTraces(List<AgentThinkingTrace> traces) {
+        List<Map<String, Object>> steps = new ArrayList<>();
+        for (AgentThinkingTrace trace : traces) {
+            ThinkingPhase phase = ThinkingPhase.fromString(trace.getPhase());
+            String label = resolvePhaseLabel(phase);
+            String icon = resolvePhaseIcon(phase);
+            if (label == null) continue;
+
+            Map<String, Object> step = new LinkedHashMap<>();
+            step.put("label", label);
+            step.put("icon", icon);
+            step.put("done", true);
+            if (phase != null) {
+                step.put("phase", phase.name());
+            }
+
+            // detail: context + observation 的简洁摘要（折叠状态显示）
+            StringBuilder detail = new StringBuilder();
+            if (trace.getContext() != null && !trace.getContext().isEmpty()) {
+                detail.append(trace.getContext());
+            }
+            if (trace.getObservation() != null && !trace.getObservation().isEmpty()) {
+                if (detail.length() > 0) detail.append(" — ");
+                detail.append(trace.getObservation());
+            }
+            if (detail.length() > 0) {
+                step.put("detail", detail.toString());
+            }
+
+            // observation / thought / decision — 独立字段，前端渲染推理卡片用
+            // 与 SSE agent.thought 事件结构一致：stepCategory() 据此分类为 reasoning/tool_call
+            if (trace.getObservation() != null && !trace.getObservation().isEmpty()) {
+                step.put("observation", trace.getObservation());
+            }
+            if (trace.getThought() != null && !trace.getThought().isEmpty()) {
+                step.put("thought", trace.getThought());
+            }
+            if (trace.getDecision() != null && !trace.getDecision().isEmpty()) {
+                step.put("decision", trace.getDecision());
+            }
+            if (trace.getConfidenceLevel() != null) {
+                step.put("confidenceLevel", trace.getConfidenceLevel());
+            }
+
+            steps.add(step);
+        }
+        if (steps.isEmpty()) return null;
+
+        Map<String, Object> thinking = new LinkedHashMap<>();
+        thinking.put("steps", steps);
+        thinking.put("expanded", false);
+        return thinking;
+    }
+
+    private String resolvePhaseLabel(ThinkingPhase phase) {
+        if (phase == null) return null;
+        switch (phase) {
+            case CONTEXT:  return "理解上下文";
+            case RETRIEVE: return "检索知识库";
+            case RAG:      return "检索分析";
+            case PLANNING: return "意图分析与回复规划";
+            case DECISION: return "决策判断";
+            case REFLECT:  return "评估画像";
+            default:       return null;
+        }
+    }
+
+    private String resolvePhaseIcon(ThinkingPhase phase) {
+        if (phase == null) return null;
+        switch (phase) {
+            case CONTEXT:  return "📋";
+            case RETRIEVE: return "🔗";
+            case RAG:      return "🔍";
+            case PLANNING: return "🔍";
+            case DECISION: return "⚖️";
+            case REFLECT:  return "🎯";
+            default:       return "●";
+        }
+    }
+
+    /**
+     * Insert a ProfileVersion row with automatic retry on duplicate version number.
+     * <p>
+     * The ReentrantLock serializes in-JVM access, but the @Transactional commit
+     * happens AFTER the lock is released. A concurrent request may have already
+     * committed the same version number by the time this insert executes.
+     * This method catches DuplicateKeyException, re-reads the latest version
+     * from the profile table, and retries.
+     */
+    private ProfileVersion insertProfileVersionWithRetry(
+            String userId, String courseId, int initialVersion,
+            List<Map<String, Object>> dimensions, Map<String, Object> summary,
+            String chatId, int maxRetries) {
+        int version = initialVersion;
+        for (int attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                ProfileVersion pv = new ProfileVersion();
+                pv.setUserId(userId);
+                pv.setCourseId(courseId);
+                pv.setVersion(version);
+                try {
+                    pv.setDimensionsJson(objectMapper.writeValueAsString(dimensions));
+                    pv.setSummaryJson(objectMapper.writeValueAsString(summary));
+                    pv.setSourceChatIds(objectMapper.writeValueAsString(List.of(chatId)));
+                } catch (Exception je) {
+                    throw new RuntimeException("Failed to serialize profile version JSON", je);
+                }
+                profileVersionMapper.insert(pv);
+
+                // 确保 profile 指针与实际插入的版本一致
+                Profile profile = profileMapper.selectOne(
+                    new LambdaQueryWrapper<Profile>()
+                        .eq(Profile::getUserId, userId)
+                        .eq(Profile::getCourseId, courseId));
+                if (profile != null && profile.getCurrentVersion() < version) {
+                    profile.setCurrentVersion(version);
+                    profileMapper.updateById(profile);
+                }
+                return pv;
+            } catch (org.springframework.dao.DuplicateKeyException e) {
+                log.warn("ProfileVersion insert conflict for version={} (attempt {}/{}), retrying with fresh version",
+                        version, attempt + 1, maxRetries);
+                // 从数据库重新读取实际最新版本号并递增
+                Profile profile = profileMapper.selectOne(
+                    new LambdaQueryWrapper<Profile>()
+                        .eq(Profile::getUserId, userId)
+                        .eq(Profile::getCourseId, courseId));
+                version = (profile != null ? profile.getCurrentVersion() : version) + 1;
+                if (attempt == maxRetries - 1) {
+                    throw new RuntimeException(
+                        "Failed to insert ProfileVersion after " + maxRetries + " retries", e);
+                }
+            }
+        }
+        throw new RuntimeException("Unreachable");
     }
 }

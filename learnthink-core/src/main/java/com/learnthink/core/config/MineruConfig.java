@@ -16,6 +16,11 @@ import org.springframework.web.client.RestTemplate;
 import java.io.IOException;
 import java.time.Duration;
 
+/**
+ * Mineru API 配置类
+ * <p>为 Mineru 文档解析服务创建专用的 RestTemplate，
+ * 配置鉴权 Header 和请求/响应日志拦截器。</p>
+ */
 @Configuration
 public class MineruConfig {
 

@@ -2,8 +2,11 @@ package com.learnthink.web.controller;
 
 import com.learnthink.common.dto.plan.ActivitySubmitRequest;
 import com.learnthink.common.dto.plan.ActivitySubmitResponse;
+import com.learnthink.common.dto.plan.PlanConfirmRequest;
 import com.learnthink.common.dto.plan.PlanGenerateRequest;
+import com.learnthink.common.dto.plan.PlanPreviewRequest;
 import com.learnthink.common.dto.plan.PlanResponse;
+import com.learnthink.common.dto.plan.PlanUpdateRequest;
 import com.learnthink.common.result.Result;
 import com.learnthink.common.util.UserContextUtil;
 import com.learnthink.core.agent.orchestration.PlanGenerationOrchestrator;
@@ -28,14 +31,90 @@ public class PlanController {
     /**
      * 生成学习计划（任务化）
      * 返回 taskId，前端通过 GET /tasks/{taskId}/events 订阅 SSE 进度
+     * 若已有进行中任务且未传 force=true，返回 already_in_progress 标记，由前端弹窗让用户选择
      */
     @PostMapping("/plan/generate")
-    public Result<Map<String, String>> generatePlan(@RequestBody PlanGenerateRequest request) {
+    public Result<Map<String, Object>> generatePlan(@RequestBody PlanGenerateRequest request) {
         String userId = UserContextUtil.getCurrentUserId();
-        log.info("Plan generation requested: userId={}, courseId={}, profileVersion={}",
-                userId, request.getCourseId(), request.getProfileVersion());
-        String taskId = planOrchestrator.startGeneration(userId, request.getCourseId(), request.getProfileVersion());
-        return Result.success(Map.of("task_id", taskId));
+        log.info("Plan generation requested: userId={}, courseId={}, profileVersion={}, force={}",
+                userId, request.getCourseId(), request.getProfileVersion(), request.isForce());
+
+        // 非强制模式下检查是否已有进行中任务
+        if (!request.isForce()) {
+            String existingTaskId = planOrchestrator.findActivePlanTaskId(userId, request.getCourseId());
+            if (existingTaskId != null) {
+                log.info("Plan generation already in progress, returning existing taskId={}", existingTaskId);
+                Map<String, Object> data = new java.util.LinkedHashMap<>();
+                data.put("task_id", existingTaskId);
+                data.put("already_in_progress", true);
+                return Result.success(data);
+            }
+        }
+
+        String taskId = planOrchestrator.startGeneration(userId, request.getCourseId(),
+                request.getProfileVersion(), request.isForce(), request.getRequirementText());
+        Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("task_id", taskId);
+        return Result.success(data);
+    }
+
+    /**
+     * 预览大计划（同步，不落库）
+     * 返回 modules + edges + summary，供前端渲染可编辑计划
+     */
+    @PostMapping("/plan/preview")
+    public Result<Map<String, Object>> previewPlan(@RequestBody PlanPreviewRequest request) {
+        String userId = UserContextUtil.getCurrentUserId();
+        log.info("Plan preview requested: userId={}, courseId={}", userId, request.getCourseId());
+
+        try {
+            Map<String, Object> plan = planOrchestrator.previewPlan(userId, request.getCourseId(),
+                    request.getProfileVersion(), request.getRequirementText(), request.getChatId());
+            return Result.success(plan);
+        } catch (Exception e) {
+            log.error("Plan preview failed", e);
+            return Result.error("PLAN_PREVIEW_FAILED", "大计划生成失败：" + e.getMessage());
+        }
+    }
+
+    /**
+     * 更新 pending_decision 计划草稿 — 用户编辑模块后实时保存到后端
+     */
+    @PostMapping("/plan/update")
+    public Result<Map<String, Object>> updatePlan(@RequestBody PlanUpdateRequest request) {
+        String userId = UserContextUtil.getCurrentUserId();
+        log.info("Plan draft update: userId={}, planId={}, courseId={}",
+                userId, request.getPlanId(), request.getCourseId());
+
+        try {
+            Map<String, Object> plan = planOrchestrator.updatePlanDraft(
+                    userId, request.getPlanId(), request.getCourseId(),
+                    request.getProfileVersion(), request.getPlanJson(),
+                    request.getChatId(), request.getRequirementText());
+            return Result.success(plan);
+        } catch (IllegalStateException e) {
+            return Result.error("PLAN_NOT_EDITABLE", e.getMessage());
+        } catch (Exception e) {
+            log.error("Plan draft update failed", e);
+            return Result.error("PLAN_UPDATE_FAILED", "计划更新失败：" + e.getMessage());
+        }
+    }
+
+    /**
+     * 确认大计划并异步生成子计划 — 跳过 big_plan LLM，使用用户编辑后的 plan
+     */
+    @PostMapping("/plan/confirm")
+    public Result<Map<String, Object>> confirmPlan(@RequestBody PlanConfirmRequest request) {
+        String userId = UserContextUtil.getCurrentUserId();
+        log.info("Plan confirm requested: userId={}, courseId={}", userId, request.getCourseId());
+
+        String taskId = planOrchestrator.confirmPlanAndGenerate(userId, request.getCourseId(),
+                request.getProfileVersion(), request.getPlanJson(), request.getRequirementText(),
+                request.getChatId());
+
+        Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("task_id", taskId);
+        return Result.success(data);
     }
 
     /**

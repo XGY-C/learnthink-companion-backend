@@ -20,4 +20,5 @@ public class ActiveTaskDto {
     private String errorMessage;
     private int readyCount;
     private int totalCount;
+    private String taskType;
 }

@@ -16,42 +16,40 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * Multi-provider, multi-model configuration with optional DeepSeek thinking mode.
+ * 多提供者、多模型配置，支持可选 DeepSeek 思维链模式
  *
- * <p>Each provider gets its own {@link OpenAiApi} (lazily created, cached).
- * Thinking mode params are injected via {@link OpenAiChatOptions#setExtraBody(Map)}
- * which applies to both sync ({@code RestClient}) and streaming ({@code WebClient})
- * paths — unlike HTTP interceptors which only cover the sync path.</p>
+ * <p>每个提供者拥有自己的 {@link OpenAiApi}（延迟创建并缓存）。
+ * 思维链模式参数通过 {@link OpenAiChatOptions#setExtraBody(Map)} 注入，
+ * 该方式同时覆盖同步（{@code RestClient}）和流式（{@code WebClient}）路径——
+ * 而 HTTP 拦截器仅覆盖同步路径。</p>
  *
- * <h3>Preset → Agent mapping</h3>
+ * <h3>预设 → Agent 映射</h3>
  * <table>
- *   <tr><th>Preset</th><th>Model</th><th>Thinking</th><th>Used by</th></tr>
- *   <tr><td>chat</td><td>deepseek-v4-flash</td><td>No</td><td>ChatServiceImpl, ConversationAgent</td></tr>
- *   <tr><td>reasoning</td><td>deepseek-v4-pro</td><td>Yes (high)</td><td>CurriculumPlanner, ContentReviewer</td></tr>
- *   <tr><td>generation</td><td>deepseek-v4-flash</td><td>No</td><td>DocumentGenerator, ExerciseGenerator, etc.</td></tr>
+ *   <tr><th>预设</th><th>模型</th><th>思维链</th><th>使用者</th></tr>
+ *   <tr><td>chat</td><td>deepseek-v4-flash</td><td>否</td><td>ChatServiceImpl, ConversationAgent</td></tr>
+ *   <tr><td>reasoning</td><td>deepseek-v4-pro</td><td>是 (high)</td><td>CurriculumPlanner, ContentReviewer</td></tr>
+ *   <tr><td>generation</td><td>deepseek-v4-flash</td><td>否</td><td>DocumentGenerator, ExerciseGenerator 等</td></tr>
  * </table>
  *
- * <h3>Why thinking for reasoning, not for chat/generation?</h3>
+ * <h3>为什么 reasoning 启用思维链，chat/generation 不启用？</h3>
  * <ul>
- *   <li><b>CurriculumPlanner / ContentReviewer</b> — complex multi-step reasoning (plan
- *       structuring, fact verification). Thinking mode improves accuracy on these
- *       tasks and latency is acceptable since they run asynchronously in the
- *       generation pipeline.</li>
- *   <li><b>ChatServiceImpl / ConversationAgent</b> — real-time conversation.
- *       Thinking mode would add 5-30s latency, unacceptable for chat UX.</li>
- *   <li><b>Generators</b> — creative content production. Thinking mode disables
- *       temperature, which is needed for varied, natural-feeling output.</li>
+ *   <li><b>CurriculumPlanner / ContentReviewer</b> — 复杂多步推理（计划结构化、事实验证）。
+ *       思维链模式提高这些任务的准确性，且延迟可接受（在生成流水线中异步运行）。</li>
+ *   <li><b>ChatServiceImpl / ConversationAgent</b> — 实时对话。
+ *       思维链模式会增加 5-30 秒延迟，对聊天体验不可接受。</li>
+ *   <li><b>Generators</b> — 创意内容生产。思维链模式禁用温度参数，
+ *       而温度正是产生多样化、自然输出所需要的。</li>
  * </ul>
  *
- * <h3>Usage</h3>
+ * <h3>使用方法</h3>
  * <pre>
- * // conversational chat — fast, natural tone
+ * // 对话聊天 — 快速、自然语气
  * {@code @Autowired @Qualifier("chatChatClientBuilder") ChatClient.Builder}
  *
- * // planning & review — deep reasoning with CoT
+ * // 规划和审查 — 深度推理带 CoT
  * {@code @Autowired @Qualifier("reasoningChatClientBuilder") ChatClient.Builder}
  *
- * // content generation — creative, moderate temperature
+ * // 内容生成 — 创意、适中温度
  * {@code @Autowired @Qualifier("generationChatClientBuilder") ChatClient.Builder}
  * </pre>
  */
@@ -67,23 +65,29 @@ public class ModelConfig {
         this.props = props;
     }
 
-    /** Conversational model — chat service, profile chat. No thinking (latency-critical). */
+    /** 对话模型——聊天服务、画像对话。无思维链（延迟敏感） */
     @Bean
     @Primary
     public ChatClient.Builder chatChatClientBuilder() {
         return buildForPreset("chat");
     }
 
-    /** Reasoning model — CurriculumPlanner, ContentReviewer. Thinking enabled for complex reasoning. */
+    /** 推理模型——CurriculumPlanner、ContentReviewer。启用思维链进行复杂推理 */
     @Bean
     public ChatClient.Builder reasoningChatClientBuilder() {
         return buildForPreset("reasoning");
     }
 
-    /** Generation model — content generators. No thinking (temperature required). */
+    /** 生成模型——内容生成器。无思维链（需要温度参数） */
     @Bean
     public ChatClient.Builder generationChatClientBuilder() {
         return buildForPreset("generation");
+    }
+
+    /** 统一模型——单次调用完成思考 + 工具调用 + 回复生成 */
+    @Bean
+    public ChatClient.Builder unifiedChatClientBuilder() {
+        return buildForPreset("unified");
     }
 
     private ChatClient.Builder buildForPreset(String presetName) {
@@ -117,10 +121,14 @@ public class ModelConfig {
                 .build();
         });
 
-        // Build options: model, temperature, DeepSeek thinking params
+        // 构建选项：model、temperature、maxTokens、DeepSeek 思维链参数
         var optionsBuilder = OpenAiChatOptions.builder()
             .model(preset.getModel())
             .temperature(preset.getTemperature());
+
+        if (preset.getMaxTokens() != null) {
+            optionsBuilder.maxTokens(preset.getMaxTokens());
+        }
 
         if (thinking && reasoningEffort != null && !reasoningEffort.isBlank()) {
             optionsBuilder.reasoningEffort(reasoningEffort);
@@ -128,14 +136,13 @@ public class ModelConfig {
 
         var options = optionsBuilder.build();
 
-        // Inject DeepSeek thinking mode via extraBody.
-        // DeepSeek defaults thinking to ENABLED, which causes 400 on tool-call
-        // follow-ups when reasoning_content is absent. We explicitly set it for
-        // every preset:
-        //   reasoning → enabled (CoT for complex tasks)
-        //   chat/generation → disabled (latency-critical, temperature-dependent)
-        // Using extraBody (not an HTTP interceptor) ensures it applies to both
-        // RestClient (sync) and WebClient (streaming) paths.
+        // 通过 extraBody 注入 DeepSeek 思维链模式
+        // DeepSeek 默认启用思维链，但在缺少 reasoning_content 的工具调用后续场景中
+        // 会导致 400 错误。我们对每个预设显式设置：
+        //   reasoning → 启用（复杂任务使用 CoT）
+        //   chat/generation → 禁用（延迟敏感、依赖温度参数）
+        // 使用 extraBody（而非 HTTP 拦截器）确保同时覆盖 RestClient（同步）
+        // 和 WebClient（流式）路径
         Map<String, Object> extraBody = new HashMap<>();
         extraBody.put("thinking", Map.of("type", thinking ? "enabled" : "disabled"));
         options.setExtraBody(extraBody);

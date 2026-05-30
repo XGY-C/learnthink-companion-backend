@@ -8,9 +8,13 @@ import lombok.Data;
 @Data
 public class ExplanationVideoDTO {
     /**
-     * 视频地址
+     * 视频地址（渲染完成后填充，提交时为 null）
      */
     private String videoUrl;
+    /**
+     * Manim 渲染任务 ID，用于轮询查询渲染状态
+     */
+    private String manimTaskId;
     /**
      * 视频标题
      */

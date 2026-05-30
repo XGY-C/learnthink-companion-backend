@@ -4,24 +4,23 @@ import java.time.Instant;
 import java.util.*;
 
 /**
- * The state that flows through the resource generation pipeline.
- *
- * <p>Task identity and pipeline progress fields are mutable (single-writer: advance()).
- * Stage outputs are stored as immutable records — each node reads previous stages and
- * produces its own output record, eliminating shared-mutable-state races.</p>
+ * 资源生成流水线的流转状态
+ * <p>任务标识和流水线进度字段是可变的（单写入器：advance()）。
+ * 阶段输出存储为不可变记录——每个节点读取前一阶段并生成自己的输出记录，
+ * 消除了共享可变状态的数据竞争。</p>
  */
 public class ResourceGenerationState {
 
-    // -- Task identity (final, set once via constructor) --
+    // -- 任务标识（final，通过构造函数一次性设置） --
     public final String taskId;
     public final String userId;
     public final String courseId;
     public final String topic;
     public final List<String> resourceTypes;
     public final int profileVersion;
-    public String profileVersionId; // resolved during PROFILING
+    public String profileVersionId; // 在 PROFILING 阶段解析
 
-    // -- Pipeline progress (mutable, single writer: advance()) --
+    // -- 管线进度（可变，单写者：advance()） --
     public String stage = "PENDING";
     public int percent;
     public String message;
@@ -30,7 +29,7 @@ public class ResourceGenerationState {
     public String errorMessage;
     public boolean retryable;
 
-    // -- Stage outputs (immutable records) --
+    // -- 阶段输出（不可变记录） --
     public ProfileSummary profileSummary;
     public RetrievalData retrieval = RetrievalData.empty();
     public PlanningData planning = PlanningData.empty();
@@ -38,21 +37,27 @@ public class ResourceGenerationState {
     public ReviewData review = ReviewData.empty();
     public PublishingData publish = PublishingData.empty();
 
-    // -- Sub-topic iteration (for incremental publishing) --
+    // -- 子主题迭代（用于增量发布） --
     public SubTopicProgress subTopicProgress = SubTopicProgress.empty();
 
-    // -- Feedback loop context --
+    // -- 计划驱动上下文（非 null → 跳过 LLM 规划，使用预计划项） --
+    public PlanDrivenGenerationRequest planContext;
+
+    // -- 来自聊天规划器的用户意图约束（携带 estimatedCount、difficulty 等） --
+    public Map<String, Object> generationMeta;
+
+    // -- 反馈循环上下文 --
     public FeedbackContext feedback = FeedbackContext.empty();
 
-    // -- Timing --
+    // -- 计时 --
     public final Map<String, Long> stageElapsedMs = new LinkedHashMap<>();
     public final Instant createdAt;
     public Instant finishedAt;
 
-    // -- Routing (set by node implementations for the GraphRunner) --
+    // -- 路由（由节点实现为 GraphRunner 设置） --
     String _nextRoute;
 
-    // -- Progress broadcast hooks (set by TaskGraphObserver before execution) --
+    // -- 进度广播钩子（由 TaskGraphObserver 在执行前设置） --
     transient ProgressHook progressHook;
     transient TaskEventBroadcaster eventBroadcaster;
 
@@ -70,7 +75,7 @@ public class ResourceGenerationState {
     }
 
     // ================================================================
-    // Stage output records (immutable)
+    // 阶段输出记录（不可变）
     // ================================================================
 
     public record RetrievalData(
@@ -136,11 +141,11 @@ public class ResourceGenerationState {
         }
     }
 
-    /** Tracks per-sub-topic processing for incremental publishing. */
+    /** 追踪逐子主题的处理进度，支持增量发布 */
     public record SubTopicProgress(
-        int currentIndex,           // which sub-topic is being processed (-1 = all-at-once legacy mode)
-        Set<Integer> completedIndices, // sub-topics already published
-        int totalCount              // total sub-topics from plan
+        int currentIndex,           // 当前正在处理的子主题索引（-1 = 一次性处理的遗留模式）
+        Set<Integer> completedIndices, // 已发布的子主题
+        int totalCount              // 计划中的子主题总数
     ) {
         public static SubTopicProgress empty() {
             return new SubTopicProgress(-1, Set.of(), 0);
@@ -194,7 +199,7 @@ public class ResourceGenerationState {
     }
 
     // ================================================================
-    // Data records (unchanged)
+    // 数据记录（不变）
     // ================================================================
 
     @FunctionalInterface
@@ -236,19 +241,19 @@ public class ResourceGenerationState {
         double relevance
     ) {}
 
-    /** A sub-topic decomposed from the main topic, forming a learning progression. */
+    /** 从主主题分解出的子主题，形成学习进度序列 */
     public record SubTopic(
-        int index,               // 0-based index within the plan
-        String title,           // sub-topic name, e.g. "二叉树的性质与分类"
-        String description,     // brief description of what this covers
-        List<String> focusKeyPoints, // key concepts covered by this sub-topic
-        int estimatedMinutes,   // estimated study time for this sub-topic group
-        String difficulty       // difficulty level for this sub-topic
+        int index,               // 计划中基于 0 的索引
+        String title,           // 子主题名称，如"二叉树的性质与分类"
+        String description,     // 该子主题覆盖内容的简要描述
+        List<String> focusKeyPoints, // 该子主题涵盖的关键概念
+        int estimatedMinutes,   // 该子主题组的预计学习时间（分钟）
+        String difficulty       // 该子主题的难度等级
     ) {}
 
     public record ResourcePlan(
         String topicOutline,
-        List<SubTopic> subTopics,    // 4-6 sub-topics forming a learning progression
+        List<SubTopic> subTopics,    // 4-6 个形成学习递进的子主题
         List<ResourcePlanItem> items,
         List<String> pushReason,
         List<String> queries
@@ -262,14 +267,22 @@ public class ResourceGenerationState {
         String format,
         List<String> keyPoints,
         String personalizationNote,
-        int subTopicIndex        // which sub-topic this item belongs to (-1 = topic-level)
+        int subTopicIndex,       // 该项所属的子主题索引（-1 = 主题级别）
+        String activityId        // 来自 PrePlannedItem；聊天驱动路径为 null
     ) {
-        /** Backward-compatible constructor — defaults subTopicIndex to 0. */
+        /** 向后兼容构造——subTopicIndex 默认 0，activityId 默认 null */
         public ResourcePlanItem(String type, String title, String difficulty,
             int estimatedMinutes, String format, List<String> keyPoints,
             String personalizationNote) {
             this(type, title, difficulty, estimatedMinutes, format, keyPoints,
-                 personalizationNote, 0);
+                 personalizationNote, 0, null);
+        }
+        /** 向后兼容构造——activityId 默认 null */
+        public ResourcePlanItem(String type, String title, String difficulty,
+            int estimatedMinutes, String format, List<String> keyPoints,
+            String personalizationNote, int subTopicIndex) {
+            this(type, title, difficulty, estimatedMinutes, format, keyPoints,
+                 personalizationNote, subTopicIndex, null);
         }
     }
 
@@ -296,8 +309,9 @@ public class ResourceGenerationState {
 
     public record ReviewReason(String check, String result, String detail) {}
 
-    // -- Route constants --
+    // -- 路由常量 --
     public static final String ROUTE_PLANNING = "PLANNING";
+    public static final String ROUTE_PLAN_DRIVEN = "PLAN_DRIVEN";
     public static final String ROUTE_GENERATING = "GENERATING";
     public static final String ROUTE_REVIEWING = "REVIEWING";
     public static final String ROUTE_PUBLISHING = "PUBLISHING";

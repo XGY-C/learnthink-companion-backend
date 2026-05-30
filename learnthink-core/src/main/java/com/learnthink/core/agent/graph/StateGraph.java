@@ -4,10 +4,10 @@ import java.util.*;
 import java.util.function.Function;
 
 /**
- * Generic state graph for multi-agent orchestration.
- * Supports conditional routing, cycles (feedback loops), and observability.
+ * 用于多智能体编排的通用状态图。
+ * 支持条件路由、循环（反馈循环）和可观察性。
  *
- * @param <S> the state type that flows through the graph
+ * @param <S> 在图中流转的状态类型
  */
 public class StateGraph<S> {
 
@@ -26,7 +26,7 @@ public class StateGraph<S> {
         return this;
     }
 
-    /** Unconditional transition: from → to always */
+    /** 无条件转移：from → to */
     public StateGraph<S> addEdge(String from, String to) {
         edges.computeIfAbsent(from, k -> new ArrayList<>())
              .add(new GraphEdge<>(from, to, null, null));
@@ -34,8 +34,7 @@ public class StateGraph<S> {
     }
 
     /**
-     * Conditional transition: after 'from' executes, the router function decides
-     * which node to go to next based on state.
+     * 条件转移：执行完 'from' 后，router 函数根据状态决定下一个节点。
      */
     public StateGraph<S> addConditionalEdge(String from, Function<S, String> router) {
         edges.computeIfAbsent(from, k -> new ArrayList<>())
@@ -51,7 +50,7 @@ public class StateGraph<S> {
         return this;
     }
 
-    /** Maximum times the graph can revisit any single node (prevents infinite loops) */
+    /** 图可以重新访问任一节点的最大次数（防止无限循环） */
     public StateGraph<S> setMaxCycles(int maxCycles) {
         this.maxCycles = maxCycles;
         return this;
@@ -64,7 +63,7 @@ public class StateGraph<S> {
         return new GraphRunner<>(this);
     }
 
-    // -- Package-private accessors for GraphRunner --
+    // -- GraphRunner 的包级私有访问器 --
 
     Map<String, GraphNode<S>> getNodes() { return nodes; }
     Map<String, List<GraphEdge<S>>> getEdges() { return edges; }
@@ -72,7 +71,7 @@ public class StateGraph<S> {
     int getMaxCycles() { return maxCycles; }
 
     /**
-     * Builder-style entry point for fluent graph construction.
+     * 流畅图构建的 Builder 风格入口。
      */
     public static <S> StateGraph<S> create(Class<S> stateType) {
         return new StateGraph<>();

@@ -22,17 +22,6 @@ public interface ChatService {
     ChatStartResponse startChat(String userId, ChatStartRequest request);
 
     /**
-     * 同步发送单条消息。
-     * 适用于非流式场景，等待完整响应后返回。
-     *
-     * @param userId  当前用户ID
-     * @param chatId  目标会话ID
-     * @param request 消息发送请求（含用户输入、附件等）
-     * @return 对话发送响应（含AI回复、推荐动作等）
-     */
-    ChatSendResponse sendMessage(String userId, String chatId, ChatSendRequest request);
-
-    /**
      * 流式发送消息并返回SSE事件流。
      * 核心业务流：意图探测 → RAG检索 → 多智能体编排 → 增量更新画像 → 资源生成触发。
      * 通过SseEvent.isNamed()区分命名事件（如intent_detected、profile_updated）与文本块。

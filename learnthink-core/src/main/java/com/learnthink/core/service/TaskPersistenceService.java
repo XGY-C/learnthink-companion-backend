@@ -42,7 +42,7 @@ public class TaskPersistenceService {
     private final ObjectMapper objectMapper;
 
     // ================================================================
-    // Task lifecycle
+    // 任务生命周期
     // ================================================================
 
     @Transactional
@@ -58,10 +58,12 @@ public class TaskPersistenceService {
         task.setRequestedResourceTypes(resourceTypesJson);
         task.setChatId(chatId);
 
-        // tasks.profile_version_id stores profile_versions.id (CHAR(36)).
-        // Orchestrator passes profileVersion (int). Resolve it to the version row id.
+        // tasks.profile_version_id 存储的是 profile_versions.id (CHAR(36))。
+        // Orchestrator 传入 profileVersion (int)。在此解析为对应的版本行 id。
+        // 如果指定了有效的画像版本号，则查询对应的画像版本记录并关联到当前任务
         if (profileVersion != null && profileVersion > 0) {
             try {
+                // 根据 userId、courseId 和 version 精确查找画像版本 UUID
                 ProfileVersion pv = profileVersionMapper.selectOne(
                     new LambdaQueryWrapper<ProfileVersion>()
                         .eq(ProfileVersion::getUserId, userId)
@@ -69,20 +71,24 @@ public class TaskPersistenceService {
                         .eq(ProfileVersion::getVersion, profileVersion)
                 );
                 if (pv != null) {
+                    // 找到记录，关联画像版本 ID
                     task.setProfileVersionId(pv.getId());
                 } else {
-                    log.debug("ProfileVersion not found, skip linking: userId={}, courseId={}, version={}",
+                    // 未找到对应版本，降级处理：仅记录调试日志，不阻断任务创建
+                    log.debug("未找到 ProfileVersion，跳过关联：userId={}, courseId={}, version={}",
                         userId, courseId, profileVersion);
                 }
             } catch (Exception e) {
-                log.warn("Failed to resolve profileVersionId, skip linking: userId={}, courseId={}, version={}",
+                // 查询异常时容错处理：记录警告日志，确保画像版本关联失败不影响任务主流程
+                log.warn("解析 profileVersionId 失败，跳过关联：userId={}, courseId={}, version={}",
                     userId, courseId, profileVersion, e);
             }
         }
-        task.setStatus("PENDING");
+        // 初始化任务状态为待处理，进度为 0
         task.setPercent(0);
+        // 持久化任务记录到数据库
         taskMapper.insert(task);
-        log.info("Task created: id={} type={}", task.getId(), taskType);
+        log.info("任务已创建：id={} type={}", task.getId(), taskType);
         return task;
     }
 
@@ -102,6 +108,18 @@ public class TaskPersistenceService {
         taskMapper.updateById(task);
     }
 
+    /**
+     * 查询任务状态（PENDING/RUNNING/SUCCEEDED/FAILED/CANCELLED），无记录返回 null
+     */
+    public String getTaskStatus(String taskId) {
+        Task task = taskMapper.selectById(taskId);
+        return task != null ? task.getStatus() : null;
+    }
+
+    public Task getTask(String taskId) {
+        return taskMapper.selectById(taskId);
+    }
+
     @Transactional
     public void failTask(String taskId, String errorCode, String errorMessage) {
         Task task = taskMapper.selectById(taskId);
@@ -114,7 +132,7 @@ public class TaskPersistenceService {
     }
 
     // ================================================================
-    // Task events (SSE replay source)
+    // 任务事件（SSE 回放数据源）
     // ================================================================
 
     @Transactional
@@ -173,14 +191,14 @@ public class TaskPersistenceService {
         trace.setTrigger(trigger);
         trace.setInResponseTo(inResponseTo);
         if (taskId == null || taskId.isBlank()) {
-            log.warn("Skip thinking trace persistence: blank taskId (agentName={}, phase={})", agentName, phase);
+            log.warn("跳过思考链持久化：taskId 为空（agentName={}, phase={}）", agentName, phase);
             return trace;
         }
-        // agent_thinking_traces.task_id has a strict FK to tasks.id.
-        // Some flows (e.g., profile chat) may emit thinking events without a Task.
-        // In that case, skip persistence instead of breaking the main user flow.
+        // agent_thinking_traces.task_id 对 tasks.id 有严格的外键约束。
+        // 某些流程（如画像对话）可能会在没有 Task 的情况下发出思考事件。
+        // 此时应跳过持久化，而不是中断主用户流程。
         if (taskMapper.selectById(taskId) == null) {
-            log.debug("Skip thinking trace persistence: taskId not found in tasks (taskId={}, agentName={}, phase={})",
+            log.debug("跳过思考链持久化：tasks 表中未找到 taskId（taskId={}, agentName={}, phase={}）",
                 taskId, agentName, phase);
             return trace;
         }
@@ -200,8 +218,66 @@ public class TaskPersistenceService {
             null, decision, confidenceLevel, "autonomous", null);
     }
 
+    /**
+     * 对话流思考链追踪：使用 chatId 而非 taskId，绕过 tasks FK 约束。
+     * streamMessage 异步块中每个 ThinkingPhase 独立写入一行，确保 7 阶段全部持久化。
+     *
+     * @param roundNum 对话轮次（从 1 开始），用于历史消息重建思考链
+     */
+    @Transactional
+    public AgentThinkingTrace recordChatThinkingTrace(String chatId, String agentName, String agentRole,
+                                                       String phase, String context, String observation,
+                                                       String thought, String decision, String confidenceLevel,
+                                                       Integer roundNum) {
+        AgentThinkingTrace trace = new AgentThinkingTrace();
+        trace.setChatId(chatId);
+        trace.setTaskId(null);
+        trace.setAgentName(agentName);
+        trace.setAgentRole(agentRole);
+        trace.setPhase(phase);
+        trace.setContext(context);
+        trace.setObservation(observation);
+        trace.setThought(thought);
+        trace.setDecision(decision);
+        trace.setConfidenceLevel(confidenceLevel);
+        trace.setRoundNum(roundNum);
+        trace.setTrigger("autonomous");
+        trace.setInResponseTo(null);
+        if (chatId == null || chatId.isBlank()) {
+            log.warn("跳过对话思考链持久化：chatId 为空（agentName={}, phase={}）", agentName, phase);
+            return trace;
+        }
+        thinkingTraceMapper.insert(trace);
+        return trace;
+    }
+
+    /**
+     * 按会话和轮次查询思考链记录（用于历史消息重建）
+     */
+    public List<AgentThinkingTrace> findTracesByChatIdAndRound(String chatId, Integer roundNum) {
+        if (chatId == null || roundNum == null) return List.of();
+        return thinkingTraceMapper.selectList(
+            new LambdaQueryWrapper<AgentThinkingTrace>()
+                .eq(AgentThinkingTrace::getChatId, chatId)
+                .eq(AgentThinkingTrace::getRoundNum, roundNum)
+                .orderByAsc(AgentThinkingTrace::getCreatedAt)
+        );
+    }
+
+    /**
+     * 查询指定会话的全部思考链记录（按创建时间排序），用于批量重建
+     */
+    public List<AgentThinkingTrace> findTracesByChatId(String chatId) {
+        if (chatId == null || chatId.isBlank()) return List.of();
+        return thinkingTraceMapper.selectList(
+            new LambdaQueryWrapper<AgentThinkingTrace>()
+                .eq(AgentThinkingTrace::getChatId, chatId)
+                .orderByAsc(AgentThinkingTrace::getCreatedAt)
+        );
+    }
+
     // ================================================================
-    // Agent collaboration messages
+    // Agent 协作消息
     // ================================================================
 
     @Transactional
@@ -220,7 +296,7 @@ public class TaskPersistenceService {
     }
 
     // ================================================================
-    // Review records
+    // 审校记录
     // ================================================================
 
     @Transactional
@@ -231,7 +307,7 @@ public class TaskPersistenceService {
         record.setResourcePackId(resourcePackId);
         record.setTaskId(taskId);
         record.setResult(result);
-        // reviewSummary is raw text; serialize to JSON string for MySQL JSON column
+        // reviewSummary 是原始文本；序列化为 JSON 字符串以存入 MySQL JSON 列
         record.setReasonsJson(toJson(reviewSummary));
         record.setCitationCoverage(java.math.BigDecimal.valueOf(citationCoverage));
         reviewRecordMapper.insert(record);
@@ -239,7 +315,7 @@ public class TaskPersistenceService {
     }
 
     // ================================================================
-    // Resource pack persistence
+    // 资源包持久化
     // ================================================================
 
     @Transactional
@@ -255,7 +331,7 @@ public class TaskPersistenceService {
         pack.setPushReasonJson(toJson(pushReasons));
         pack.setCreatedAt(LocalDateTime.now());
         resourcePackMapper.insert(pack);
-        log.info("Resource pack saved: id={}, topic={}", packId, topic);
+        log.info("资源包已保存：id={}, topic={}", packId, topic);
         return packId;
     }
 
@@ -281,23 +357,40 @@ public class TaskPersistenceService {
         item.setReviewStatus(reviewStatus);
         item.setReviewSummary(reviewSummary);
         item.setSubtopicIndex(subTopicIndex);
-        // Store full content in metadata_json (content_ref is only a path key, max 500 chars)
+        // 将完整内容存储在 metadata_json 中
         Map<String, String> meta = new java.util.HashMap<>();
-        meta.put("content", content.length() > 10000 ? content.substring(0, 10000) : content);
+        meta.put("content", content);
+        meta.put("charCount", String.valueOf(content.length()));
         item.setMetadataJson(toJson(meta));
         item.setCreatedAt(LocalDateTime.now());
         item.setUpdatedAt(LocalDateTime.now());
         resourceItemMapper.insert(item);
-        log.info("Resource item saved: type={}, title={}, confidence={}", type, title, confidence);
+        log.info("资源项已保存：type={}, title={}, confidence={}", type, title, confidence);
         return itemId;
     }
 
     // ================================================================
-    // helpers
+    // 查询辅助方法
     // ================================================================
 
     /**
-     * Resolve profile version UUID from version number.
+     * 查询用户+课程下处于活跃状态的 plan_generate 任务（用于幂等性检查）
+     */
+    public List<Task> findActivePlanTasks(String userId, String courseId) {
+        return taskMapper.selectList(
+            new LambdaQueryWrapper<Task>()
+                .eq(Task::getUserId, userId)
+                .eq(Task::getCourseId, courseId)
+                .eq(Task::getTaskType, "plan_generate")
+                .in(Task::getStatus, "PENDING", "RUNNING"));
+    }
+
+    // ================================================================
+    // 辅助方法
+    // ================================================================
+
+    /**
+     * 根据版本号解析画像版本 UUID。
      */
     public String resolveProfileVersionId(String userId, String courseId, int profileVersion) {
         try {
@@ -308,7 +401,7 @@ public class TaskPersistenceService {
                     .eq(ProfileVersion::getVersion, profileVersion));
             return pv != null ? pv.getId() : null;
         } catch (Exception e) {
-            log.warn("Failed to resolve profile version: userId={}, courseId={}, version={}",
+            log.warn("解析画像版本失败：userId={}, courseId={}, version={}",
                 userId, courseId, profileVersion, e);
             return null;
         }
@@ -319,7 +412,7 @@ public class TaskPersistenceService {
         try {
             return objectMapper.writeValueAsString(obj);
         } catch (JsonProcessingException e) {
-            log.warn("Failed to serialize to JSON", e);
+            log.warn("序列化为 JSON 失败", e);
             return "{}";
         }
     }

@@ -12,4 +12,6 @@ public class ChatMessageDto {
     private String content;
     private String at;
     private Object thinking;
+    /** Plan offer metadata persisted alongside the AI reply message */
+    private Object planOffer;
 }

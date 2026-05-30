@@ -2,6 +2,7 @@ package com.learnthink.core.repository;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.learnthink.core.domain.entity.SubPlan;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -25,4 +26,7 @@ public interface SubPlanMapper extends BaseMapper<SubPlan> {
 
     @Update("UPDATE sub_plans SET generation_status = #{status}, updated_at = NOW() WHERE id = #{id}")
     int updateGenerationStatus(@Param("id") String id, @Param("status") String status);
+
+    @Delete("DELETE FROM sub_plans WHERE plan_id = #{planId}")
+    int deleteByPlanId(@Param("planId") String planId);
 }

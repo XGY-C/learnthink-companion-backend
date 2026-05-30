@@ -35,5 +35,7 @@ public class ResourcePack {
      */
     private String pushReasonJson;
 
+    private LocalDateTime deletedAt;
+
     private LocalDateTime createdAt;
 }

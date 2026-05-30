@@ -14,6 +14,10 @@ public class Course {
     private String name;
     private String description;
     private String emoji;
+    private String grade;
+    private String subject;
+    private Boolean enabled;
     private LocalDateTime deletedAt;
     private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 }

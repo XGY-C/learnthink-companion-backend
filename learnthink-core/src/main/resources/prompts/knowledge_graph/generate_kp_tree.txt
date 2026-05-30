@@ -1,0 +1,59 @@
+你是一个课程教学设计专家。请根据以下教材信息和 RAG 检索到的教学内容，生成该课程的完整知识点树（Knowledge Point Tree）。
+
+## 教材信息
+- 书名：{title}
+- 内容简介：{introduction}
+- 目录结构：{toc}
+
+## RAG 检索到的相关教学内容
+{ragContent}
+
+## 输出格式
+输出严格 JSON（不要包含 markdown 代码块标记 ```），知识点树结构如下：
+
+{
+  "name": "课程名称",
+  "kp_type": "course",
+  "description": "课程简述（≤80字）",
+  "children": [
+    {
+      "name": "第N章 章节标题",
+      "kp_type": "chapter",
+      "sort_order": 1,
+      "children": [
+        {
+          "name": "N.M 节标题",
+          "kp_type": "section",
+          "sort_order": 1,
+          "children": [
+            {
+              "name": "知识点名称（≤20字）",
+              "kp_type": "concept",
+              "scope": "core_curriculum",
+              "description": "该知识点的简要说明（≤80字）",
+              "learning_objectives": ["学习目标1", "学习目标2"],
+              "difficulty": 3,
+              "estimated_minutes": 45,
+              "keywords": ["关键词1", "关键词2"],
+              "prerequisite_kps": ["需要先掌握的概念名称"],
+              "related_kps": ["相关概念名称"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+
+## 要求
+1. 严格按照教材目录结构组织章→节→知识点三层树
+2. 每个叶子节点（concept）必须拆到最小可教/可测单元——一节通常拆 3-6 个知识点
+3. kp_type 取值：course / chapter / section / concept / skill
+4. scope 取值：core_curriculum（核心课纲）/ prerequisite（前置基础）/ supplementary（补充扩展），章节节点默认 core_curriculum
+5. difficulty 范围 1-5：章节节点 1-2，概念节点按实际难度标注
+6. estimated_minutes 按知识点重要程度估算建议学时（分钟）
+7. 每个 concept 必须有 description、learning_objectives（2-4条）、keywords（3-6个）
+8. prerequisite_kps 标注概念之间的前置依赖（用概念名称描述，不限于同一章）
+9. related_kps 标注概念之间的横向关联（如相似、对比、互补）
+10. 知识点总数控制在 30-80 个，覆盖全书所有章
+11. 技能类知识点（需动手练习的）使用 kp_type: "skill"

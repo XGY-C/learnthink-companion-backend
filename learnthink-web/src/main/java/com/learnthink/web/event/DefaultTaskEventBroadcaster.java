@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learnthink.core.agent.orchestration.TaskEventBroadcaster;
+import com.learnthink.core.service.TaskPersistenceService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -23,11 +24,13 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
     private static final Logger log = LoggerFactory.getLogger(DefaultTaskEventBroadcaster.class);
     private final StringRedisTemplate redis;
     private final ObjectMapper mapper = new ObjectMapper();
+    private final TaskPersistenceService persistenceService;
 
     private final ConcurrentHashMap<String, CopyOnWriteArrayList<SseEmitter>> subscribers = new ConcurrentHashMap<>();
 
-    public DefaultTaskEventBroadcaster(StringRedisTemplate redis) {
+    public DefaultTaskEventBroadcaster(StringRedisTemplate redis, TaskPersistenceService persistenceService) {
         this.redis = redis;
+        this.persistenceService = persistenceService;
     }
 
     @Override
@@ -51,9 +54,10 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
     }
 
     @Override
-    public void resourceReady(String taskId, String type, String title, String confidence, int sourceCount) {
+    public void resourceReady(String taskId, String type, String title, String content, String confidence, int sourceCount) {
         broadcast(taskId, "resource.ready", Map.of(
-            "type", type, "title", title, "confidence", confidence, "sources", sourceCount));
+            "type", type, "title", title, "content", content != null ? content : "",
+            "confidence", confidence, "sources", sourceCount));
     }
 
     @Override
@@ -83,15 +87,29 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
     public void agentThought(String taskId, String agentName, String agentRole,
                               String context, String observation, String thought,
                               String decision, String confidenceLevel) {
-        broadcast(taskId, "agent.thought", Map.of(
-            "agentName", agentName,
-            "agentRole", agentRole,
-            "context", context,
-            "observation", observation,
-            "thought", thought,
-            "decision", decision,
-            "confidenceLevel", confidenceLevel,
-            "timestamp", Instant.now().toString()));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("traceId", UUID.randomUUID().toString());
+        payload.put("agentName", agentName);
+        payload.put("agentRole", agentRole);
+        payload.put("phase", decision);
+        payload.put("context", context);
+        payload.put("observation", observation);
+        payload.put("thought", thought);
+        payload.put("decision", decision);
+        payload.put("confidenceLevel", confidenceLevel);
+        payload.put("trigger", "autonomous");
+        payload.put("timestamp", Instant.now().toString());
+        broadcast(taskId, "agent.thought", payload);
+        // 同时持久化到 MySQL，确保可追溯、可回放
+        try {
+            persistenceService.recordThinkingTrace(
+                taskId, agentName, agentRole,
+                "TASK_" + agentName.toUpperCase(),
+                context, observation, thought, decision, confidenceLevel,
+                "autonomous", null);
+        } catch (Exception e) {
+            log.warn("Failed to persist thinking trace for task {}: {}", taskId, e.getMessage());
+        }
     }
 
     @Override
@@ -108,7 +126,7 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
         emitter.onTimeout(() -> removeSubscriber(taskId, emitter));
         emitter.onError(e -> removeSubscriber(taskId, emitter));
 
-        // Replay recent events from Redis so late-connecting views catch up
+        // 从 Redis 重放最近事件，让迟到连接的视图赶上进度
         replayRecentEvents(taskId, emitter);
 
         return emitter;
@@ -120,7 +138,7 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
             List<String> rawEvents = redis.opsForList().range("task:" + taskId + ":events", 0, -1);
             if (rawEvents == null || rawEvents.isEmpty()) return;
 
-            // Reverse: Redis list is newest-first (leftPush), we want oldest-first for replay
+            // 反转：Redis 列表是新->旧（leftPush），重放时需要旧->新
             Collections.reverse(rawEvents);
 
             for (String json : rawEvents) {
@@ -135,7 +153,7 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
                             .data(payload));
                     }
                 } catch (Exception ignored) {
-                    // skip malformed events during replay
+                    // 重放时跳过格式错误的事件
                 }
             }
         } catch (Exception e) {

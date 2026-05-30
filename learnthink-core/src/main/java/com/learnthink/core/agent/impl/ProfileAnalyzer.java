@@ -3,8 +3,8 @@ package com.learnthink.core.agent.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.learnthink.core.agent.framework.AgentContext;
-import com.learnthink.core.agent.framework.AgentResult;
+import com.learnthink.core.agent.runtime.AgentContext;
+import com.learnthink.core.agent.runtime.AgentResult;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import com.learnthink.core.config.PromptLoader;
 import com.learnthink.core.domain.entity.ProfileVersion;
@@ -66,7 +66,10 @@ public class ProfileAnalyzer {
                 .content();
 
             long elapsed = java.time.Duration.between(start, Instant.now()).toMillis();
-            log.info("LLM call completed in {}ms", elapsed);
+            log.info("[AI-RESPONSE][ProfileAnalyzer] summarize ({}ms) length={} chars\n{}",
+                elapsed,
+                response != null ? response.length() : 0,
+                response != null ? response.substring(0, Math.min(2000, response.length())) : "null");
             ctx.observation().onResponse(this.getClass().getSimpleName(), response, elapsed,
                 AgentResult.TokenUsage.ZERO);
 

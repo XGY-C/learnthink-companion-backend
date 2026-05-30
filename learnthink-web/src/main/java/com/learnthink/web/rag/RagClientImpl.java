@@ -15,6 +15,12 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * RAG服务HTTP客户端实现
+ * <p>通过 RestTemplate 调用 Python RAG 服务（POST /internal/rag/retrieve），
+ * 支持混合检索模式（向量+关键词），对检索参数做了容错处理：
+ * min_relevance 上限 0.25、min_sources 至少为 1。</p>
+ */
 @Component
 public class RagClientImpl implements RagClient {
 
@@ -26,6 +32,20 @@ public class RagClientImpl implements RagClient {
         log.info("RagClientImpl initialized with RestTemplate: {}", restTemplate.getClass().getName());
     }
 
+    /**
+     * 执行RAG检索
+     * <p>向 Python RAG 服务发送检索请求，使用混合搜索模式（hybrid），
+     * 对 topic 参数做了禁用处理（与 curl 测试保持一致），
+     * 并限制 min_relevance 上限 0.25 以避免过滤掉有效结果。</p>
+     *
+     * @param courseId     课程ID
+     * @param query        检索查询语句
+     * @param topic        主题过滤（已禁用，传空串）
+     * @param k            返回结果数
+     * @param minRelevance 最小相关度阈值（会被限制在 0.25 以内）
+     * @param minSources   最小来源数（至少为 1）
+     * @return RAG 检索响应（包含来源列表和检索模式），服务不可用时返回null
+     */
     @Override
     public RagResponse retrieve(String courseId, String query, String topic,
                                 int k, double minRelevance, int minSources) {
@@ -130,17 +150,35 @@ public class RagClientImpl implements RagClient {
         }
     }
 
+    /**
+     * 从Map中安全获取字符串字段
+     * @param m   Map对象
+     * @param key 字段名
+     * @return 字段值字符串，为空时返回空串
+     */
     private static String str(Map<String, Object> m, String key) {
         Object v = m.get(key);
         return v != null ? v.toString() : "";
     }
 
+    /**
+     * 从Map中安全获取浮点数字段
+     * @param m   Map对象
+     * @param key 字段名
+     * @return 字段的double值，为空时返回0.0
+     */
     private static double dbl(Map<String, Object> m, String key) {
         Object v = m.get(key);
         if (v instanceof Number n) return n.doubleValue();
         return 0.0;
     }
 
+    /**
+     * 从Map中安全获取整数字段（可为空）
+     * @param m   Map对象
+     * @param key 字段名
+     * @return 字段的Integer值，为空时返回null
+     */
     private static Integer intOrNull(Map<String, Object> m, String key) {
         Object v = m.get(key);
         if (v instanceof Number n) return n.intValue();

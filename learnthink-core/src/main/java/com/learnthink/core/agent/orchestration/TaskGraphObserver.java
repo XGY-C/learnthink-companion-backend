@@ -33,7 +33,7 @@ public class TaskGraphObserver implements GraphObserver<ResourceGenerationState>
     public void onNodeStart(String nodeName, ResourceGenerationState s, int visitCount) {
         log.debug("Node start: {} (visit #{})", nodeName, visitCount);
 
-        // Wire the progress hook so advance() calls inside nodes broadcast to SSE
+        // 注入进度钩子，使节点内的 advance() 调用能广播到 SSE
         if (s.progressHook == null) {
             s.progressHook = (stage, percent, message, extra) -> {
                 Map<String, Object> stats = extra != null ? new java.util.LinkedHashMap<>(extra) : new java.util.LinkedHashMap<>();
@@ -42,12 +42,12 @@ public class TaskGraphObserver implements GraphObserver<ResourceGenerationState>
                 broadcaster.broadcastStage(s.taskId, stage, percent, message, stats);
             };
         }
-        // Also wire the broadcaster directly for dedicated event types (resource.ready, review.flag)
+        // 同时直接注入广播器以用于专用事件类型（resource.ready、review.flag）
         if (s.eventBroadcaster == null) {
             s.eventBroadcaster = broadcaster;
         }
 
-        // Update Redis status
+        // 更新 Redis 状态
         redis.opsForHash().putAll("task:" + s.taskId + ":status",
             java.util.Map.of(
                 "status", "RUNNING",
@@ -62,11 +62,11 @@ public class TaskGraphObserver implements GraphObserver<ResourceGenerationState>
     public void onNodeComplete(String nodeName, ResourceGenerationState s, long elapsedMs) {
         log.debug("Node complete: {} ({}ms)", nodeName, elapsedMs);
 
-        // Broadcast stage progress via SSE
+        // 通过 SSE 广播阶段进度
         broadcaster.broadcastStage(s.taskId, nodeName, s.percent, s.message,
             java.util.Map.of("elapsedMs", elapsedMs));
 
-        // Record timing
+        // 记录计时
         s.stageElapsedMs.put(nodeName, elapsedMs);
     }
 
@@ -74,7 +74,7 @@ public class TaskGraphObserver implements GraphObserver<ResourceGenerationState>
     public void onRouting(String fromNode, String toNode, ResourceGenerationState s) {
         log.info("Routing: {} → {} (retryCount={})", fromNode, toNode, s.review.reviewRetryCount());
 
-        // Log decision for replay
+        // 记录决策以供回放
         Map<String, Object> decisionPayload = java.util.Map.of(
             "from", fromNode,
             "to", toNode,

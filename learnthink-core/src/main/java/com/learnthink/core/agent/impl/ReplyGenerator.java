@@ -12,11 +12,9 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 
 /**
- * Plan-then-Generate architecture — Phase 2: ReplyGenerator.
- *
- * <p>Generates the final visible reply based on a structured plan from
- * {@link ConversationPlanner}. No tool calls — pure text generation with
- * moderate temperature for natural output.</p>
+ * Plan-then-Generate 架构 — 第二阶段：回复生成器
+ * <p>基于 {@link ConversationPlanner} 的结构化计划生成最终对外显示的回复。
+ * 无工具调用——纯文本生成，使用适中的温度参数以获得自然输出。</p>
  */
 @Component
 public class ReplyGenerator {
@@ -34,8 +32,8 @@ public class ReplyGenerator {
     }
 
     /**
-     * Stream the generated reply based on the planner's output.
-     * No tool calls — pure text generation.
+     * 基于规划器输出流式生成回复
+     * <p>无工具调用——纯文本生成。</p>
      */
     public Flux<ChatResponse> streamReply(GenInput input) {
         String prompt = promptLoader.get("agent/generator_chat")

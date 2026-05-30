@@ -17,8 +17,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Extracts a course knowledge point tree from knowledge documents using LLM.
- * This is a utility for bootstrapping the KP tree — run once per course.
+ * 使用 LLM 从知识文档中提取课程知识点树
+ * <p>这是一个用于初始化知识点树的工具——每个课程运行一次。</p>
  */
 @Service
 public class KpExtractionService {
@@ -38,12 +38,12 @@ public class KpExtractionService {
     }
 
     /**
-     * Extract the KP tree from a course's knowledge documents.
+     * 从课程知识文档中提取知识点树
      *
-     * @param courseId the course to build the KP tree for
-     * @param courseName the course name for context
-     * @param documentSummaries brief descriptions of available knowledge documents
-     * @return the root KP node
+     * @param courseId 要构建知识点树的课程 ID
+     * @param courseName 课程名称（用于上下文）
+     * @param documentSummaries 可用知识文档的简要描述
+     * @return 根知识点节点
      */
     public CourseKnowledgePoint extractTree(String courseId, String courseName,
                                              List<String> documentSummaries) {
@@ -73,11 +73,25 @@ public class KpExtractionService {
                 .call()
                 .content();
 
+            log.info("[AI-RESPONSE][KpExtractionService] extractTree length={} chars\n{}",
+                response != null ? response.length() : 0,
+                response != null ? response.substring(0, Math.min(2000, response.length())) : "null");
+
             return parseAndSaveTree(response, courseId);
         } catch (Exception e) {
             log.error("Failed to extract KP tree for course {}: {}", courseId, e.getMessage(), e);
             throw new RuntimeException("KP tree extraction failed: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 从 JSON 解析并保存知识点树。会先清空该课程已有的知识点。
+     */
+    public CourseKnowledgePoint saveTreeFromJson(String json, String courseId) {
+        kpMapper.delete(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<CourseKnowledgePoint>()
+            .eq(CourseKnowledgePoint::getCourseId, courseId));
+        log.info("Cleared existing KPs for course {}", courseId);
+        return parseAndSaveTree(json, courseId);
     }
 
     private CourseKnowledgePoint parseAndSaveTree(String json, String courseId) {
@@ -130,7 +144,7 @@ public class KpExtractionService {
         kpMapper.insert(kp);
         log.debug("Saved KP: {} (depth={}, type={})", kp.getName(), depth, kp.getKpType());
 
-        // Recursively save children
+        // 递归保存子节点
         List<Map<String, Object>> children = (List<Map<String, Object>>) node.get("children");
         if (children != null) {
             for (Map<String, Object> child : children) {

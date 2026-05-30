@@ -3,11 +3,10 @@ package com.learnthink.core.agent.graph;
 import java.util.function.Function;
 
 /**
- * An edge in the state graph.
+ * 状态图中的边。
  * <ul>
- * <li>If {@code to} is non-null: unconditional transition.</li>
- * <li>If {@code router} is non-null: conditional transition — the router function
- *     inspects the state and returns the name of the next node.</li>
+ * <li>如果 {@code to} 非空：无条件转移。</li>
+ * <li>如果 {@code router} 非空：条件转移 — router 函数检查状态并返回下一个节点的名称。</li>
  * </ul>
  */
 public record GraphEdge<S>(

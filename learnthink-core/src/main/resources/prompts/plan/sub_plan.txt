@@ -7,13 +7,18 @@
 
 ### 当前 module
 - 名称：{module_title}
-- 知识点：{module_kps}
+- 描述：{module_description}
 - depth：{module_depth}
 - scope：{module_scope}
 - 前置 module：{module_prerequisites}
 
 ### 资源匹配结果
 {match_summary}
+
+### 必须覆盖的资源类型（缺一不可）
+{required_types}
+
+**重要**：上述「必须覆盖的资源类型」中列出的每一种 type，都必须在所有 activities 的 resources 中至少出现一次。尽量将多种类型合并到同一个 learn activity 中（如一个主题同时包含 doc + mindmap + 视频），而非为每种类型创建独立 activity。
 
 ### 学生画像
 - 认知风格：{cognitive_style}
@@ -23,82 +28,76 @@
 
 ## 输出要求
 
-生成一个 activity 序列，类型固定为三种：
+生成一个 activity 序列，类型固定为两种：
 
 ### Activity 类型
 
-| type | 含义 | 默认 completion_criteria |
-|------|------|-------------------------|
-| learn | 学习新知 | `resource_open` + 停留 ≥ estimated_minutes×0.6 + 交互检测 |
-| quiz | 练习/检验 | `quiz_score >= threshold`（重复习场景推荐 0.8） |
-| explore | 拓展阅读（选学） | `resource_open = true` 打开即算完成 |
+| type | 含义 | completion_criteria |
+|------|------|--------------------|
+| learn | 学习新知（可包含多种资源：文档、视频、思维导图、代码示例等） | `all` — 全部资源完成才算完成 |
+| explore | 拓展阅读（选学） | `all` — 全部资源完成才算完成 |
+
+### 设计原则
+
+- **合并资源**：同一个知识点/主题下，尽量把 doc、mindmap、video、reading、code 等合并到一个 learn activity 中，而不是拆成多个
+- **quiz 融入 learn**：练习题作为 learn activity 的一种资源类型（`resource_type: "quiz"`），与文档、视频等并列
+- **深度决定规模**：depth=basic 的 module 每个 learn activity 包含 1-2 种资源，depth=deep 的 module 每个 learn activity 包含 3-5 种资源
+- **explore 可选**：用于兴趣拓展，不强制
 
 ### Activity 格式
+
+```json
 {
   "activity_id": "a1",
   "type": "learn",
-  "title": "标题",
-  "description": "描述",
+  "title": "变量与数据类型",
+  "description": "学习变量声明、基本数据类型和类型转换",
   "requires": [],
-  "resource": {
-    "source": "matched",
-    "resource_pack_id": null,
-    "resource_type": "doc",
-    "generation_status": null
-  },
-  "estimated_minutes": 25,
+  "resources": [
+    {
+      "source": "matched",
+      "resource_pack_id": "从 matches.matched_best[].resource_pack_id 复制的实际UUID",
+      "resource_type": "doc"
+    },
+    {
+      "source": "matched",
+      "resource_pack_id": "从 matches.matched_best[].resource_pack_id 复制的实际UUID",
+      "resource_type": "quiz"
+    },
+    {
+      "source": "generated",
+      "resource_type": "video"
+    }
+  ],
+  "estimated_minutes": 30,
   "order": 1,
   "completion_criteria": {
-    "type": "resource_open",
-    "threshold": 15,
+    "type": "all",
     "met": false
   },
   "status": "ready",
   "retry_count": 0,
   "result": null
 }
+```
 
 ### 约束规则（必须遵守）
 
-1. **Activity 粒度**：单个 activity 的 estimated_minutes 范围 10-45 分钟
-2. **depth → activity 数量**：basic=2-3 个, standard=3-5 个, deep=4-7 个
-3. **learn 后必须跟 quiz**（除非 depth=basic 且 scope!=core_curriculum）
-4. **quiz 的 requires** 必须指向对应的 learn activity_id
-5. **资源引用**：
+1. **必须覆盖 required_types**：所有 activities 的 resources 数组加起来，必须覆盖每一种 required type
+2. **Activity 粒度**：单个 activity 的 estimated_minutes 范围 10-60 分钟
+3. **depth → activity 数量**：basic=2-3 个, standard=3-5 个, deep=4-7 个（含 explore）
+4. **资源引用**：
    - 匹配到的资源（match_summary 中 matched_best/stale/partial）→ source="matched", resource_pack_id=实际ID
-   - 未匹配到的资源类型 → source="generated", resource_pack_id=null, generation_status="pending"
+   - 未匹配到的资源类型 → source="generated"（不写 resource_pack_id 和 generation_status，由系统填充）
    - explore 类型的 resource 可以 source="matched" 或 source="generated"
-6. **learn 类 activity** 的 completion_criteria.threshold = estimated_minutes × 0.6
-7. **quiz 类 activity** 的 completion_criteria.threshold = 0.7（复习/重新检验场景 0.8）
-8. **explore 类 activity** threshold = 0（打开即算完成）
-9. **explore 不强制要求**，由 Agent 根据画像兴趣方向决定
-10. **requires** 控制 activity 顺序：前置未完成则 status="locked"
-11. 非前置的独立 activity → requires=[]
-
-### 匹配资源的 resource 字段填写
-
-匹配结果中的 matched_best/stale/partial：
-```json
-"resource": {
-  "source": "matched",
-  "resource_pack_id": "实际UUID",
-  "resource_type": "doc/quiz/mindmap/etc",
-  "generation_status": null
-}
-```
-
-需要生成的：
-```json
-"resource": {
-  "source": "generated",
-  "resource_pack_id": null,
-  "resource_type": "quiz",
-  "generation_status": "pending"
-}
-```
+5. **每个 learn activity 尽量包含多种资源类型**，避免单一类型占用一个 activity
+6. **requires** 控制 activity 顺序：前置未完成则 status="locked"
+7. 非前置的独立 activity → requires=[]
+8. **explore 不强制要求**，由 Agent 根据画像兴趣方向决定
 
 ## 输出（严格 JSON）
 
+```json
 {
   "activities": [ ... ],
   "adjustments": [],
@@ -115,3 +114,4 @@
     ]
   }
 }
+```
