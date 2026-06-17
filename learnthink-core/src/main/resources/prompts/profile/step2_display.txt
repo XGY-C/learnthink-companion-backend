@@ -1,0 +1,62 @@
+## display_json 生成任务
+
+根据上方更新后的三份 Markdown 文档，生成前端展示用的 display_json。
+
+## display_json 定位
+- **用途**：前端直接渲染到 UI 上的展示数据
+- **风格**：精简标签、短名、无第一人称，用户一眼能看懂
+- **读者**：前端（ProfilePanel、雷达图、标签云等组件）
+
+## 当前 display_json（参考旧版本，保持一致性）
+{current_display_json}
+
+## display_json 结构
+```json
+{
+  "core": {
+    "summary": "一句话概括学生画像（30字内）",
+    "current_chapter": "当前学习章节",
+    "major": "专业短名",
+    "grade": "年级",
+    "goal": "核心目标的展示摘要（20字内）",
+    "strong": ["掌握较好的知识点短名（5字内）"],
+    "weak": ["薄弱知识点短名（5字内）"]
+  },
+  "style": {
+    "preference": ["认知偏好的展示标签（2-4字）"],
+    "pace": "学习节奏展示文本",
+    "avoid": "回避内容的展示标签"
+  },
+  "knowledge": {
+    "mastered": ["已掌握知识点短名（5字内）"],
+    "weak": ["薄弱知识点短名（5字内）"],
+    "error_pattern": ["常见错因短名（5字内）"]
+  },
+  "dimensions": ["major_context", "knowledge_basis", "learning_goal", "cognitive_style", "learning_pace", "interest_direction", "error_pattern"]
+}
+```
+
+## 各字段规则
+| 字段 | 来源 | 格式要求 |
+|---|---|---|
+| core.summary | 综合 core + knowledge MD | 一句话30字内，概括专业+掌握情况+目标 |
+| core.current_chapter | core MD 中的课程进度 | 如 "第3章" |
+| core.major | core.major | 短名，去掉"我是...专业" |
+| core.grade | core.grade | 如 "大三" |
+| core.goal | core.goal.* | 展示摘要20字内，如 "期末85分，掌握搜索算法" |
+| core.strong | core.strong | 知识点短名数组，每项5字内 |
+| core.weak | core.weak | 知识点短名数组，每项5字内 |
+| style.preference | learn.cognitive_style + learn.media | 短标签数组，每项2-4字 |
+| style.pace | learn.pace | 如 "60分钟/天" |
+| style.avoid | learn.avoid | 短标签，如 "纯公式推导" |
+| knowledge.mastered | knowledge_profile.md 中掌握的知识点 | 短名数组，每项5字内 |
+| knowledge.weak | knowledge_profile.md 中薄弱的知识点 | 短名数组，每项5字内 |
+| knowledge.error_pattern | knowledge_profile.md 中的常见错因 | 短名数组，每项5字内 |
+| dimensions | 固定7维 | 固定值，不变 |
+
+## 核心原则
+- **所有文本必须是前端直接展示的短标签**，禁止第一人称句子（"我是/我对/我偏好"等）
+- **从更新后的 MD 中提取**，但只取精简摘要，丢弃细节
+- **参考旧 display_json**：保持结构和表述风格一致
+- **无变化维度保持原样输出**
+- **有变化维度根据更新后 MD 修改**

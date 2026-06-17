@@ -15,6 +15,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
 @RestController
@@ -44,6 +45,11 @@ public class ChatController {
         log.info("Stream send: userId={}, chatId={}", userId, chatId);
 
         SseEmitter emitter = new SseEmitter(120000L);
+        AtomicBoolean clientDisconnected = new AtomicBoolean(false);
+
+        // 检测客户端断开连接
+        emitter.onError(ex -> clientDisconnected.set(true));
+        emitter.onTimeout(() -> clientDisconnected.set(true));
 
         // 减小 SSE 响应缓冲区，确保每个 token 立即刷新
         try {
@@ -68,6 +74,11 @@ public class ChatController {
                 () -> {
                     log.info("Stream complete for chat {}", chatId);
                     emitter.complete();
+                    // 客户端断开连接 → 流式完成后自动结束会话更新画像
+                    if (clientDisconnected.get()) {
+                        log.info("Client disconnected during streaming, auto-ending session: chatId={}", chatId);
+                        chatService.endSession(userId, chatId);
+                    }
                 }
             );
 
@@ -113,6 +124,17 @@ public class ChatController {
         log.info("Analyze profile: userId={}, chatId={}", userId, chatId);
         ProfileSummaryDto result = chatService.analyzeProfile(userId, chatId);
         return Result.success(result, "画像分析完成");
+    }
+
+    /**
+     * 通知后端会话已结束，触发画像两步流水线更新。
+     */
+    @PostMapping("/{chatId}/end")
+    public Result<Void> endSession(@PathVariable String chatId) {
+        String userId = UserContextUtil.getCurrentUserId();
+        log.info("End session: userId={}, chatId={}", userId, chatId);
+        chatService.endSession(userId, chatId);
+        return Result.success(null, "会话已结束，画像更新已触发");
     }
 
     private void sendSse(SseEmitter emitter, SseEvent event) {

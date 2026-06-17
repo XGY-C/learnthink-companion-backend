@@ -23,4 +23,10 @@ public class ChatMessagesResponse {
      * 供前端 PlanEditor 渲染，避免重新调用 /plan/preview（LLM 非确定性）。
      */
     private Map<String, Object> pendingPlan;
+
+    /**
+     * 当 pendingPlan 存在时，记录原始 planOffer 所在的消息索引。
+     * 前端据此将 _pendingPlan 挂载到正确的消息上，而非 fallback 到最后一条 assistant。
+     */
+    private Integer planOfferMessageIdx;
 }

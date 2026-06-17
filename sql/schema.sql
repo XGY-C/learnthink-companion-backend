@@ -1,7 +1,7 @@
 -- ============================================================
 -- 学思伴行（LearnThink Companion）MySQL 8.0 数据库初始化脚本
--- 版本：v2.2
--- 日期：2026-05-28
+-- 版本：v2.3
+-- 日期：2026-06-05
 -- 用法：mysql -u root -p < sql/schema.sql
 -- ============================================================
 
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(50) NOT NULL UNIQUE,
     email VARCHAR(254) NOT NULL UNIQUE,
     password_hash VARCHAR(255) NOT NULL,
-    role VARCHAR(20) DEFAULT 'student' COMMENT 'student / admin',
+    role VARCHAR(20) DEFAULT 'student' COMMENT 'student / admin / teacher',
     display_name VARCHAR(50) COMMENT '显示昵称',
     avatar_url VARCHAR(500) COMMENT '头像 OSS URL',
     bio VARCHAR(200) COMMENT '个人简介',
@@ -42,9 +42,11 @@ CREATE TABLE IF NOT EXISTS courses (
     grade VARCHAR(20) DEFAULT NULL COMMENT '适用年级',
     subject VARCHAR(50) DEFAULT NULL COMMENT '学科分类',
     enabled TINYINT(1) DEFAULT 1 COMMENT '启用/停用',
+    teacher_id CHAR(36) DEFAULT NULL COMMENT '授课教师ID，关联users.id',
     deleted_at DATETIME DEFAULT NULL COMMENT '逻辑删除时间',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
+    INDEX idx_courses_teacher (teacher_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
@@ -85,9 +87,11 @@ CREATE TABLE IF NOT EXISTS profile_versions (
     user_id CHAR(36) NOT NULL,
     course_id CHAR(36) NOT NULL,
     version INT NOT NULL,
-    dimensions_json JSON COMMENT '7维画像数据（v2：不含 assessment_summary）',
-    summary_json JSON COMMENT '供 Planner 使用的压缩摘要',
     source_chat_ids JSON COMMENT '关联对话记录 ID 列表',
+    core_profile_md TEXT COMMENT 'SSOT：核心画像 Markdown，两步流水线产出',
+    learning_profile_md TEXT COMMENT 'SSOT：学习风格画像 Markdown，两步流水线产出',
+    knowledge_profile_md TEXT COMMENT 'SSOT：知识掌握画像 Markdown，两步流水线产出',
+    display_json JSON COMMENT '前端展示 JSON，LLM Step 2 同步输出（派生视图）',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uk_pv_user_course_version (user_id, course_id, version),
     INDEX idx_pv_user (user_id),
@@ -113,6 +117,55 @@ CREATE TABLE IF NOT EXISTS profile_chats (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
     FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE RESTRICT,
     FOREIGN KEY (profile_version_id) REFERENCES profile_versions(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- 画像信号表（审计日志 + 待确认队列）
+CREATE TABLE IF NOT EXISTS profile_signals (
+    id CHAR(36) PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    course_id CHAR(36) NOT NULL,
+    chat_id CHAR(36) NULL COMMENT '来源对话，追溯用',
+    dimension VARCHAR(50) NOT NULL COMMENT '画像维度标识，如 knowledge_base / cognitive_style',
+    signal_key VARCHAR(100) NOT NULL COMMENT '知识点/属性 key，点号分层，如 core.major',
+    value TEXT NOT NULL COMMENT '具体描述，如"矩阵秩的理解薄弱"',
+    source ENUM('user_said','user_corrected','learning_result','behavior','llm_inferred') NOT NULL COMMENT '信息来源类型',
+    status ENUM('written','pending','discarded') DEFAULT 'written' COMMENT 'written=已写入MD, pending=待确认(llm_inferred), discarded=已丢弃',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_ps_promotion (user_id, course_id, dimension, signal_key, source, created_at),
+    INDEX idx_ps_chat (chat_id),
+    INDEX idx_ps_pending (user_id, source, status, created_at),
+    FOREIGN KEY (chat_id) REFERENCES profile_chats(id) ON DELETE SET NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- 跨会话行为累计表
+CREATE TABLE IF NOT EXISTS profile_behavior_accumulator (
+    id CHAR(36) PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    course_id CHAR(36) NOT NULL,
+    signal_key VARCHAR(100) NOT NULL COMMENT '行为维度 key',
+    value TEXT NOT NULL COMMENT '行为的自然语言描述',
+    occurrence_count INT DEFAULT 1 COMMENT '累计出现次数',
+    last_observed_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '最近一次观察到的时间',
+    first_observed_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '首次观察到的时间',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_pba (user_id, course_id, signal_key),
+    INDEX idx_pba_user_course (user_id, course_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- 待确认冷却期表
+CREATE TABLE IF NOT EXISTS profile_signal_cooldown (
+    id CHAR(36) PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    course_id CHAR(36) NOT NULL,
+    signal_key VARCHAR(100) NOT NULL COMMENT '被否认的 key',
+    cooldown_until DATETIME NOT NULL COMMENT '冷却截止时间',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_psc (user_id, course_id, signal_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 

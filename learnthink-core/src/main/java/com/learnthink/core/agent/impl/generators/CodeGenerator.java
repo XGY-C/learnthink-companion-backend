@@ -1,5 +1,7 @@
 package com.learnthink.core.agent.impl.generators;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learnthink.core.agent.impl.AutonomousGenerator;
 import com.learnthink.core.agent.impl.RagTool;
 import com.learnthink.core.agent.runtime.AgentContext;
@@ -21,6 +23,7 @@ import java.util.stream.Collectors;
 public class CodeGenerator extends AutonomousGenerator implements TypeGenerator {
 
     private final PromptLoader promptLoader;
+    private final ObjectMapper mapper = new ObjectMapper();
 
     public CodeGenerator(
             @Qualifier("generationChatClientBuilder") ChatClient.Builder chatClientBuilder,
@@ -46,8 +49,10 @@ public class CodeGenerator extends AutonomousGenerator implements TypeGenerator 
         GenerationResult result = runAutonomousLoop(task, ctx);
         if (result.content() == null) throw new RuntimeException("Code generation failed");
 
-        return new ResourceGenerationState.GeneratedContent(item.title(), result.content(),
-            "text/markdown", result.sources(),
+        String jsonContent = validateAndNormalize(result.content());
+
+        return new ResourceGenerationState.GeneratedContent(item.title(), jsonContent,
+            "application/json", result.sources(),
             result.confidence() >= 0.8 ? "high" : result.confidence() >= 0.5 ? "medium" : "low",
             Map.of("generator", "CodeGenerator", "autonomous", true, "confidence", result.confidence()));
     }
@@ -65,7 +70,8 @@ public class CodeGenerator extends AutonomousGenerator implements TypeGenerator 
         log.info("[AI-RESPONSE][CodeGenerator] revise length={} chars\n{}",
             content != null ? content.length() : 0,
             content != null ? content.substring(0, Math.min(2000, content.length())) : "null");
-        return new ResourceGenerationState.GeneratedContent(item.title(), content, "text/markdown", typeSources,
+        String jsonContent = validateAndNormalize(content);
+        return new ResourceGenerationState.GeneratedContent(item.title(), jsonContent, "application/json", typeSources,
             forceLowConfidence ? "low" : "high", Map.of("generator", "CodeGenerator", "revised", true));
     }
 
@@ -111,5 +117,34 @@ public class CodeGenerator extends AutonomousGenerator implements TypeGenerator 
             .collect(Collectors.joining("\n"));
         return String.format("Topic: %s\nKey points: %s\nReference sources:\n%s",
             task.title(), String.join(", ", task.keyPoints()), st);
+    }
+
+    private String validateAndNormalize(String raw) {
+        try {
+            JsonNode root = mapper.readTree(raw);
+            if (!root.has("files") || !root.has("steps")) {
+                throw new RuntimeException("Missing required fields: files or steps");
+            }
+            return mapper.writeValueAsString(root);
+        } catch (Exception e) {
+            String extracted = extractJsonFromMarkdown(raw);
+            if (extracted != null) return extracted;
+            throw new RuntimeException("Invalid code content JSON: " + e.getMessage());
+        }
+    }
+
+    private String extractJsonFromMarkdown(String raw) {
+        int start = raw.indexOf('{');
+        int end = raw.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            try {
+                String candidate = raw.substring(start, end + 1);
+                JsonNode root = mapper.readTree(candidate);
+                if (root.has("files") && root.has("steps")) {
+                    return mapper.writeValueAsString(root);
+                }
+            } catch (Exception ignored) {}
+        }
+        return null;
     }
 }

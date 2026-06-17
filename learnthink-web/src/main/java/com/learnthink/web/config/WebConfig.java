@@ -29,7 +29,7 @@ public class WebConfig implements WebMvcConfigurer {
     public void addInterceptors(InterceptorRegistry registry) {
         // 注册认证拦截器，排除公开接口
         registry.addInterceptor(authInterceptor)
-                .addPathPatterns("/chat/**", "/tasks/**", "/test/**", "/example/**", "/user/**", "/resource-packs/**", "/resources/**", "/courses/**", "/admin/**")
+                .addPathPatterns("/chat/**", "/tasks/**", "/test/**", "/example/**", "/user/**", "/resource-packs/**", "/resources/**", "/courses/**", "/admin/**", "/teacher/**")
                 .excludePathPatterns("/auth/**", "/chat/*/send/stream", "/tasks/*/events");
     }
 }

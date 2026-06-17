@@ -72,4 +72,12 @@ public interface ChatService {
      * @param chatId 目标会话ID
      */
     void deleteSession(String userId, String chatId);
+
+    /**
+     * 通知后端会话已结束，触发画像两步流水线更新（handleChatEnd）。
+     *
+     * @param userId 当前用户ID
+     * @param chatId 目标会话ID
+     */
+    void endSession(String userId, String chatId);
 }

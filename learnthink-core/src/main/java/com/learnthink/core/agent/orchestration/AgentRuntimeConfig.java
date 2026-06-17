@@ -5,14 +5,19 @@ import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.impl.*;
 import com.learnthink.core.agent.impl.generators.*;
 import com.learnthink.core.agent.manager.AgentManager;
+import com.learnthink.core.config.LearnThinkProperties;
 import com.learnthink.core.repository.BookInfoMapper;
 import com.learnthink.core.repository.KnowledgeDocumentMapper;
+import com.learnthink.core.service.PushService;
 import com.learnthink.core.service.TaskPersistenceService;
 import com.learnthink.core.service.VideoRenderPoller;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.web.client.RestTemplate;
 
 /**
  * 多智能体框架的 Spring 配置。
@@ -35,6 +40,22 @@ public class AgentRuntimeConfig {
     @Bean
     public BookInfoTool bookInfoTool(KnowledgeDocumentMapper docMapper, BookInfoMapper bookInfoMapper) {
         return new BookInfoTool(docMapper, bookInfoMapper);
+    }
+
+    @Bean
+    public ImageGenerationTool imageGenerationTool(
+            @Qualifier("sparkRestTemplate") RestTemplate sparkRestTemplate,
+            LearnThinkProperties props) {
+        var spark = props.getSpark();
+        return new ImageGenerationTool(
+            sparkRestTemplate, spark.getAppId(), spark.getApiKey(),
+            spark.getApiSecret(), spark.getDomain(), spark.getBaseUrl());
+    }
+
+    @Bean
+    public SvgGenerationTool svgGenerationTool(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder builder) {
+        return new SvgGenerationTool(builder);
     }
 
     @Bean
@@ -85,11 +106,12 @@ public class AgentRuntimeConfig {
         ResourceGenerationGraph.Publisher publisher,
         TaskPersistenceService persistenceService,
         AgentManager agentManager,
-        VideoRenderPoller videoRenderPoller) {
+        VideoRenderPoller videoRenderPoller,
+        PushService pushService) {
 
         return new ResourceGenerationGraph(
             profileAnalyzer, evidenceRetriever, curriculumPlanner,
             resourceGenerator, contentReviewer, publisher, persistenceService,
-            agentManager, videoRenderPoller);
+            agentManager, videoRenderPoller, pushService);
     }
 }

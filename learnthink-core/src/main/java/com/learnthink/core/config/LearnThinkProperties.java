@@ -35,6 +35,8 @@ public class LearnThinkProperties {
     private Map<String, ProviderConfig> providers = new HashMap<>();
     /** 各模型预设配置（chat/reasoning/generation/unified），key 为预设名称 */
     private Map<String, ModelPreset> models = new HashMap<>();
+    /** 讯飞 Spark 平台配置（图片生成等） */
+    private SparkConfig spark = new SparkConfig();
 
     public String getDialogueMode() { return dialogueMode; }
     public void setDialogueMode(String dialogueMode) { this.dialogueMode = dialogueMode; }
@@ -44,6 +46,9 @@ public class LearnThinkProperties {
 
     public Map<String, ModelPreset> getModels() { return models; }
     public void setModels(Map<String, ModelPreset> models) { this.models = models; }
+
+    public SparkConfig getSpark() { return spark; }
+    public void setSpark(SparkConfig spark) { this.spark = spark; }
 
     /** AI 提供者配置 */
     public static class ProviderConfig {
@@ -85,5 +90,25 @@ public class LearnThinkProperties {
         public void setReasoningEffort(String reasoningEffort) { this.reasoningEffort = reasoningEffort; }
         public Integer getMaxTokens() { return maxTokens; }
         public void setMaxTokens(Integer maxTokens) { this.maxTokens = maxTokens; }
+    }
+
+    /** 讯飞 Spark 平台配置 */
+    public static class SparkConfig {
+        private String appId;
+        private String apiKey;
+        private String apiSecret;
+        private String domain;
+        private String baseUrl = "https://maas-api.cn-huabei-1.xf-yun.com/v2.1/tti";
+
+        public String getAppId() { return appId; }
+        public void setAppId(String appId) { this.appId = appId; }
+        public String getApiKey() { return apiKey; }
+        public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+        public String getApiSecret() { return apiSecret; }
+        public void setApiSecret(String apiSecret) { this.apiSecret = apiSecret; }
+        public String getDomain() { return domain; }
+        public void setDomain(String domain) { this.domain = domain; }
+        public String getBaseUrl() { return baseUrl; }
+        public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
     }
 }

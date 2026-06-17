@@ -1,7 +1,5 @@
 package com.learnthink.web.controller;
 
-import com.learnthink.common.dto.profile.ProfileChatRequest;
-import com.learnthink.common.dto.profile.ProfileChatResponse;
 import com.learnthink.common.dto.profile.ProfileVersionsResponse;
 import com.learnthink.common.result.Result;
 import com.learnthink.common.util.UserContextUtil;
@@ -17,13 +15,6 @@ import java.util.Map;
 public class ProfileController {
 
     private final ProfileService profileService;
-
-    @PostMapping("/chat")
-    public Result<ProfileChatResponse> chat(@RequestBody ProfileChatRequest request) {
-        String userId = UserContextUtil.getCurrentUserId();
-        ProfileChatResponse response = profileService.processChat(userId, request);
-        return Result.success(response);
-    }
 
     @GetMapping
     public Result<Map<String, Object>> getProfile(@RequestParam("course_id") String courseId) {

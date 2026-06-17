@@ -175,4 +175,21 @@ public record PlannerOutput(
             new ReplyPlan("direct_answer", List.of(), "neutral", false)
         );
     }
+
+    /**
+     * 从文本中剥离 [CONTROL] ... ---CONTROL_END--- 块，返回干净的回复文本。
+     * @param text 原始文本（可能包含控制块）
+     * @return 仅保留回复内容的文本
+     */
+    public static String stripControlBlock(String text) {
+        if (text == null || text.isEmpty()) {
+            return text;
+        }
+        int controlStart = text.indexOf("[CONTROL]");
+        int controlEnd = text.indexOf("---CONTROL_END---");
+        if (controlStart >= 0 && controlEnd >= 0) {
+            return text.substring(0, controlStart).trim();
+        }
+        return text;
+    }
 }

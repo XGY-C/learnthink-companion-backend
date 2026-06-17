@@ -1,0 +1,22 @@
+你是一位学习画像分析师。请根据以下三份学生画像 Markdown 文档，提取一份结构化摘要供下游资源生成流水线使用。
+
+## 核心画像（core_profile.md）
+{core_profile_md}
+
+## 学习风格画像（learning_profile.md）
+{learning_profile_md}
+
+## 知识掌握画像（knowledge_profile.md）
+{knowledge_profile_md}
+
+## 输出格式
+请输出 JSON 格式的摘要，包含以下字段：
+```json
+{
+  "summary": "一段总体画像摘要（50字内）",
+  "weak_top": ["薄弱知识点1", "薄弱知识点2"],
+  "style": ["学习风格标签1", "学习风格标签2"],
+  "preference": {"pace": "学习节奏描述", "output": "偏好输出形式"},
+  "goal": "学习目标摘要"
+}
+```

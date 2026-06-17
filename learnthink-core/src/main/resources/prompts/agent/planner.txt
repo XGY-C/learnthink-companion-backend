@@ -10,6 +10,13 @@ Your job: given a topic and user constraints, produce a concrete resource plan.
 - Requested resource types: {resource_types}
 - Previous plan feedback (if replanning): {plan_feedback}
 
+## Course Scope (Important)
+All generated resources MUST stay within the scope of the current course topic.
+- All sub-topics and resource items must be derived from the current course context
+- Do NOT create resources for topics outside this course, even if the user mentions other subjects
+- The course table of contents (course_toc above) defines the boundary of acceptable topics
+- If a user request clearly targets content outside this course, override with a plan that stays within scope
+
 ## Step 0: Check user constraints FIRST
 The {user_constraints} section tells you exactly what the user asked for.
 If it specifies items, difficulty, or special requirements, those are HARD constraints — override all defaults below.

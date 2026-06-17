@@ -58,11 +58,36 @@ spring:
 #   Temperature is ignored by the API in thinking mode.
 #   reasoning-effort: "high" (default) or "max" (for complex agentic tasks).
 learnthink:
+  # 精准资源推送配置
+  push:
+    enabled: true
+    cooldown-minutes: 120           # 两次事件驱动推送的最小间隔（分钟）
+    recommendation-limit: 5         # 候选池最大数量
   # Dialogue mode: "standard" (planner→generator, two-phase) or "unified" (thinking+tools, single pass).
   # Standard is the default Plan-then-Generate architecture.
   # Unified uses a single LLM call with thinking mode enabled + tool access + direct reply generation.
   # Switch via ChatSendRequest.dialogueMode or this global default.
   dialogue-mode: standard
+  spark:
+    app-id: ${SPARK_APP_ID}
+    api-key: ${SPARK_API_KEY}
+    api-secret: ${SPARK_API_SECRET}
+    domain: ${SPARK_DOMAIN}
+    base-url: https://maas-api.cn-huabei-1.xf-yun.com/v2.1/tti
+  profile:
+    session-timeout-minutes: 30
+    step1:
+      retry-count: 2
+      retry-base-ms: 1000
+    freeze:
+      threshold: 5
+      duration-minutes: 60
+      backoff-max-hours: 8
+    behavior:
+      threshold: 2
+    cooldown:
+      days: 30
+      max-cycles: 2
   providers:
     deepseek:
       base-url: https://api.deepseek.com
@@ -132,6 +157,55 @@ mineru:
     base-url: ${MINERU_BASE_URL:https://mineru.net}
     token: ${MINERU_TOKEN}
     
+# Judge0 代码执行沙箱
+judge0:
+  base-url: http://localhost:2358
+  authn-token: ${JUDGE0_AUTHN_TOKEN:b462826f8eb6335bfe9bdd4050b2a0fd91907d64793434374fd8b83b00bbfe7d}
+  authz-token: ${JUDGE0_AUTHZ_TOKEN:53099b07a54b8fd61d8d1381dcff411635b085876eb391f41604f6453e65b7ed}
+
+# 代码执行安全限制
+code-execution:
+  max-code-length: 50000
+  rate-limit-seconds: 30
+  rate-limit-count: 15
+  blacklist-patterns:
+    - "System\\.exit"
+    - "os\\.system"
+    - "subprocess\\."
+    - "Runtime\\.exec"
+    - "ProcessBuilder"
+    - "eval\\("
+    - "exec\\("
+
+# ── Tutoring System Configuration ──────────────────────────────────
+tutoring:
+  react:
+    max-iterations: 10
+    # 每轮 ReAct 完整流式输出（Thought + Action + JSON）的阻塞读取上限，单位毫秒
+    # 5s 在大模型流式生成下几乎必定超时，调到 120s 比较稳妥
+    per-iteration-timeout-ms: 120000
+  clarification:
+    timeout-seconds: 30
+  rag:
+    dense-top-k: 20
+    sparse-top-k: 20
+    rrf-k: 60
+    rrf-top-n: 15
+    cross-encoder-top-n-core: 5
+    cross-encoder-top-n-supplement: 3
+    per-query-timeout-ms: 500
+  generator:
+    stream-timeout-seconds: 30
+    model: deepseek-v4-flash
+    temperature: 0.7
+    max-tokens: 8192
+  diagram:
+    max-concurrency: 3
+    generate-timeout-seconds: 15
+    degradation-enabled: true
+  phase2:
+    thread-pool-size: 8
+
 # Manim视频API配置
 manim:
   video:

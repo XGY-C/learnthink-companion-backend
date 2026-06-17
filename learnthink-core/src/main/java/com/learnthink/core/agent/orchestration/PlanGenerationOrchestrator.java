@@ -155,7 +155,7 @@ public class PlanGenerationOrchestrator {
                         .eq(CourseKnowledgePoint::getCourseId, courseId)
                         .orderByAsc(CourseKnowledgePoint::getSortOrder));
 
-        String profileSummary = profile != null ? profile.getSummaryJson() : "{}";
+        String profileSummary = profile != null ? profile.getDisplayJson() : "{}";
         String courseKpTreeJson = buildKpTreeJson(kpTree);
 
         if (kpTree.isEmpty()) {
@@ -326,7 +326,7 @@ public class PlanGenerationOrchestrator {
                             .orderByAsc(CourseKnowledgePoint::getSortOrder));
 
             // 获取画像摘要JSON，如果为空则使用空对象
-            String profileSummary = profile != null ? profile.getSummaryJson() : "{}";
+            String profileSummary = profile != null ? profile.getDisplayJson() : "{}";
             // TODO 构建知识点树JSON
             String courseKpTreeJson = buildKpTreeJson(kpTree);
 
@@ -728,7 +728,7 @@ public class PlanGenerationOrchestrator {
             String planOverview = buildPlanOverview(planObj);
 
             // 从画像提取认知风格和错误模式
-            String profileJson = profile != null ? profile.getSummaryJson() : "{}";
+            String profileJson = profile != null ? profile.getDisplayJson() : "{}";
             Map<String, Object> profileMap = safeParseJson(profileJson);
 
             String prompt = promptLoader.get("plan/sub_plan")
