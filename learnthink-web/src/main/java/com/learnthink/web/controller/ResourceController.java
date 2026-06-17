@@ -41,8 +41,43 @@ public class ResourceController {
             dto.put("created_at", p.getCreatedAt());
             dto.put("task_id", p.getTaskId());
             dto.put("profile_version_id", p.getGeneratedFromProfileVersionId());
+
+            // Aggregate resource data for frontend compatibility
+            List<ResourceItem> items = resourceItemMapper.selectList(
+                new LambdaQueryWrapper<ResourceItem>().eq(ResourceItem::getPackId, p.getId()));
+            dto.put("resourceCount", items.size());
+            dto.put("resourceTypes", items.stream()
+                .map(ResourceItem::getType).distinct().toList());
+            dto.put("avgQuality", items.stream()
+                .mapToInt(i -> toQualityScore(i))
+                .average().orElse(0));
+            dto.put("avgConfidence", computeAvgConfidence(items));
+            dto.put("estimatedMinutes", items.size() * 10); // rough estimate
+
             return dto;
         }).toList());
+    }
+
+    private int toQualityScore(ResourceItem item) {
+        try {
+            if (item.getMetadataJson() != null) {
+                Map<String, Object> meta = objectMapper.readValue(item.getMetadataJson(),
+                    new TypeReference<Map<String, Object>>() {});
+                Object score = meta.getOrDefault("quality_score", 75);
+                return score instanceof Number ? ((Number) score).intValue() : 75;
+            }
+        } catch (Exception ignored) {}
+        return 75;
+    }
+
+    private String computeAvgConfidence(List<ResourceItem> items) {
+        if (items.isEmpty()) return "medium";
+        long high = items.stream().filter(i -> "high".equals(i.getConfidence())).count();
+        long low = items.stream().filter(i -> "low".equals(i.getConfidence())).count();
+        double ratio = (double) high / items.size();
+        if (ratio >= 0.6) return "high";
+        if ((double) low / items.size() >= 0.5) return "low";
+        return "medium";
     }
 
     @GetMapping("/resource-packs/{packId}")
@@ -54,6 +89,11 @@ public class ResourceController {
 
         List<ResourceItem> items = resourceItemMapper.selectList(
             new LambdaQueryWrapper<ResourceItem>().eq(ResourceItem::getPackId, packId));
+
+        for (ResourceItem item : items) {
+            log.info("[ResourceLoad] getPack packId={} itemId={} type={} subtopic_index={} title={}",
+                packId, item.getId(), item.getType(), item.getSubtopicIndex(), item.getTitle());
+        }
 
         Map<String, Object> data = new HashMap<>();
         data.put("pack_id", pack.getId());
@@ -96,6 +136,7 @@ public class ResourceController {
         dto.put("status", item.getStatus());
         dto.put("confidence", item.getConfidence());
         dto.put("review_status", item.getReviewStatus());
+        dto.put("subtopic_index", item.getSubtopicIndex());
 
         try {
             if (item.getSourcesJson() != null) {

@@ -1,0 +1,22 @@
+你正在更新一个已有解答的特定部分。
+
+## 原解答全文（上下文）
+{original_full_answer}
+
+## 学生操作
+对 [{sectionTitle}] 部分：{action 描述}
+{instruction}
+
+## 该部分当前内容
+{current_section_content}
+
+## 该部分的蓝图（不变）
+{sectionBlueprint}
+
+## 该部分的可用资源（不变）
+{section_resolved_resources}
+
+## 请只输出该 section 的更新版本
+使用相同的 [SECTION:id=xxx, title=xxx, expandDefault=xxx] 标记。
+保持与其他 section 的连贯性。
+如果涉及新的图解需求，使用 [DIAGRAM:...] 标记。

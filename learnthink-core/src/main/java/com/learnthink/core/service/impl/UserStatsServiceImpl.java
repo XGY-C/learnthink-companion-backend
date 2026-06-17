@@ -42,7 +42,7 @@ public class UserStatsServiceImpl implements UserStatsService {
         int prevWeak = stats != null && stats.getPrevWeakCount() != null ? stats.getPrevWeakCount() : 0;
         var quizAvg = stats != null ? stats.getTotalQuizScoreAvg() : null;
 
-        // 2. 雷达数据：取最新画像版本的 dimensions
+        // 2. 雷达数据：取最新画像版本的 display_json
         List<LearningStatsResponse.RadarEntry> radar = new ArrayList<>();
         LambdaQueryWrapper<ProfileVersion> pvWrapper = new LambdaQueryWrapper<>();
         pvWrapper.eq(ProfileVersion::getUserId, userId)
@@ -50,20 +50,19 @@ public class UserStatsServiceImpl implements UserStatsService {
                  .orderByDesc(ProfileVersion::getVersion)
                  .last("LIMIT 1");
         ProfileVersion latestPv = profileVersionMapper.selectOne(pvWrapper);
-        if (latestPv != null && latestPv.getDimensionsJson() != null) {
+        if (latestPv != null && latestPv.getDisplayJson() != null) {
             try {
-                JsonNode dimensions = objectMapper.readTree(latestPv.getDimensionsJson());
-                for (JsonNode dim : dimensions) {
-                    JsonNode valueNode = dim.get("value");
-                    String label = dim.has("label") ? dim.get("label").asText() : dim.get("key").asText();
-                    int val = extractDimensionScore(valueNode);
-                    radar.add(LearningStatsResponse.RadarEntry.builder()
-                            .name(label)
-                            .value(val)
-                            .build());
+                JsonNode display = objectMapper.readTree(latestPv.getDisplayJson());
+                JsonNode dims = display.get("dimensions");
+                if (dims != null && dims.isArray()) {
+                    for (JsonNode dimName : dims) {
+                        radar.add(LearningStatsResponse.RadarEntry.builder()
+                                .name(dimName.asText())
+                                .value(70)
+                                .build());
+                    }
                 }
             } catch (Exception ignored) {
-                // dimensions 解析失败时返回空雷达
             }
         }
 
@@ -92,11 +91,12 @@ public class UserStatsServiceImpl implements UserStatsService {
         List<ProfileVersion> versions = profileVersionMapper.selectList(histWrapper);
         for (ProfileVersion pv : versions) {
             List<String> summaryItems = new ArrayList<>();
-            if (pv.getSummaryJson() != null) {
+            if (pv.getDisplayJson() != null) {
                 try {
-                    JsonNode summaryArr = objectMapper.readTree(pv.getSummaryJson());
-                    for (JsonNode s : summaryArr) {
-                        summaryItems.add(s.asText());
+                    JsonNode display = objectMapper.readTree(pv.getDisplayJson());
+                    JsonNode coreSummary = display.at("/core/summary");
+                    if (!coreSummary.isMissingNode()) {
+                        summaryItems.add(coreSummary.asText());
                     }
                 } catch (Exception ignored) {
                 }
@@ -124,30 +124,4 @@ public class UserStatsServiceImpl implements UserStatsService {
                 .build();
     }
 
-    /** 从画像维度 value 中提取数值分数（0-100） */
-    private int extractDimensionScore(JsonNode valueNode) {
-        if (valueNode == null) return 50;
-        if (valueNode.isNumber()) return Math.min(100, Math.max(0, valueNode.asInt()));
-        // value 可能是 JSON 对象，尝试提取 score / confidence / level 等字段
-        if (valueNode.isObject()) {
-            if (valueNode.has("score")) return Math.min(100, Math.max(0, valueNode.get("score").asInt()));
-            if (valueNode.has("level")) {
-                String level = valueNode.get("level").asText();
-                return switch (level.toLowerCase()) {
-                    case "expert", "advanced" -> 90;
-                    case "intermediate" -> 65;
-                    case "beginner" -> 35;
-                    default -> 50;
-                };
-            }
-            // 尝试计算 mastered/strong 标签占比
-            int strong = valueNode.has("strong") ? valueNode.get("strong").size() : 0;
-            int mastered = valueNode.has("mastered") ? valueNode.get("mastered").size() : 0;
-            int weak = valueNode.has("weak") ? valueNode.get("weak").size() : 0;
-            int total = strong + mastered + weak;
-            if (total > 0) return (int) Math.round(((strong + mastered) * 85.0 + weak * 35.0) / total);
-            return 50;
-        }
-        return 50;
-    }
 }

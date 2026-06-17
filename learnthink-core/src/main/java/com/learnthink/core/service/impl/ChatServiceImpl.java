@@ -39,9 +39,14 @@ import com.learnthink.core.repository.ResourcePackMapper;
 import com.learnthink.core.repository.TaskMapper;
 import com.learnthink.core.service.ChatService;
 import com.learnthink.core.service.KpAnchorService;
+import com.learnthink.common.dto.profile.ProfileMdSet;
+import com.learnthink.core.domain.entity.ProfileSignal;
 import com.learnthink.core.service.ProfileService;
 import com.learnthink.core.service.TaskPersistenceService;
+import com.learnthink.core.domain.entity.TutoringSession;
 import com.learnthink.core.service.chat.ChatSessionService;
+import com.learnthink.core.service.profile.ProfileSignalService;
+import com.learnthink.core.tutoring.repository.TutoringSessionMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -101,6 +106,8 @@ public class ChatServiceImpl implements ChatService {
     private final UnifiedGenerator unifiedGenerator;
     private final LearnThinkProperties learnThinkProperties;
     private final KpAnchorService kpAnchorService;
+    private final ProfileSignalService signalService;
+    private final TutoringSessionMapper tutoringSessionMapper;
     private final StringRedisTemplate redis;
     private final ExecutorService profileAnalysisExecutor = Executors.newFixedThreadPool(2);
 
@@ -121,12 +128,14 @@ public class ChatServiceImpl implements ChatService {
                            RagTool ragTool,
                            BookInfoTool bookInfoTool,
                            KpAnchorService kpAnchorService,
+                           ProfileSignalService signalService,
                            ConversationPlanner conversationPlanner,
                            ReplyGenerator replyGenerator,
                            UnifiedGenerator unifiedGenerator,
                            LearnThinkProperties learnThinkProperties,
-                           ChatSessionService sessionService,
-                           StringRedisTemplate redis) {
+                ChatSessionService sessionService,
+                TutoringSessionMapper tutoringSessionMapper,
+                StringRedisTemplate redis) {
         this.profileChatMapper = profileChatMapper;
         this.profileMapper = profileMapper;
         this.profileVersionMapper = profileVersionMapper;
@@ -144,11 +153,13 @@ public class ChatServiceImpl implements ChatService {
         this.ragTool = ragTool;
         this.bookInfoTool = bookInfoTool;
         this.kpAnchorService = kpAnchorService;
+        this.signalService = signalService;
         this.conversationPlanner = conversationPlanner;
         this.replyGenerator = replyGenerator;
         this.unifiedGenerator = unifiedGenerator;
         this.learnThinkProperties = learnThinkProperties;
         this.sessionService = sessionService;
+        this.tutoringSessionMapper = tutoringSessionMapper;
         this.redis = redis;
     }
 
@@ -246,8 +257,10 @@ public class ChatServiceImpl implements ChatService {
         // 从历史消息中检测是否有未被处理的 plan offer（资源/学习计划）
         boolean hasResourceOffer = false;
         boolean hasPlanOffer = false;
+        int planOfferIdx = -1;
         Map<String, Object> planOfferMeta = null;
-        for (ChatMessageDto msg : messages) {
+        for (int i = 0; i < messages.size(); i++) {
+            ChatMessageDto msg = messages.get(i);
             if (msg.getPlanOffer() instanceof Map<?, ?> po) {
                 String type = (String) po.get("type");
                 if ("resource".equals(type)) {
@@ -255,6 +268,7 @@ public class ChatServiceImpl implements ChatService {
                 } else if ("plan".equals(type)) {
                     hasPlanOffer = true;
                     planOfferMeta = (Map<String, Object>) po;
+                    planOfferIdx = i;
                 }
             }
         }
@@ -271,7 +285,7 @@ public class ChatServiceImpl implements ChatService {
         // v3.1: 从 DB 加载已有计划，直接返回 pendingPlan 供前端 PlanEditor 渲染
         // 避免重新调用 /plan/preview（LLM 非确定性），切换会话不丢编辑
         Map<String, Object> pendingPlan = null;
-        LearningPlan existingPlan = learningPlanMapper.findByUserIdAndCourseId(userId, chat.getCourseId());
+        LearningPlan existingPlan = learningPlanMapper.findByChatId(chatId);
         if (existingPlan != null) {
             String planStatus = existingPlan.getStatus();
             try {
@@ -283,16 +297,8 @@ public class ChatServiceImpl implements ChatService {
                 log.warn("Failed to parse plan JSON for planId={}: {}", existingPlan.getId(), e.getMessage());
             }
 
-            // 只要 DB 中有计划，就清除消息中的 planOffer — 前端直接用 pendingPlan 渲染
-            // 避免前端历史加载时重复调用 /plan/preview
-            if (hasPlanOffer) {
-                for (ChatMessageDto msg : messages) {
-                    if (msg.getPlanOffer() instanceof Map<?, ?> po && "plan".equals(po.get("type"))) {
-                        msg.setPlanOffer(null);
-                    }
-                }
-                hasPlanOffer = false;
-            }
+            // 不清除 planOffer — 前端需要找到原始消息来挂载 _pendingPlan
+            // 通过 planOfferMessageIdx 响应字段精确定位，避免 fallback 到错误消息
         }
 
         // 资源 offer：有 offer 且没有活跃资源任务 → 显示确认卡片
@@ -304,7 +310,8 @@ public class ChatServiceImpl implements ChatService {
         Map<String, Object> planGenerationMetaMap = planGenerationReady ? planOfferMeta : Map.of();
 
         return new ChatMessagesResponse(messages, generationReady, generationMeta,
-            planGenerationReady, planGenerationMetaMap, activeTaskDtos, pendingPlan);
+            planGenerationReady, planGenerationMetaMap, activeTaskDtos, pendingPlan,
+            planOfferIdx >= 0 ? planOfferIdx : null);
     }
 
     private List<String> parseResourceTypes(String json) {
@@ -318,39 +325,90 @@ public class ChatServiceImpl implements ChatService {
 
     @Override
     public List<ChatSessionDto> getSessions(String userId, String courseId) {
+        List<ChatSessionDto> result = new ArrayList<>();
+
+        // 1. Query profile_chats (对话)
         LambdaQueryWrapper<ProfileChat> q = new LambdaQueryWrapper<>();
         q.eq(ProfileChat::getUserId, userId)
          .eq(ProfileChat::getCourseId, courseId)
          .orderByDesc(ProfileChat::getCreatedAt);
 
-        return profileChatMapper.selectList(q).stream()
-            .map(c -> {
-                List<Map<String, String>> messages = parseRawMessages(c.getMessagesJson());
-                String title = "新会话";
-                String lastMessageAt = c.getCreatedAt() != null
-                    ? c.getCreatedAt().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) : "";
-                String lastMessagePreview = "";
+        for (ProfileChat c : profileChatMapper.selectList(q)) {
+            List<Map<String, String>> messages = parseRawMessages(c.getMessagesJson());
+            String title = "新会话";
+            String lastMessageAt = c.getCreatedAt() != null
+                ? c.getCreatedAt().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) : "";
+            String lastMessagePreview = "";
 
-                for (Map<String, String> msg : messages) {
-                    String role = msg.get("role");
-                    String content = msg.getOrDefault("content", "");
-                    if ("user".equals(role) && "新会话".equals(title)) {
-                        title = content.length() > 20 ? content.substring(0, 20) + "…" : content;
-                    }
-                    if ("assistant".equals(role)) {
-                        String cleaned = content.replaceAll("\\*\\*", "").replaceAll("\\n", " ").trim();
-                        lastMessagePreview = cleaned.length() > 30 ? cleaned.substring(0, 30) + "…" : cleaned;
-                    }
-                    String at = msg.get("at");
-                    if (at != null) lastMessageAt = at;
+            for (Map<String, String> msg : messages) {
+                String role = msg.get("role");
+                String content = msg.getOrDefault("content", "");
+                if ("user".equals(role) && "新会话".equals(title)) {
+                    title = content.length() > 20 ? content.substring(0, 20) + "…" : content;
                 }
+                if ("assistant".equals(role)) {
+                    String cleaned = content.replaceAll("\\*\\*", "").replaceAll("\\n", " ").trim();
+                    lastMessagePreview = cleaned.length() > 30 ? cleaned.substring(0, 30) + "…" : cleaned;
+                }
+                String at = msg.get("at");
+                if (at != null) lastMessageAt = at;
+            }
 
-                return new ChatSessionDto(
-                    c.getId(), c.getCourseId(), title, messages.size(),
-                    lastMessagePreview, lastMessageAt,
-                    c.getProfileVersionId() != null, c.getProfileVersionId(), c.getCreatedAt());
-            })
-            .toList();
+            ChatSessionDto dto = new ChatSessionDto();
+            dto.setChatId(c.getId());
+            dto.setCourseId(c.getCourseId());
+            dto.setType("chat");
+            dto.setTitle(title);
+            dto.setMessageCount(messages.size());
+            dto.setLastMessagePreview(lastMessagePreview);
+            dto.setLastMessageAt(lastMessageAt);
+            dto.setAnalyzed(c.getProfileVersionId() != null);
+            dto.setProfileVersionId(c.getProfileVersionId());
+            dto.setCreatedAt(c.getCreatedAt());
+            result.add(dto);
+        }
+
+        // 2. Query tutoring_sessions (智能辅导)
+        LambdaQueryWrapper<TutoringSession> tq = new LambdaQueryWrapper<>();
+        tq.eq(TutoringSession::getUserId, userId)
+          .eq(TutoringSession::getCourseId, courseId)
+          .orderByDesc(TutoringSession::getCreatedAt);
+
+        for (TutoringSession s : tutoringSessionMapper.selectList(tq)) {
+            String title = s.getQuestion() != null
+                ? (s.getQuestion().length() > 20 ? s.getQuestion().substring(0, 20) + "…" : s.getQuestion())
+                : "智能辅导";
+            String lastMessageAt = s.getCreatedAt() != null
+                ? s.getCreatedAt().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) : "";
+            String lastMessagePreview = s.getQuestion() != null
+                ? (s.getQuestion().length() > 30 ? s.getQuestion().substring(0, 30) + "…" : s.getQuestion())
+                : "";
+
+            ChatSessionDto dto = new ChatSessionDto();
+            dto.setChatId(s.getId());
+            dto.setCourseId(s.getCourseId());
+            dto.setType("tutoring");
+            dto.setTitle(title);
+            dto.setMessageCount(0);
+            dto.setLastMessagePreview(lastMessagePreview);
+            dto.setLastMessageAt(lastMessageAt);
+            dto.setAnalyzed(false);
+            dto.setProfileVersionId(null);
+            dto.setCreatedAt(s.getCreatedAt());
+            result.add(dto);
+        }
+
+        // 3. Merge and sort by createdAt desc
+        result.sort((a, b) -> {
+            LocalDateTime ta = a.getCreatedAt();
+            LocalDateTime tb = b.getCreatedAt();
+            if (ta == null && tb == null) return 0;
+            if (ta == null) return 1;
+            if (tb == null) return -1;
+            return tb.compareTo(ta);
+        });
+
+        return result;
     }
 
     @Override
@@ -362,6 +420,21 @@ public class ChatServiceImpl implements ChatService {
                 org.springframework.http.HttpStatus.NOT_FOUND, "Chat session not found");
         }
         profileChatMapper.deleteById(chatId);
+    }
+
+    @Override
+    public void endSession(String userId, String chatId) {
+        ProfileChat chat = profileChatMapper.selectById(chatId);
+        if (chat == null || !chat.getUserId().equals(userId)) {
+            log.warn("endSession: chat not found or not owned by user, chatId={}, userId={}", chatId, userId);
+            return;
+        }
+        List<Map<String, String>> messages = parseRawMessages(chat.getMessagesJson());
+        if (messages == null || messages.isEmpty()) {
+            log.info("endSession: chat has no messages, skipping, chatId={}", chatId);
+            return;
+        }
+        profileService.handleChatEnd(userId, chat.getCourseId(), chatId, messages);
     }
 
     /**
@@ -382,139 +455,25 @@ public class ChatServiceImpl implements ChatService {
             throw new org.springframework.web.server.ResponseStatusException(
                 org.springframework.http.HttpStatus.NOT_FOUND, "Chat session not found");
         }
-        var lock = ProfileServiceImpl.getProfileLock(userId, chat.getCourseId());
-        lock.lock();
-        try {
-            List<Map<String, String>> messages = parseRawMessages(chat.getMessagesJson());
 
-            // 构建对话转录文本用于分析
-            StringBuilder transcript = new StringBuilder();
-            for (var msg : messages) {
-                String role = msg.get("role");
-                if ("user".equals(role) || "assistant".equals(role) || "system".equals(role)) {
-                    transcript.append(role).append(": ").append(msg.get("content")).append("\n");
-                }
-            }
-
-            // 调用 LLM 进行画像提取
-            ChatClient client = chatClientBuilder.build();
-            String response = client.prompt()
-                .messages(
-                    new SystemMessage(promptLoader.get("chat/profile_analysis")),
-                    new UserMessage("对话记录：\n" + transcript)
-                )
-                .call()
-                .content();
-
-            log.info("[AI-RESPONSE][ChatService] analyzeProfile length={} chars\n{}",
-                response != null ? response.length() : 0,
-                response != null ? response.substring(0, Math.min(2000, response.length())) : "null");
-
-            // 解析 JSON 响应
-            String json = response;
-            if (json.contains("```json")) {
-                json = json.substring(json.indexOf("```json") + 7, json.lastIndexOf("```"));
-            } else if (json.contains("```")) {
-                json = json.substring(json.indexOf("```") + 3, json.lastIndexOf("```"));
-            }
-            json = json.trim();
-
-            Map<String, Object> analysis = objectMapper.readValue(json,
-                new TypeReference<Map<String, Object>>() {});
-
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> dimensions = (List<Map<String, Object>>) analysis.get("dimensions");
-
-            // 防回退校验：确保新提取的有效维度数不低于当前版本，防止画像质量波动
-            int newMeaningfulCount = countMeaningfulDimensions(dimensions);
-            Profile existingProfile = profileMapper.selectOne(
-                new LambdaQueryWrapper<Profile>()
-                    .eq(Profile::getUserId, userId)
-                    .eq(Profile::getCourseId, chat.getCourseId()));
-            if (existingProfile != null && existingProfile.getCurrentVersion() != null && existingProfile.getCurrentVersion() > 0) {
-                ProfileVersion currentPv = profileVersionMapper.selectOne(
-                    new LambdaQueryWrapper<ProfileVersion>()
+        // v3: 改为从 DB 读取最新画像版本，不再调用 LLM
+        ProfileVersion pv = profileVersionMapper.selectOne(
+                new LambdaQueryWrapper<ProfileVersion>()
                         .eq(ProfileVersion::getUserId, userId)
                         .eq(ProfileVersion::getCourseId, chat.getCourseId())
-                        .eq(ProfileVersion::getVersion, existingProfile.getCurrentVersion()));
-                if (currentPv != null && currentPv.getDimensionsJson() != null) {
-                    try {
-                        List<Map<String, Object>> currentDims = objectMapper.readValue(
-                            currentPv.getDimensionsJson(),
-                            new TypeReference<List<Map<String, Object>>>() {});
-                        int currentMeaningfulCount = countMeaningfulDimensions(currentDims);
-                        if (newMeaningfulCount < currentMeaningfulCount) {
-                            log.warn("跳过画像更新：新分析覆盖 {} 个有效维度，当前版本覆盖 {} 个",
-                                newMeaningfulCount, currentMeaningfulCount);
-                            return new ProfileSummaryDto(currentPv.getId(),
-                                existingProfile.getCurrentVersion(),
-                                objectMapper.readValue(currentPv.getSummaryJson(), Map.class),
-                                Map.of("dimensions", currentDims));
-                        }
-                    } catch (Exception e) {
-                        log.warn("无法解析当前画像版本，进行覆盖: {}", e.getMessage());
-                    }
-                }
-            }
+                        .orderByDesc(ProfileVersion::getVersion)
+                        .last("LIMIT 1"));
 
-            @SuppressWarnings("unchecked")
-            Map<String, Object> summary = (Map<String, Object>) analysis.get("summary");
-
-            Profile profile = existingProfile;
-
-            int newVersion;
-            if (profile == null) {
-                profile = new Profile();
-                profile.setUserId(userId);
-                profile.setCourseId(chat.getCourseId());
-                newVersion = 1;
-                profile.setCurrentVersion(newVersion);
-                profileMapper.insert(profile);
-            } else {
-                newVersion = profile.getCurrentVersion() + 1;
-                profile.setCurrentVersion(newVersion);
-                profileMapper.updateById(profile);
-            }
-
-            // 插入 ProfileVersion 并带有主键冲突重试机制
-            // @Transactional 在锁释放后提交，因此并发请求可能已插入相同版本号
-            // 使用数据库中的最新版本号重试，避免 DuplicateKeyException
-            ProfileVersion pv = insertProfileVersionWithRetry(
-                    userId, chat.getCourseId(), newVersion,
-                    dimensions, summary, chatId, 3);
-
-            chat.setProfileVersionId(pv.getId());
-            profileChatMapper.updateById(chat);
-
-            if (persistenceService != null && dimensions != null) {
-                try {
-                    int dimCount = dimensions.size();
-                    Object confMap = summary.get("confidence");
-                    persistenceService.recordThinkingTrace(
-                        chatId, "ProfileAnalyzer", "profile",
-                        "PROFILING",
-                        "从 " + (messages != null ? messages.size() : 0) + " 轮对话中提取画像",
-                        "已提取 " + dimCount + " 个维度，置信度 " + confMap,
-                        "画像版本 " + newVersion + " 已生成",
-                        dimCount >= 6 ? "high" : "medium");
-                } catch (Exception e) {
-                    log.warn("持久化画像思考轨迹失败: {}", e.getMessage());
-                }
-            }
-
-            // v4.0：触发异步知识点锚定
-            // 将画像维度映射到课程具体的知识点节点，支持后续精准推荐。
-            triggerKpAnchoring(pv.getId(), chat.getCourseId(), dimensions);
-
-            return new ProfileSummaryDto(pv.getId(), newVersion, summary,
-                Map.of("dimensions", dimensions));
-
-        } catch (Exception e) {
-            log.error("Profile analysis failed for userId={}, chatId={}: {}", userId, chatId, e.getMessage());
-            throw new RuntimeException("Profile analysis failed", e);
-        } finally {
-            lock.unlock();
+        if (pv == null) {
+            log.info("No profile version found for userId={}, chatId={}", userId, chatId);
+            return new ProfileSummaryDto(null, 0, Map.of(), Map.of("dimensions", List.of()));
         }
+
+        log.info("analyzeProfile (DB read): userId={}, chatId={}, version={}",
+                userId, chatId, pv.getVersion());
+
+        return new ProfileSummaryDto(pv.getId(), pv.getVersion(), Map.of(),
+                Map.of("dimensions", List.of()));
     }
 
     /**
@@ -1091,21 +1050,7 @@ public class ChatServiceImpl implements ChatService {
                 }
 
                 if (plannerOutput == null) {
-                    // 兜底：planner 未输出有效的 [CONTROL]，仅设置标志位让弹窗处理
-                    if (sufficiency.sufficient() && !planMode) {
-                        generationReady = true;
-                        generationMeta = Map.of("stage", "offered",
-                            "coveredCount", sufficiency.coveredCount(),
-                            "confidence", sufficiency.overallConfidence());
-                    }
-                    if (planMode && sufficiency.sufficient()) {
-                        String offer = "\n\n---\n\n🎯 你的学习画像已就绪！需要我为你生成一份个性化的学习路径规划吗？\n\n"
-                            + "我会根据你的目标和基础，规划完整的学习路线、推荐资源和节奏安排。";
-                        extraText.append(offer);
-                        planGenerationReady = true;
-                        planGenerationMeta = Map.of("stage", "offered",
-                            "coveredCount", sufficiency.coveredCount());
-                    }
+                    // 无有效 [CONTROL] 时不自动推荐生成，避免在普通对话中误弹方案卡片
                 }
             } else {
                 // Unified 模式：优先从完整回复中解析 [CONTROL]（Phase 7），
@@ -1146,28 +1091,15 @@ public class ChatServiceImpl implements ChatService {
                     }
                 }
 
-                if (!generationReady && sufficiency.sufficient() && !planMode) {
-                    generationReady = true;
-                    generationMeta = Map.of("stage", "offered",
-                        "coveredCount", sufficiency.coveredCount(),
-                        "confidence", sufficiency.overallConfidence());
-                }
-
-                if (planMode && sufficiency.sufficient()) {
-                    String offer = "\n\n---\n\n🎯 你的学习画像已就绪！需要我为你生成一份个性化的学习路径规划吗？\n\n"
-                        + "我会根据你的目标和基础，规划完整的学习路线、推荐资源和节奏安排。";
-                    extraText.append(offer);
-                    planGenerationReady = true;
-                    planGenerationMeta = Map.of("stage", "offered",
-                        "coveredCount", sufficiency.coveredCount());
-                }
+                // 不自动回退推荐生成：只有 LLM 明确输出 [CONTROL] 时才触发生成建议
             }
 
-            // 保存助手消息到数据库
+            // 保存助手消息到数据库（剥离 [CONTROL] 块）
+            String cleanReply = PlannerOutput.stripControlBlock(fullReply);
             String aiAt = LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME);
             Map<String, String> asstMsg = new LinkedHashMap<>();
             asstMsg.put("role", "assistant");
-            asstMsg.put("content", fullReply);
+            asstMsg.put("content", cleanReply);
             asstMsg.put("at", aiAt);
             // 将 planner 输出（分析 + 计划）与干净回复一同存储
             String plannerRaw = ctx.get("planner_raw");
@@ -1251,7 +1183,7 @@ public class ChatServiceImpl implements ChatService {
                 postItems.add(SseEvent.chunk(extraText.toString()));
             }
             Map<String, Object> doneData = new java.util.LinkedHashMap<>();
-            doneData.put("profileReady", effectiveCovered >= 4);
+            doneData.put("profileReady", true);
             doneData.put("profileVersionId", "");
             doneData.put("coveredCount", effectiveCovered);
             doneData.put("generationReady", generationReady);
@@ -1329,10 +1261,8 @@ public class ChatServiceImpl implements ChatService {
                     session.setMessagesJson(toJson(messages));
                     profileChatMapper.updateById(session);
 
-                    // 增量 delta 保存：每轮对话都做，无覆盖度阈值
-                    if (fCourseId != null && !fCourseId.isEmpty()) {
-                        profileService.updateProfileDelta(fUserId, fCourseId, fMessages, fChatId);
-                    }
+                    // 增量 delta 保存已移除，改为会话结束时触发两步流水线 (handleChatEnd)
+                    // 注意：会话结束触发由 ChatController /{chatId}/end 端点或定时扫描器执行
                 } catch (Exception e) {
                     log.warn("异步思考链持久化失败: {}", e.getMessage());
                 }
@@ -1393,15 +1323,12 @@ public class ChatServiceImpl implements ChatService {
                 new LambdaQueryWrapper<ProfileVersion>()
                     .eq(ProfileVersion::getUserId, userId).eq(ProfileVersion::getCourseId, courseId)
                     .eq(ProfileVersion::getVersion, profile.getCurrentVersion()));
-            if (pv == null || pv.getDimensionsJson() == null) return 0;
-            List<Map<String, Object>> dimList = objectMapper.readValue(pv.getDimensionsJson(), new TypeReference<List<Map<String, Object>>>() {});
-            if (dimList == null) return 0;
+            if (pv == null) return 0;
             int covered = 0;
-            for (var dim : dimList) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> value = (Map<String, Object>) dim.get("value");
-                if (value != null && !value.isEmpty()) covered++;
-            }
+            if (pv.getCoreProfileMd() != null && !pv.getCoreProfileMd().isBlank()) covered++;
+            if (pv.getLearningProfileMd() != null && !pv.getLearningProfileMd().isBlank()) covered++;
+            if (pv.getKnowledgeProfileMd() != null && !pv.getKnowledgeProfileMd().isBlank()) covered++;
+            if (pv.getDisplayJson() != null && !pv.getDisplayJson().isBlank()) covered++;
             return covered;
         } catch (Exception e) { return 0; }
     }
@@ -1491,43 +1418,36 @@ public class ChatServiceImpl implements ChatService {
         }
     }
 
-    /** 构建已知画像维度的摘要 */
+    /** 构建已知画像上下文字符串（MD 驱动 + 待确认项注入） */
     private String buildProfileContext(String userId, String courseId) {
         if (userId == null || courseId == null) return "暂无画像数据，请从零开始了解学生";
         try {
-            Profile profile = profileMapper.selectOne(
-                new LambdaQueryWrapper<Profile>()
-                    .eq(Profile::getUserId, userId)
-                    .eq(Profile::getCourseId, courseId));
-            if (profile == null || profile.getCurrentVersion() == null || profile.getCurrentVersion() == 0) {
+            ProfileMdSet mdSet = profileService.getCurrentMd(userId, courseId);
+            boolean hasCore = mdSet.getCoreProfileMd() != null && !mdSet.getCoreProfileMd().isBlank();
+            boolean hasLearning = mdSet.getLearningProfileMd() != null && !mdSet.getLearningProfileMd().isBlank();
+            boolean hasKnowledge = mdSet.getKnowledgeProfileMd() != null && !mdSet.getKnowledgeProfileMd().isBlank();
+
+            if (!hasCore && !hasLearning && !hasKnowledge) {
                 return "尚无画像数据。这是首次对话，请从基础信息开始了解学生。";
             }
-            ProfileVersion pv = profileVersionMapper.selectOne(
-                new LambdaQueryWrapper<ProfileVersion>()
-                    .eq(ProfileVersion::getUserId, userId)
-                    .eq(ProfileVersion::getCourseId, courseId)
-                    .eq(ProfileVersion::getVersion, profile.getCurrentVersion()));
-            if (pv == null || pv.getDimensionsJson() == null) return "画像数据暂不可用";
 
-            List<Map<String, Object>> dimList = objectMapper.readValue(pv.getDimensionsJson(),
-                new TypeReference<List<Map<String, Object>>>() {});
-            if (dimList == null || dimList.isEmpty()) return "尚无画像数据。请从基础信息开始了解。";
+            StringBuilder sb = new StringBuilder("=== 当前学生画像 ===\n\n");
+            if (hasCore) sb.append("## 核心画像\n").append(mdSet.getCoreProfileMd()).append("\n\n");
+            if (hasLearning) sb.append("## 学习风格画像\n").append(mdSet.getLearningProfileMd()).append("\n\n");
+            if (hasKnowledge) sb.append("## 知识掌握画像\n").append(mdSet.getKnowledgeProfileMd()).append("\n\n");
 
-            StringBuilder sb = new StringBuilder();
-            int covered = 0;
-            for (var dim : dimList) {
-                String key = (String) dim.get("key");
-                String label = (String) dim.getOrDefault("label", key);
-                @SuppressWarnings("unchecked")
-                Map<String, Object> value = (Map<String, Object>) dim.get("value");
-                if (value != null && !value.isEmpty()) {
-                    covered++;
-                    sb.append("- ").append(label).append(": ").append(truncate(String.valueOf(value), 100)).append("\n");
+            // 注入待确认推断项
+            List<ProfileSignal> pendingItems = signalService.loadPendingConfirmations(userId, courseId);
+            if (!pendingItems.isEmpty()) {
+                sb.append("## 待确认的学生画像信息\n");
+                sb.append("系统从对话中推断出以下信息，请在教学中自然地与学生确认（一次最多1-2项）：\n");
+                for (ProfileSignal item : pendingItems) {
+                    String dimLabel = item.getDimension() != null ? item.getDimension() : "未知维度";
+                    sb.append("- （").append(dimLabel).append("）").append(item.getValue()).append("\n");
                 }
+                sb.append("\n");
             }
-            if (covered == 0) return "尚无有效画像数据。请从基础信息开始了解。";
-            sb.insert(0, "已覆盖 " + covered + " 个维度：\n");
-            if (covered < 7) sb.append("仍缺少 " + (7 - covered) + " 个维度的信息\n");
+
             return sb.toString();
         } catch (Exception e) {
             log.warn("构建画像上下文失败: {}", e.getMessage());
@@ -1899,51 +1819,11 @@ private ProfileChat lazyCreateSession(String chatId, String userId, String cours
      * This method catches DuplicateKeyException, re-reads the latest version
      * from the profile table, and retries.
      */
+    @Deprecated
     private ProfileVersion insertProfileVersionWithRetry(
             String userId, String courseId, int initialVersion,
             List<Map<String, Object>> dimensions, Map<String, Object> summary,
             String chatId, int maxRetries) {
-        int version = initialVersion;
-        for (int attempt = 0; attempt < maxRetries; attempt++) {
-            try {
-                ProfileVersion pv = new ProfileVersion();
-                pv.setUserId(userId);
-                pv.setCourseId(courseId);
-                pv.setVersion(version);
-                try {
-                    pv.setDimensionsJson(objectMapper.writeValueAsString(dimensions));
-                    pv.setSummaryJson(objectMapper.writeValueAsString(summary));
-                    pv.setSourceChatIds(objectMapper.writeValueAsString(List.of(chatId)));
-                } catch (Exception je) {
-                    throw new RuntimeException("Failed to serialize profile version JSON", je);
-                }
-                profileVersionMapper.insert(pv);
-
-                // 确保 profile 指针与实际插入的版本一致
-                Profile profile = profileMapper.selectOne(
-                    new LambdaQueryWrapper<Profile>()
-                        .eq(Profile::getUserId, userId)
-                        .eq(Profile::getCourseId, courseId));
-                if (profile != null && profile.getCurrentVersion() < version) {
-                    profile.setCurrentVersion(version);
-                    profileMapper.updateById(profile);
-                }
-                return pv;
-            } catch (org.springframework.dao.DuplicateKeyException e) {
-                log.warn("ProfileVersion insert conflict for version={} (attempt {}/{}), retrying with fresh version",
-                        version, attempt + 1, maxRetries);
-                // 从数据库重新读取实际最新版本号并递增
-                Profile profile = profileMapper.selectOne(
-                    new LambdaQueryWrapper<Profile>()
-                        .eq(Profile::getUserId, userId)
-                        .eq(Profile::getCourseId, courseId));
-                version = (profile != null ? profile.getCurrentVersion() : version) + 1;
-                if (attempt == maxRetries - 1) {
-                    throw new RuntimeException(
-                        "Failed to insert ProfileVersion after " + maxRetries + " retries", e);
-                }
-            }
-        }
-        throw new RuntimeException("Unreachable");
+        throw new UnsupportedOperationException("Removed in v3 — use ProfileServiceImpl.persistProfileVersion instead");
     }
 }

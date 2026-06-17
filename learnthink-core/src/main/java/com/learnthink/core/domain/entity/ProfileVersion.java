@@ -22,19 +22,29 @@ public class ProfileVersion {
     private Integer version;
 
     /**
-     * 7维画像数据
-     */
-    private String dimensionsJson;
-
-    /**
-     * 供Planner使用的压缩摘要
-     */
-    private String summaryJson;
-
-    /**
      * 关联对话记录ID列表
      */
     private String sourceChatIds;
+
+    /**
+     * SSOT：核心画像 Markdown
+     */
+    private String coreProfileMd;
+
+    /**
+     * SSOT：学习风格画像 Markdown
+     */
+    private String learningProfileMd;
+
+    /**
+     * SSOT：知识掌握画像 Markdown
+     */
+    private String knowledgeProfileMd;
+
+    /**
+     * 前端展示 JSON（LLM Step 2 同步输出）
+     */
+    private String displayJson;
 
     private LocalDateTime createdAt;
 }

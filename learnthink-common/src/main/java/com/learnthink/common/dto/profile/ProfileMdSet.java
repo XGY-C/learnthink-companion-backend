@@ -4,13 +4,16 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.util.Map;
-
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
-public class ProfileChatRequest {
-    private String courseId;
-    private String message;
-    private Map<String, String> context;
+public class ProfileMdSet {
+
+    private String coreProfileMd;
+
+    private String learningProfileMd;
+
+    private String knowledgeProfileMd;
+
+    private String displayJson;
 }

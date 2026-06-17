@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learnthink.core.domain.entity.ResourceItem;
 import com.learnthink.core.repository.ResourceItemMapper;
+import com.learnthink.core.agent.orchestration.TaskEventBroadcaster;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -26,6 +27,7 @@ public class VideoRenderPoller {
 
     private final RestTemplate restTemplate;
     private final ResourceItemMapper resourceItemMapper;
+    private final TaskEventBroadcaster eventBroadcaster;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
 
@@ -34,9 +36,11 @@ public class VideoRenderPoller {
 
     public VideoRenderPoller(
             @Qualifier("manimRestTemplate") RestTemplate restTemplate,
-            ResourceItemMapper resourceItemMapper) {
+            ResourceItemMapper resourceItemMapper,
+            TaskEventBroadcaster eventBroadcaster) {
         this.restTemplate = restTemplate;
         this.resourceItemMapper = resourceItemMapper;
+        this.eventBroadcaster = eventBroadcaster;
     }
 
     /**
@@ -45,14 +49,15 @@ public class VideoRenderPoller {
      *
      * @param manimTaskId   Manim 渲染任务 ID
      * @param resourceItemId 对应的 resource_items 记录 ID
+     * @param taskId        任务 ID，用于 SSE 事件广播
      */
-    public void startPolling(String manimTaskId, String resourceItemId) {
-        log.info("启动视频渲染轮询: manimTaskId={}, resourceItemId={}", manimTaskId, resourceItemId);
+    public void startPolling(String manimTaskId, String resourceItemId, String taskId) {
+        log.info("启动视频渲染轮询: manimTaskId={}, resourceItemId={}, taskId={}", manimTaskId, resourceItemId, taskId);
         updateResourceItemStatus(resourceItemId, "rendering");
-        scheduler.execute(() -> pollLoop(manimTaskId, resourceItemId, 0));
+        scheduler.execute(() -> pollLoop(manimTaskId, resourceItemId, taskId, 0));
     }
 
-    private void pollLoop(String manimTaskId, String resourceItemId, int attempt) {
+    private void pollLoop(String manimTaskId, String resourceItemId, String taskId, int attempt) {
         if (attempt > 250) { // 最多轮询 250 次（约 42 分钟）
             log.warn("视频渲染轮询超时，转为按需查询: manimTaskId={}, resourceItemId={}",
                 manimTaskId, resourceItemId);
@@ -65,7 +70,7 @@ public class VideoRenderPoller {
 
             if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
                 log.debug("查询任务状态失败，重试中: manimTaskId={}, status={}", manimTaskId, response.getStatusCode());
-                scheduleRetry(manimTaskId, resourceItemId, attempt);
+                scheduleRetry(manimTaskId, resourceItemId, taskId, attempt);
                 return;
             }
 
@@ -86,17 +91,17 @@ public class VideoRenderPoller {
                 log.warn("视频渲染失败: manimTaskId={}, resourceItemId={}", manimTaskId, resourceItemId);
                 updateResourceItemFailed(resourceItemId);
             } else {
-                scheduleRetry(manimTaskId, resourceItemId, attempt);
+                scheduleRetry(manimTaskId, resourceItemId, taskId, attempt);
             }
         } catch (Exception e) {
             log.warn("轮询异常，重试中: manimTaskId={}, error={}", manimTaskId, e.getMessage());
-            scheduleRetry(manimTaskId, resourceItemId, attempt);
+            scheduleRetry(manimTaskId, resourceItemId, taskId, attempt);
         }
     }
 
-    private void scheduleRetry(String manimTaskId, String resourceItemId, int attempt) {
+    private void scheduleRetry(String manimTaskId, String resourceItemId, String taskId, int attempt) {
         scheduler.schedule(
-            () -> pollLoop(manimTaskId, resourceItemId, attempt + 1),
+            () -> pollLoop(manimTaskId, resourceItemId, taskId, attempt + 1),
             10, TimeUnit.SECONDS
         );
     }

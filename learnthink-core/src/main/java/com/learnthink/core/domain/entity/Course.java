@@ -17,6 +17,7 @@ public class Course {
     private String grade;
     private String subject;
     private Boolean enabled;
+    private String teacherId;
     private LocalDateTime deletedAt;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

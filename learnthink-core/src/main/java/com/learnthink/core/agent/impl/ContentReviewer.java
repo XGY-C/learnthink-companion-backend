@@ -212,7 +212,7 @@ public class ContentReviewer {
             case "doc"     -> null; // doc format varies by LLM output, skip R1
             case "quiz"    -> checkQuizFormat(content);
             case "reading" -> null; // format varies, skip R1
-            case "code"    -> null; // format varies, skip R1
+            case "code"    -> checkCodeFormat(content);
             case "mindmap" -> checkMindmapFormat(content);
             case "video"   -> null; // video format varies by render pipeline, skip R1
             default        -> null;
@@ -271,18 +271,33 @@ public class ContentReviewer {
         return null;
     }
 
-    /** Code 产出 Markdown，必须有代码块 + 实现步骤部分 */
+    /** Code 产出 JSON：校验 files/steps 字段存在且合法 */
     private ResourceGenerationState.ReviewResult checkCodeFormat(String content) {
-        if (!content.contains("```")) {
-            return formatFailure("code", "Missing code block (```)");
-        }
-        // 必须有实现步骤部分（生成器产出 ### 分步实现，或其他 ### 级别步骤描述）
-        long sectionCount = content.lines()
-            .filter(line -> line.trim().matches("^###+\\s+.*"))
-            .count();
-        if (sectionCount < 3) {
-            return formatFailure("code",
-                "Expected at least 3 sections (###), found " + sectionCount);
+        try {
+            var root = mapper.readTree(content);
+            if (!root.has("files") || root.get("files").isEmpty()) {
+                return formatFailure("code", "Missing or empty 'files' array");
+            }
+            var steps = root.get("steps");
+            if (steps == null || !steps.isArray() || steps.isEmpty()) {
+                return formatFailure("code", "Missing or empty 'steps' array");
+            }
+            for (var step : steps) {
+                var refs = step.get("references");
+                if (refs == null || !refs.isArray() || refs.isEmpty()) {
+                    return formatFailure("code", "Step missing 'references' array");
+                }
+                for (var ref : refs) {
+                    int startLine = ref.get("startLine").asInt();
+                    int endLine = ref.get("endLine").asInt();
+                    if (startLine <= 0 || endLine <= 0 || startLine > endLine) {
+                        return formatFailure("code",
+                            "Invalid line reference: startLine=" + startLine + " endLine=" + endLine);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            return formatFailure("code", "Invalid JSON or structure: " + e.getMessage());
         }
         return null;
     }

@@ -41,7 +41,7 @@ public class SmartAssistantController {
         String userId = UserContextUtil.getCurrentUserId();
         log.info("智能助手回答问题：{}", request.getQuestion());
 
-        SseEmitter emitter = new SseEmitter(120000L);
+        SseEmitter emitter = new SseEmitter(300000L);
 
         try {
             HttpServletResponse resp = ((ServletRequestAttributes) RequestContextHolder.getRequestAttributes()).getResponse();

@@ -6,6 +6,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
@@ -59,10 +60,12 @@ public class ModelConfig {
     private static final Logger log = LoggerFactory.getLogger(ModelConfig.class);
 
     private final LearnThinkProperties props;
+    private final PromptLoader promptLoader;
     private final ConcurrentMap<String, OpenAiApi> apiCache = new ConcurrentHashMap<>();
 
-    public ModelConfig(LearnThinkProperties props) {
+    public ModelConfig(LearnThinkProperties props, PromptLoader promptLoader) {
         this.props = props;
+        this.promptLoader = promptLoader;
     }
 
     /** 对话模型——聊天服务、画像对话。无思维链（延迟敏感） */
@@ -155,5 +158,31 @@ public class ModelConfig {
             .defaultOptions(options)
             .build();
         return ChatClient.builder(chatModel);
+    }
+
+    /**
+     * 智能助手 ChatClient —— 结构化板书生成（旧版白板模式）
+     * <p>使用 chat 预设（deepseek-v4-flash, temp=0.7），附加板书系统提示词，
+     * 引导 AI 输出 JSON 数组格式的板书帧。</p>
+     */
+    @Bean("smartAssistantChatClient")
+    public ChatClient smartAssistantChatClient(
+            @Qualifier("chatChatClientBuilder") ChatClient.Builder builder) {
+        return builder.clone()
+                .defaultSystem(promptLoader.get("smart-assistant/board"))
+                .build();
+    }
+
+    /**
+     * 智能助手 ChatClient —— 视频讲解场景生成（新版 Scene 协议）
+     * <p>使用 chat 预设，附加 Scene 系统提示词，
+     * 引导 AI 输出 NDJSON 格式的场景帧，驱动前端 VideoLecturePlayer。</p>
+     */
+    @Bean("smartAssistantSceneChatClient")
+    public ChatClient smartAssistantSceneChatClient(
+            @Qualifier("chatChatClientBuilder") ChatClient.Builder builder) {
+        return builder.clone()
+                .defaultSystem(promptLoader.get("smart-assistant/scene"))
+                .build();
     }
 }

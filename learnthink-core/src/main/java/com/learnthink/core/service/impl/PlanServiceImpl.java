@@ -9,6 +9,7 @@ import com.learnthink.common.dto.plan.PlanResponse;
 import com.learnthink.core.domain.entity.*;
 import com.learnthink.core.repository.*;
 import com.learnthink.core.service.PlanService;
+import com.learnthink.core.service.PushService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -36,7 +37,9 @@ public class PlanServiceImpl implements PlanService {
     private final LearningEventMapper learningEventMapper;
     private final ProfileVersionMapper profileVersionMapper;
     private final ResourceItemMapper resourceItemMapper;
+    private final ResourcePackMapper resourcePackMapper;
     private final ObjectMapper objectMapper;
+    private final PushService pushService;
 
     public PlanServiceImpl(LearningPlanMapper planMapper,
                            LearningPlanVersionMapper planVersionMapper,
@@ -45,7 +48,9 @@ public class PlanServiceImpl implements PlanService {
                            LearningEventMapper learningEventMapper,
                            ProfileVersionMapper profileVersionMapper,
                            ResourceItemMapper resourceItemMapper,
-                           ObjectMapper objectMapper) {
+                           ResourcePackMapper resourcePackMapper,
+                           ObjectMapper objectMapper,
+                           PushService pushService) {
         this.planMapper = planMapper;
         this.planVersionMapper = planVersionMapper;
         this.subPlanMapper = subPlanMapper;
@@ -53,7 +58,9 @@ public class PlanServiceImpl implements PlanService {
         this.learningEventMapper = learningEventMapper;
         this.profileVersionMapper = profileVersionMapper;
         this.resourceItemMapper = resourceItemMapper;
+        this.resourcePackMapper = resourcePackMapper;
         this.objectMapper = objectMapper;
+        this.pushService = pushService;
     }
 
     // ==================== 查询 ====================
@@ -130,6 +137,25 @@ public class PlanServiceImpl implements PlanService {
                 "score", score.score(),
                 "weak_tags", weakTags
         ));
+
+        // 3.5 薄弱点推送检查（quiz 得分低于阈值且存在弱标签）
+        if (score.score() < threshold && !weakTags.isEmpty() && pushService != null) {
+            try {
+                for (String weakTag : weakTags) {
+                    // 查找匹配该薄弱标签的资源包
+                    List<ResourcePack> matchedPacks = findPacksByTopic(
+                            userId, ctx.plan().getCourseId(), weakTag);
+                    for (ResourcePack pack : matchedPacks) {
+                        pushService.notifyWeaknessFound(userId, ctx.plan().getCourseId(),
+                                weakTag, pack.getId());
+                        log.info("Weakness push triggered: userId={}, weakTag={}, packId={}",
+                                userId, weakTag, pack.getId());
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Failed to trigger weakness push: {}", e.getMessage());
+            }
+        }
 
         // 4. 更新 activity 的 result
         Map<String, Object> result = new LinkedHashMap<>();
@@ -466,6 +492,9 @@ public class PlanServiceImpl implements PlanService {
         List<Map<String, Object>> activities = castMapList(ctx.subPlanObj().get("activities"));
         String moduleId = (String) ctx.subPlan().getModuleId();
 
+        // 记录旧状态，用于检测模块完成事件
+        String oldStatus = getModuleStatus(ctx, moduleId);
+
         long nonExploreTotal = activities.stream().filter(a -> !"explore".equals(a.get("type"))).count();
         long nonExploreCompleted = activities.stream()
                 .filter(a -> !"explore".equals(a.get("type")) && "completed".equals(a.get("status")))
@@ -483,6 +512,81 @@ public class PlanServiceImpl implements PlanService {
         } else if (inProgress > 0) {
             updatePlanModuleStatus(ctx, moduleId, "in_progress");
         }
+
+        // 模块刚刚变成 completed → 检查下一模块资源并推送
+        String newStatus = getModuleStatus(ctx, moduleId);
+        if ("completed".equals(newStatus) && !"completed".equals(oldStatus)) {
+            tryPushPathNext(ctx, moduleId);
+        }
+    }
+
+    /**
+     * 模块完成后检查下一模块是否有 ready 资源，触发路径前进推送
+     */
+    private void tryPushPathNext(Container ctx, String completedModuleId) {
+        try {
+            List<Map<String, Object>> modules = castMapList(ctx.planObj().get("modules"));
+            int currentIdx = -1;
+            for (int i = 0; i < modules.size(); i++) {
+                if (completedModuleId.equals(modules.get(i).get("module_id"))) {
+                    currentIdx = i;
+                    break;
+                }
+            }
+            if (currentIdx < 0 || currentIdx + 1 >= modules.size()) return;
+
+            Map<String, Object> nextModule = modules.get(currentIdx + 1);
+            String nextSubPlanId = (String) nextModule.get("sub_plan_id");
+            if (nextSubPlanId == null) return;
+
+            SubPlan nextSp = subPlanMapper.selectById(nextSubPlanId);
+            if (nextSp == null) return;
+
+            // 查找下一模块中第一个 ready 的资源
+            Map<String, Object> spObj = objectMapper.readValue(nextSp.getSubPlanJson(), mapType());
+            List<Map<String, Object>> activities = castMapList(spObj.get("activities"));
+            for (Map<String, Object> act : activities) {
+                // 检查 resource 字段
+                Map<String, Object> res = castMap(act.get("resource"));
+                String packId = findReadyPackId(res);
+                if (packId != null) {
+                    pushService.notifyResourceReady(
+                            ctx.plan().getUserId(), ctx.plan().getCourseId(),
+                            packId, "push_path_next", null);
+                    log.info("Path next push triggered: userId={}, nextModule={}, packId={}",
+                            ctx.plan().getUserId(), nextModule.get("title"), packId);
+                    return;
+                }
+                // 检查 resources 数组
+                List<Map<String, Object>> resList = castMapList(act.get("resources"));
+                for (Map<String, Object> r : resList) {
+                    packId = findReadyPackId(r);
+                    if (packId != null) {
+                        pushService.notifyResourceReady(
+                                ctx.plan().getUserId(), ctx.plan().getCourseId(),
+                                packId, "push_path_next", null);
+                        log.info("Path next push triggered: userId={}, nextModule={}, packId={}",
+                                ctx.plan().getUserId(), nextModule.get("title"), packId);
+                        return;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to trigger path next push: {}", e.getMessage());
+        }
+    }
+
+    /** 从 activity resource 条目中提取已就绪的资源包 ID */
+    private String findReadyPackId(Map<String, Object> res) {
+        if (res == null) return null;
+        String packId = (String) res.get("resource_pack_id");
+        String genStatus = (String) res.get("generation_status");
+        // "ready" 表示已生成可直接使用；null 的 matched 资源也算就绪
+        if (packId != null && !packId.isBlank()
+                && (genStatus == null || "ready".equals(genStatus))) {
+            return packId;
+        }
+        return null;
     }
 
     private void updatePlanModuleStatus(Container ctx, String moduleId, String status) {
@@ -611,6 +715,20 @@ public class PlanServiceImpl implements PlanService {
         Map<String, Object> result = castMap(activity.get("result"));
         if (result == null) return 0;
         return result.get("score") instanceof Number n ? n.doubleValue() : 0;
+    }
+
+    /**
+     * 按主题关键词查找用户在该课程下已有的资源包（用于薄弱点推送匹配）
+     */
+    private List<ResourcePack> findPacksByTopic(String userId, String courseId, String topic) {
+        LambdaQueryWrapper<ResourcePack> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(ResourcePack::getUserId, userId)
+                .eq(ResourcePack::getCourseId, courseId)
+                .like(ResourcePack::getTopic, topic)
+                .isNull(ResourcePack::getDeletedAt)
+                .orderByDesc(ResourcePack::getCreatedAt)
+                .last("LIMIT 3");
+        return resourcePackMapper.selectList(wrapper);
     }
 
     /**

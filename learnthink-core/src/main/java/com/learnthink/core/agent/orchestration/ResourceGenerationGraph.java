@@ -8,6 +8,7 @@ import com.learnthink.core.agent.graph.GraphRunner;
 import com.learnthink.core.agent.impl.*;
 import com.learnthink.core.agent.manager.AgentManager;
 import com.learnthink.core.agent.manager.GenerationChecklist;
+import com.learnthink.core.service.PushService;
 import com.learnthink.core.service.TaskPersistenceService;
 import com.learnthink.core.service.VideoRenderPoller;
 import org.slf4j.Logger;
@@ -53,6 +54,7 @@ public class ResourceGenerationGraph {
     private final TaskPersistenceService persistenceService;
     private final AgentManager agentManager;
     private final VideoRenderPoller videoRenderPoller;
+    private final PushService pushService;
     private final java.util.concurrent.ExecutorService generatorPool =
         java.util.concurrent.Executors.newFixedThreadPool(20);
 
@@ -65,7 +67,8 @@ public class ResourceGenerationGraph {
         Publisher publisher,
         TaskPersistenceService persistenceService,
         AgentManager agentManager,
-        VideoRenderPoller videoRenderPoller
+        VideoRenderPoller videoRenderPoller,
+        PushService pushService
     ) {
         this.profileAnalyzer = profileAnalyzer;
         this.evidenceRetriever = evidenceRetriever;
@@ -76,6 +79,7 @@ public class ResourceGenerationGraph {
         this.persistenceService = persistenceService;
         this.agentManager = agentManager;
         this.videoRenderPoller = videoRenderPoller;
+        this.pushService = pushService;
     }
 
     public GraphRunner<ResourceGenerationState> build() {
@@ -563,7 +567,7 @@ public class ResourceGenerationGraph {
                         itemId = UUID.randomUUID().toString();
                         String manimTaskId = extractManimTaskId(content.content());
                         if (manimTaskId != null && !manimTaskId.isBlank()) {
-                            videoRenderPoller.startPolling(manimTaskId, itemId);
+                            videoRenderPoller.startPolling(manimTaskId, itemId, s.taskId);
                             log.info("启动视频渲染轮询: type={}, itemId={}, manimTaskId={}",
                                 type, itemId, manimTaskId);
                         }
@@ -639,6 +643,17 @@ public class ResourceGenerationGraph {
                 log.error("Task {} allDone but zero items published — marking FAILED", s.taskId);
             } else {
                 s.status = "SUCCEEDED";
+
+                // 资源生成完成 → 触发精准推送通知
+                if (pushService != null && packId != null && s.userId != null && s.courseId != null) {
+                    try {
+                        pushService.notifyResourceReady(s.userId, s.courseId, packId,
+                                "push_resource_ready", null);
+                        log.info("Push notification triggered: packId={}, userId={}", packId, s.userId);
+                    } catch (Exception e) {
+                        log.warn("Failed to trigger push notification for packId={}: {}", packId, e.getMessage());
+                    }
+                }
             }
             s.finishedAt = Instant.now();
         }
