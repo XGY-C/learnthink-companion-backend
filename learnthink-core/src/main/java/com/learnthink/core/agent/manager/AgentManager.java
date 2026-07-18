@@ -119,7 +119,11 @@ public class AgentManager {
                     var content = job.generator().generate(planItem, typeSources, state.profileSummary, false, null, ctx);
 
                     resultsByType.computeIfAbsent(job.type(), k -> new CopyOnWriteArrayList<>()).add(content);
-                    checklist.markDone(job.item().title());
+                    if ("video".equals(job.type())) {
+                        checklist.markRendering(job.item().title());
+                    } else {
+                        checklist.markDone(job.item().title());
+                    }
                     completed.incrementAndGet();
                     emit(AgentEvent.resourceReady(taskId, job.id(), job.type(),
                         job.item().title(), content.confidence()));

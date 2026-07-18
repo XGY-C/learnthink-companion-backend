@@ -7,17 +7,22 @@ import com.learnthink.common.dto.user.NotificationResponse;
 import com.learnthink.core.domain.entity.Notification;
 import com.learnthink.core.repository.NotificationMapper;
 import com.learnthink.core.service.NotificationService;
+import com.learnthink.core.service.NotificationSSEBroadcaster;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class NotificationServiceImpl implements NotificationService {
 
     private final NotificationMapper notificationMapper;
+    private final NotificationSSEBroadcaster sseBroadcaster;
 
     @Override
     public List<NotificationResponse> getUserNotifications(String userId, boolean includeUnpushed, int page, int size) {
@@ -37,20 +42,30 @@ public class NotificationServiceImpl implements NotificationService {
 
     @Override
     public void markAsRead(String notificationId, String userId) {
+        log.info("markAsRead notificationId={} userId={}", notificationId, userId);
         LambdaUpdateWrapper<Notification> wrapper = new LambdaUpdateWrapper<>();
         wrapper.eq(Notification::getId, notificationId)
                .eq(Notification::getUserId, userId)
                .set(Notification::getIsRead, true);
-        notificationMapper.update(null, wrapper);
+        int updated = notificationMapper.update(null, wrapper);
+        log.info("markAsRead done notificationId={} rows={}", notificationId, updated);
+
+        // 通过 SSE 通知前端更新未读数量
+        sseBroadcaster.broadcastUnreadCount(userId, getUnreadCount(userId));
     }
 
     @Override
     public void markAllAsRead(String userId) {
+        log.info("markAllAsRead userId={}", userId);
         LambdaUpdateWrapper<Notification> wrapper = new LambdaUpdateWrapper<>();
         wrapper.eq(Notification::getUserId, userId)
                .eq(Notification::getIsRead, false)
                .set(Notification::getIsRead, true);
-        notificationMapper.update(null, wrapper);
+        int updated = notificationMapper.update(null, wrapper);
+        log.info("markAllAsRead done userId={} rows={}", userId, updated);
+
+        // 通过 SSE 通知前端更新未读数量
+        sseBroadcaster.broadcastUnreadCount(userId, 0);
     }
 
     @Override
@@ -58,7 +73,22 @@ public class NotificationServiceImpl implements NotificationService {
         LambdaQueryWrapper<Notification> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(Notification::getUserId, userId)
                .eq(Notification::getIsRead, false);
-        return Math.toIntExact(notificationMapper.selectCount(wrapper));
+        int count = Math.toIntExact(notificationMapper.selectCount(wrapper));
+        log.debug("getUnreadCount userId={} count={}", userId, count);
+        return count;
+    }
+
+    @Override
+    public void deleteNotification(String notificationId, String userId) {
+        log.info("deleteNotification notificationId={} userId={}", notificationId, userId);
+        LambdaQueryWrapper<Notification> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(Notification::getId, notificationId)
+               .eq(Notification::getUserId, userId);
+        int deleted = notificationMapper.delete(wrapper);
+        log.info("deleteNotification done notificationId={} rows={}", notificationId, deleted);
+
+        // 通过 SSE 通知前端更新未读数量
+        sseBroadcaster.broadcastUnreadCount(userId, getUnreadCount(userId));
     }
 
     private NotificationResponse convertToResponse(Notification notification) {
@@ -72,7 +102,7 @@ public class NotificationServiceImpl implements NotificationService {
                 .refId(notification.getRefId())
                 .refType(notification.getRefType())
                 .createdAt(notification.getCreatedAt() != null 
-                        ? notification.getCreatedAt().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) 
+                        ? notification.getCreatedAt().atZone(ZoneId.systemDefault()).toInstant().toString() 
                         : null)
                 .build();
     }

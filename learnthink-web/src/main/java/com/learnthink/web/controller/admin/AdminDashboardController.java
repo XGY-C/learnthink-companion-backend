@@ -17,7 +17,6 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -62,24 +61,6 @@ public class AdminDashboardController {
         data.put("totalChunks", totalChunks);
 
         return Result.success(data);
-    }
-
-    @GetMapping("/teachers")
-    public Result<List<Map<String, Object>>> listTeachers() {
-        List<User> teachers = userMapper.selectList(
-                new LambdaQueryWrapper<User>()
-                        .eq(User::getRole, "teacher")
-                        .eq(User::getStatus, "enabled")
-        );
-        List<Map<String, Object>> result = teachers.stream().map(t -> {
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("id", t.getId());
-            m.put("username", t.getUsername());
-            m.put("displayName", t.getDisplayName());
-            m.put("email", t.getEmail());
-            return m;
-        }).toList();
-        return Result.success(result);
     }
 
     @GetMapping("/health")

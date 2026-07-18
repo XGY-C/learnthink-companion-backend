@@ -10,6 +10,7 @@ import com.learnthink.common.exception.ErrorCode;
 import com.learnthink.common.util.TtsUtil;
 import com.learnthink.core.domain.dto.*;
 import com.learnthink.core.service.ExplanationVideoService;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -42,6 +43,7 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final RestTemplate restTemplate;
     private final TtsUtil ttsUtils;
+    private final ExecutorService audioSynthesisPool;
 
     @Value("${manim.video.api.base-url}")
     private String manimApiBaseUrl;
@@ -57,6 +59,12 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
         this.aiSceneJsonGenerator = aiSceneJsonGenerator;
         this.restTemplate = restTemplate;
         this.ttsUtils = ttsUtils;
+        this.audioSynthesisPool = Executors.newFixedThreadPool(8);
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        audioSynthesisPool.shutdown();
     }
 
     @Override
@@ -118,6 +126,8 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
             ManimVideoRenderRequest request = new ManimVideoRenderRequest();
             request.setProjectBrief(projectBrief);
             Object timedScenes = buildTimedScenes(sceneJson);
+            // 契约校验
+            validateTimedScenes(timedScenes);
             request.setTimedScenes(timedScenes);
 
             String url = manimApiBaseUrl + "/v1/video/render";
@@ -250,33 +260,42 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
             
             JsonNode animationPlan = sceneBlock.get("animationPlan");
             if (animationPlan != null && animationPlan.isArray()) {
+                // 获取当前场景的 TTS 句子列表，用于解析 trigger 时间戳
+                JsonNode ttsSentences = (ttsResult != null) ? ttsResult.get("sentences") : null;
                 ArrayNode animationCues = objectMapper.createArrayNode();
                 for (JsonNode cue : animationPlan) {
                     ObjectNode animationCue = objectMapper.createObjectNode();
-                    
+
                     String cueId = getTextValue(cue, "id");
                     if (cueId != null) {
                         animationCue.put("id", cueId);
                     }
-                    
+
                     JsonNode targetRefs = cue.get("targetRefs");
                     if (targetRefs != null) {
                         animationCue.set("targetRefs", targetRefs);
                     }
-                    
+
                     String action = getTextValue(cue, "action");
                     if (action != null) {
                         animationCue.put("action", action);
                     }
-                    
+
                     String intent = getTextValue(cue, "intent");
                     if (intent != null) {
                         animationCue.put("intent", intent);
                     }
-                    
-                    animationCue.put("timeSec", 0.0);
-                    animationCue.put("runTimeSec", 1.0);
-                    
+
+                    // 根据 trigger 和 TTS 句子时间戳计算实际触发时间
+                    String trigger = getTextValue(cue, "trigger");
+                    double timeSec = resolveTriggerToTimeSec(trigger, ttsSentences, durationSec);
+                    animationCue.put("timeSec", timeSec);
+
+                    // 根据 tempo 计算 runTimeSec
+                    String tempo = getTextValue(cue, "tempo");
+                    double runTimeSec = resolveTempoToRunTimeSec(tempo);
+                    animationCue.put("runTimeSec", runTimeSec);
+
                     animationCues.add(animationCue);
                 }
                 timedScene.set("animationCues", animationCues);
@@ -289,234 +308,38 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
     }
 
     /**
-     * 根据分镜脚本生成视频
-     * @param sceneJson 分镜脚本json字符串
-     * @param projectBrief 项目简介
-     * @return 视频url字符串
+     * 校验 timedScenes 结构是否符合 Python API 契约
      */
-    private String generateVideoBySceneJson(String sceneJson, ProjectBrief projectBrief) {
-        try {
-            // 1. 解析分镜脚本JSON
-            JsonNode sceneNode = objectMapper.readTree(sceneJson);
-            
-            // 2. 构建请求体
-            ManimVideoRenderRequest request = new ManimVideoRenderRequest();
-
-            // 视频项目信息
-            request.setProjectBrief(projectBrief);
-            log.info("projectBrief内容: {}", objectMapper.writeValueAsString(projectBrief));
-            
-            // 3. 将 sceneBlocks 转换为符合 API 要求的 timedScenes 数组
-            ArrayNode timedScenes = objectMapper.createArrayNode();
-            
-            // 获取 sceneBlocks 和 ttsResults
-            JsonNode sceneBlocksNode = sceneNode.get("sceneBlocks");
-            JsonNode ttsResultsNode = sceneNode.get("ttsResults");
-            
-            if (sceneBlocksNode == null || !sceneBlocksNode.isArray()) {
-                throw new BusinessException(ErrorCode.VIDEO_PARAM_ERROR, "sceneJson 中缺少 sceneBlocks 数组");
-            }
-            
-            log.info("sceneBlocks数量: {}", sceneBlocksNode.size());
-            log.info("ttsResults数量: {}", ttsResultsNode != null ? ttsResultsNode.size() : 0);
-            
-            // 构建 ttsResults 映射: sceneId -> ttsResult
-            Map<String, JsonNode> ttsResultMap = new HashMap<>();
-            if (ttsResultsNode != null && ttsResultsNode.isArray()) {
-                for (JsonNode ttsResult : ttsResultsNode) {
-                    String sceneId = getTextValue(ttsResult, "sceneId");
-                    if (sceneId != null) {
-                        ttsResultMap.put(sceneId, ttsResult);
-                    }
-                }
-            }
-            
-            // 遍历 sceneBlocks，构建每个 timedScene
-            for (JsonNode sceneBlock : sceneBlocksNode) {
-                ObjectNode timedScene = objectMapper.createObjectNode();
-                
-                // 获取 sceneId
-                String sceneId = getTextValue(sceneBlock, "id");
-                if (sceneId == null || sceneId.isBlank()) {
-                    throw new BusinessException(ErrorCode.VIDEO_PARAM_ERROR, "sceneBlock 中存在空的 sceneId");
-                }
-                
-                // 必填字段: sceneId
-                timedScene.put("sceneId", sceneId);
-                
-                // 获取对应的 ttsResult
-                JsonNode ttsResult = ttsResultMap.get(sceneId);
-                
-                // 计算 durationSec（从 ttsResult 的句子时间计算）
-                double durationSec = 0.0;
-                if (ttsResult != null) {
-                    JsonNode sentences = ttsResult.get("sentences");
-                    if (sentences != null && sentences.isArray() && sentences.size() > 0) {
-                        // 获取最后一个句子的 end_time
-                        JsonNode lastSentence = sentences.get(sentences.size() - 1);
-                        String endTimeStr = getTextValue(lastSentence, "end_time");
-                        if (endTimeStr != null && !endTimeStr.isEmpty()) {
-                            try {
-                                durationSec = Double.parseDouble(endTimeStr) / 1000.0; // 毫秒转秒
-                            } catch (NumberFormatException e) {
-                                log.warn("无法解析 end_time: {}", endTimeStr);
-                            }
-                        }
-                    }
-                }
-                
-                // 必填字段: durationSec
-                timedScene.put("durationSec", durationSec);
-                
-                // 可选字段: audioUrl（从 ttsResult 获取）
-                if (ttsResult != null) {
-                    String audioAddress = getTextValue(ttsResult, "audioAddress");
-                    if (audioAddress != null && !audioAddress.isEmpty()) {
-                        timedScene.put("audioUrl", audioAddress);
-                    }
-                    
-                    // 构建 sentences 数组
-                    JsonNode sentences = ttsResult.get("sentences");
-                    if (sentences != null && sentences.isArray()) {
-                        ArrayNode sentencesArray = objectMapper.createArrayNode();
-                        int index = 0;
-                        for (JsonNode sentence : sentences) {
-                            ObjectNode sentenceObj = objectMapper.createObjectNode();
-                            sentenceObj.put("index", ++index);
-                            sentenceObj.put("text", getTextValue(sentence, "text"));
-                            
-                            String beginTimeStr = getTextValue(sentence, "begin_time");
-                            String endTimeStr = getTextValue(sentence, "end_time");
-                            
-                            if (beginTimeStr != null && !beginTimeStr.isEmpty()) {
-                                try {
-                                    sentenceObj.put("startSec", Double.parseDouble(beginTimeStr) / 1000.0);
-                                } catch (NumberFormatException e) {
-                                    log.warn("无法解析 begin_time: {}", beginTimeStr);
-                                }
-                            }
-                            
-                            if (endTimeStr != null && !endTimeStr.isEmpty()) {
-                                try {
-                                    sentenceObj.put("endSec", Double.parseDouble(endTimeStr) / 1000.0);
-                                } catch (NumberFormatException e) {
-                                    log.warn("无法解析 end_time: {}", endTimeStr);
-                                }
-                            }
-                            
-                            sentencesArray.add(sentenceObj);
-                        }
-                        timedScene.set("sentences", sentencesArray);
-                        
-                        // 构建 subtitleItems（与 sentences 相同结构）
-                        timedScene.set("subtitleItems", sentencesArray.deepCopy());
-                    }
-                }
-                
-                // 构建 sceneSpec（从 sceneBlock 转换）
-                ObjectNode sceneSpec = objectMapper.createObjectNode();
-                
-                // layoutTemplate
-                String layoutTemplate = getTextValue(sceneBlock, "layoutTemplate");
-                if (layoutTemplate != null) {
-                    sceneSpec.put("layoutTemplate", layoutTemplate);
-                }
-                
-                // objects 数组
-                JsonNode objects = sceneBlock.get("objects");
-                if (objects != null && objects.isArray()) {
-                    sceneSpec.set("objects", objects);
-                }
-                
-                timedScene.set("sceneSpec", sceneSpec);
-                
-                // 构建 animationCues（从 animationPlan 转换）
-                JsonNode animationPlan = sceneBlock.get("animationPlan");
-                if (animationPlan != null && animationPlan.isArray()) {
-                    ArrayNode animationCues = objectMapper.createArrayNode();
-                    for (JsonNode cue : animationPlan) {
-                        ObjectNode animationCue = objectMapper.createObjectNode();
-                        
-                        String cueId = getTextValue(cue, "id");
-                        if (cueId != null) {
-                            animationCue.put("id", cueId);
-                        }
-                        
-                        JsonNode targetRefs = cue.get("targetRefs");
-                        if (targetRefs != null) {
-                            animationCue.set("targetRefs", targetRefs);
-                        }
-                        
-                        String action = getTextValue(cue, "action");
-                        if (action != null) {
-                            animationCue.put("action", action);
-                        }
-                        
-                        String intent = getTextValue(cue, "intent");
-                        if (intent != null) {
-                            animationCue.put("intent", intent);
-                        }
-                        
-                        // timeSec 和 runTimeSec 需要根据 trigger 计算，这里暂时设为 0
-                        animationCue.put("timeSec", 0.0);
-                        animationCue.put("runTimeSec", 1.0);
-                        
-                        animationCues.add(animationCue);
-                    }
-                    timedScene.set("animationCues", animationCues);
-                }
-                
-                timedScenes.add(timedScene);
-            }
-            
-            request.setTimedScenes(objectMapper.convertValue(timedScenes, List.class));
-            
-            log.info("timedScenes数量: {}", timedScenes.size());
-            log.info("最终请求体: {}", objectMapper.writeValueAsString(request));
-            
-            // 3. 发送HTTP请求
-            String url = manimApiBaseUrl + "/v1/video/render";
-            log.info("调用Manim视频API: {}", url);
-            
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            
-            String requestBody = objectMapper.writeValueAsString(request);
-            log.info("请求体字节长度: {} bytes (UTF-8)", requestBody.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
-            log.debug("请求体内容: {}", requestBody);
-            
-            HttpEntity<String> entity = new HttpEntity<>(requestBody, headers);
-            
-            ResponseEntity<ManimVideoRenderResponse> response = restTemplate.postForEntity(
-                url, entity, ManimVideoRenderResponse.class
-            );
-            
-            // 4. 处理响应
-            log.info("Manim API响应状态码: {}", response.getStatusCode());
-            log.info("Manim API响应头: {}", response.getHeaders());
-            
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                ManimVideoRenderResponse renderResponse = response.getBody();
-                
-                if (Boolean.TRUE.equals(renderResponse.getSuccess())) {
-                    log.info("视频生成成功, taskId: {}, videoUrl: {}", 
-                        renderResponse.getTaskId(), renderResponse.getVideoUrl());
-                    return renderResponse.getVideoUrl();
-                } else {
-                    log.error("视频生成失败: {}, attempts: {}", 
-                        renderResponse.getMessage(), renderResponse.getAttempts());
-                    throw new BusinessException(ErrorCode.VIDEO_GENERATION_FAILED, "视频生成失败: " + renderResponse.getMessage());
-                }
-            } else {
-                throw new BusinessException(ErrorCode.VIDEO_SERVICE_ERROR, "视频生成服务响应异常");
-            }
-            
-        } catch (BusinessException e) {
-            throw e;
-        } catch (Exception e) {
-            log.error("调用Manim视频API异常", e);
-            throw new BusinessException(ErrorCode.VIDEO_GENERATION_FAILED, "视频生成失败: " + e.getMessage());
+    @SuppressWarnings("unchecked")
+    private void validateTimedScenes(Object timedScenesObj) {
+        if (timedScenesObj == null) {
+            throw new BusinessException(ErrorCode.VIDEO_PARAM_ERROR, "timedScenes 不能为空");
         }
+        List<Map<String, Object>> timedScenes;
+        try {
+            timedScenes = objectMapper.convertValue(timedScenesObj, List.class);
+        } catch (Exception e) {
+            throw new BusinessException(ErrorCode.VIDEO_PARAM_ERROR, "timedScenes 格式非法: " + e.getMessage());
+        }
+        if (timedScenes.isEmpty()) {
+            throw new BusinessException(ErrorCode.VIDEO_PARAM_ERROR, "timedScenes 不能为空列表");
+        }
+        for (int i = 0; i < timedScenes.size(); i++) {
+            Map<String, Object> scene = timedScenes.get(i);
+            Object sceneId = scene.get("sceneId");
+            if (sceneId == null || sceneId.toString().isBlank()) {
+                throw new BusinessException(ErrorCode.VIDEO_PARAM_ERROR, "第 " + (i + 1) + " 个 scene 的 sceneId 为空");
+            }
+            Object durationSec = scene.get("durationSec");
+            if (durationSec == null || Double.parseDouble(durationSec.toString()) <= 0) {
+                throw new BusinessException(ErrorCode.VIDEO_PARAM_ERROR, "第 " + (i + 1) + " 个 scene 的 durationSec 无效");
+            }
+            Object sceneSpec = scene.get("sceneSpec");
+            if (sceneSpec == null || !(sceneSpec instanceof Map) || ((Map<?, ?>) sceneSpec).get("layoutTemplate") == null) {
+                throw new BusinessException(ErrorCode.VIDEO_PARAM_ERROR, "第 " + (i + 1) + " 个 scene 的 sceneSpec.layoutTemplate 为空");
+            }
+        }
+        log.info("timedScenes 契约校验通过，共 {} 个场景", timedScenes.size());
     }
 
 
@@ -538,8 +361,6 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
             threadCount = 4;
         }
 
-        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
-
         try {
             JsonNode sceneRoot = objectMapper.readTree(sceneJson);
             JsonNode sceneBlocksNode = sceneRoot.get("sceneBlocks");
@@ -555,7 +376,7 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
                     throw new BusinessException(ErrorCode.VIDEO_PARAM_ERROR, "sceneBlocks 中存在空的 sceneId");
                 }
 
-                futures.add(executor.submit(() -> {
+                futures.add(this.audioSynthesisPool.submit(() -> {
                     try {
                         log.info("========== 开始处理场景音频 ==========");
                         log.info("sceneId: {}", sceneId);
@@ -674,9 +495,6 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
             log.error("堆栈跟踪:", e);
             log.error("==========================================");
             throw new BusinessException(ErrorCode.TTS_SUBMIT_FAILED, "并行合成音频失败: " + e.getMessage());
-        } finally {
-            executor.shutdown();
-            log.info("线程池已关闭");
         }
     }
 
@@ -739,6 +557,93 @@ public class ExplanationVideoServiceImpl implements ExplanationVideoService {
     private static String getTextValue(JsonNode node, String fieldName) {
         JsonNode valueNode = node.get(fieldName);
         return valueNode == null ? null : valueNode.asText();
+    }
+
+    /**
+     * 根据 trigger 字符串和 TTS 句子时间戳，解析出实际的触发时间（秒）。
+     * trigger 格式：
+     *   scene.start -> 0.0
+     *   sentence_N.start -> 第 N 句的 begin_time / 1000.0
+     *   sentence_N.mid -> 第 N 句的中点 (begin_time + end_time) / 2 / 1000.0
+     *   sentence_N.end -> 第 N 句的 end_time / 1000.0
+     *   scene.end -> durationSec
+     */
+    private static double resolveTriggerToTimeSec(String trigger, JsonNode ttsSentences, double durationSec) {
+        if (trigger == null || trigger.isBlank()) {
+            return 0.0;
+        }
+        String t = trigger.trim();
+
+        if ("scene.start".equals(t)) {
+            return 0.0;
+        }
+        if ("scene.end".equals(t)) {
+            return durationSec;
+        }
+
+        // 解析 sentence_N.start / sentence_N.mid / sentence_N.end
+        if (t.startsWith("sentence_")) {
+            String[] parts = t.split("\\.");
+            if (parts.length != 2) {
+                return 0.0;
+            }
+            try {
+                int sentenceNum = Integer.parseInt(parts[0].substring("sentence_".length()));
+                String phase = parts[1]; // start, mid, end
+
+                if (ttsSentences == null || !ttsSentences.isArray() || sentenceNum < 1 || sentenceNum > ttsSentences.size()) {
+                    return 0.0;
+                }
+
+                JsonNode sentence = ttsSentences.get(sentenceNum - 1);
+                String beginTimeStr = getTextValue(sentence, "begin_time");
+                String endTimeStr = getTextValue(sentence, "end_time");
+
+                double beginSec = parseTimeMs(beginTimeStr);
+                double endSec = parseTimeMs(endTimeStr);
+
+                return switch (phase) {
+                    case "start" -> beginSec;
+                    case "mid" -> (beginSec + endSec) / 2.0;
+                    case "end" -> endSec;
+                    default -> 0.0;
+                };
+            } catch (NumberFormatException e) {
+                return 0.0;
+            }
+        }
+
+        return 0.0;
+    }
+
+    /**
+     * 将毫秒时间字符串解析为秒
+     */
+    private static double parseTimeMs(String timeMsStr) {
+        if (timeMsStr == null || timeMsStr.isEmpty()) {
+            return 0.0;
+        }
+        try {
+            return Double.parseDouble(timeMsStr) / 1000.0;
+        } catch (NumberFormatException e) {
+            return 0.0;
+        }
+    }
+
+    /**
+     * 根据 tempo 字符串解析动画持续时间（秒）。
+     * fast -> 0.5, medium -> 1.0, slow -> 1.5
+     */
+    private static double resolveTempoToRunTimeSec(String tempo) {
+        if (tempo == null || tempo.isBlank()) {
+            return 1.0;
+        }
+        return switch (tempo.trim()) {
+            case "fast" -> 0.5;
+            case "medium" -> 1.0;
+            case "slow" -> 1.5;
+            default -> 1.0;
+        };
     }
 
     private static String safeString(Object value) {

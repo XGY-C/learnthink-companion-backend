@@ -4,6 +4,7 @@ import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.runtime.AgentResult;
 import com.learnthink.core.agent.impl.generators.*;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.agent.orchestration.SseAgentObservation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -22,7 +23,8 @@ import java.util.Map;
  *     ├── ReadingGenerator    （扩展阅读列表）
  *     ├── CodeGenerator       （代码示例与演练）
  *     ├── MindmapGenerator    （JSON 格式概念图）
- *     └── VideoGenerator      （讲解视频，通过 TTS + Manim 渲染）
+ *     ├── VideoGenerator      （讲解视频，通过 TTS + Manim 渲染）
+ *     └── HtmlDocumentGenerator（交互文档，自包含 HTML）
  * </pre>
  */
 @Component
@@ -38,7 +40,8 @@ public class ResourceGenerator {
         ReadingGenerator readGen,
         CodeGenerator codeGen,
         MindmapGenerator mapGen,
-        VideoGenerator videoGen
+        VideoGenerator videoGen,
+        HtmlDocumentGenerator htmlGen
     ) {
         this.generators = Map.of(
             "doc", docGen,
@@ -46,7 +49,8 @@ public class ResourceGenerator {
             "reading",  readGen,
             "code",     codeGen,
             "mindmap",  mapGen,
-            "video", videoGen
+            "video", videoGen,
+            "html", htmlGen
         );
     }
 
@@ -67,6 +71,7 @@ public class ResourceGenerator {
                 planItem.type(), planItem.title(), reviewFeedback != null ? "with feedback" : "initial");
         Instant start = Instant.now();
         String type = planItem.type();
+        setTaskDescIfPossible(ctx, "分发到子生成器: " + type);
 
         TypeGenerator gen = generators.get(type);
         if (gen == null) {
@@ -128,5 +133,11 @@ public class ResourceGenerator {
     boolean requiresSourceCoverage(String type) {
         TypeGenerator gen = generators.get(type);
         return gen != null && gen.requiresSourceCoverage();
+    }
+
+    private void setTaskDescIfPossible(AgentContext ctx, String desc) {
+        if (ctx.observation() instanceof SseAgentObservation sseObs) {
+            sseObs.setCurrentTaskDesc(desc);
+        }
     }
 }

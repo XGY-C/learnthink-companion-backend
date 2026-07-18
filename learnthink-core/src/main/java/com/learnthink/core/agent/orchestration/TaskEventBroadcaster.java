@@ -31,7 +31,7 @@ public interface TaskEventBroadcaster {
     /** 智能体思考链事件 — 4 层可见性模型（L1 身份 → L4 反思） */
     void agentThought(String taskId, String agentName, String agentRole,
                       String context, String observation, String thought,
-                      String decision, String confidenceLevel);
+                      String decision, String pipelineStage, String confidenceLevel);
 
     /** 任务因错误失败 */
     void taskFailed(String taskId, String errorCode, String message, boolean retryable);

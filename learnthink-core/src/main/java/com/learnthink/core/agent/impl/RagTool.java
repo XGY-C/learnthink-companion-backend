@@ -48,12 +48,11 @@ public class RagTool implements AgentTool {
             {
               "type": "object",
               "properties": {
-                "course_id": {"type": "string", "description": "Course UUID"},
                 "query": {"type": "string", "description": "Search query in natural language"},
                 "k": {"type": "integer", "default": 8, "description": "Number of results (1-50)"},
                 "topic": {"type": "string", "description": "Optional topic filter"}
               },
-              "required": ["course_id", "query"]
+              "required": ["query"]
             }""";
     }
 
@@ -65,7 +64,7 @@ public class RagTool implements AgentTool {
             Map<String, Object> args = mapper.readValue(jsonArgs, Map.class);
             String courseId = (String) args.get("course_id");
             String query = (String) args.get("query");
-            int k = args.containsKey("k") ? ((Number) args.get("k")).intValue() : 200;
+            int k = args.containsKey("k") ? ((Number) args.get("k")).intValue() : 5;
             String topic = (String) args.getOrDefault("topic", null);
 
             log.info("RagTool executing retrieve - courseId: {}, query: '{}', k: {}, topic: {}", 

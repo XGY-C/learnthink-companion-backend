@@ -60,6 +60,19 @@ public class AliOSSUtil {
      * @throws IOException 文件上传或流关闭异常
      */
     public String uploadStream(InputStream inputStream, String originalFilename, String filePath) throws IOException {
+        return uploadStream(inputStream, originalFilename, filePath, false);
+    }
+
+    /**
+     * 实现通过文件流上传到OSS（支持设置公共读ACL）
+     * @param inputStream 文件输入流（例如从网络请求或本地读取的流）
+     * @param originalFilename 原始文件名称（必须包含后缀，例如 "test.pptx"）
+     * @param filePath 文件存储路径（例如："system/docs/"）
+     * @param publicRead 是否设置为公共读
+     * @return 上传到OSS的文件访问路径
+     * @throws IOException 文件上传或流关闭异常
+     */
+    public String uploadStream(InputStream inputStream, String originalFilename, String filePath, boolean publicRead) throws IOException {
         // 1. 校验文件名和后缀
         if (originalFilename == null || !originalFilename.contains(".")) {
             throw new IllegalArgumentException("文件名称不合法，缺少后缀");
@@ -86,6 +99,9 @@ public class AliOSSUtil {
         try {
             // 上传文件流到 OSS
             ossClient.putObject(bucketName, objectName, inputStream);
+            if (publicRead) {
+                ossClient.setObjectAcl(bucketName, objectName, CannedAccessControlList.PublicRead);
+            }
 
             // 拼接文件访问路径
             url = endpoint.split("//")[0] + "//" + bucketName + "." + endpoint.split("//")[1] + "/" + objectName;
@@ -108,6 +124,18 @@ public class AliOSSUtil {
      */
     public String upload(MultipartFile multipartFile,String filePath) throws IOException {
         return uploadStream(multipartFile.getInputStream(), multipartFile.getOriginalFilename(), filePath);
+    }
+
+    /**
+     * 实现上传图片到OSS（支持设置公共读ACL）
+     * @param multipartFile 前端传来的文件对象
+     * @param filePath 文件路径（例如：user/avatar/）
+     * @param publicRead 是否设置为公共读
+     * @return 上传到OSS的文件路径
+     * @throws IOException 文件上传异常
+     */
+    public String upload(MultipartFile multipartFile, String filePath, boolean publicRead) throws IOException {
+        return uploadStream(multipartFile.getInputStream(), multipartFile.getOriginalFilename(), filePath, publicRead);
     }
 
 
@@ -371,9 +399,12 @@ public class AliOSSUtil {
         String fileName = UUID.randomUUID() + "-" + originalFilename;
         // 3. 创建 OSS 客户端
         OSS ossClient = new OSSClientBuilder().build(endpoint, accessKeyId, accessKeySecret);
-        ossClient.putObject(bucketName,filePath + fileName, inputStream);
+        String objectKey = filePath + fileName;
+        ossClient.putObject(bucketName, objectKey, inputStream);
+        // 设置为公共读，否则前端 Audio 元素无法访问（返回 403）
+        ossClient.setObjectAcl(bucketName, objectKey, CannedAccessControlList.PublicRead);
         //拼接文件访问路径
-        String url = endpoint.split("//")[0] + "//" + bucketName + "." + endpoint.split("//")[1] + "/" + filePath + fileName;
+        String url = endpoint.split("//")[0] + "//" + bucketName + "." + endpoint.split("//")[1] + "/" + objectKey;
 
         // 4. 关闭 OSS 客户端
         ossClient.shutdown();

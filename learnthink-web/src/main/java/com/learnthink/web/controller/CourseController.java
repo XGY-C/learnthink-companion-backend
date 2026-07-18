@@ -1,9 +1,11 @@
 package com.learnthink.web.controller;
 
+import com.learnthink.common.dto.admin.KnowledgeGraphResult;
 import com.learnthink.common.result.Result;
 import com.learnthink.common.util.UserContextUtil;
 import com.learnthink.core.domain.entity.Course;
 import com.learnthink.core.service.CourseService;
+import com.learnthink.core.service.admin.KnowledgeGraphService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -20,6 +22,7 @@ import java.util.Map;
 public class CourseController {
 
     private final CourseService courseService;
+    private final KnowledgeGraphService knowledgeGraphService;
 
     /**
      * 获取我已加入的课程列表
@@ -110,5 +113,18 @@ public class CourseController {
             return Result.error(404, "该课程暂无教材信息");
         }
         return Result.success(info);
+    }
+
+    /**
+     * 获取课程知识图谱（学生端只读）
+     */
+    @GetMapping("/{id}/knowledge-graph")
+    public Result<KnowledgeGraphResult> getKnowledgeGraph(@PathVariable String id) {
+        try {
+            KnowledgeGraphResult result = knowledgeGraphService.get(id);
+            return Result.success(result);
+        } catch (RuntimeException e) {
+            return Result.error(404, e.getMessage());
+        }
     }
 }

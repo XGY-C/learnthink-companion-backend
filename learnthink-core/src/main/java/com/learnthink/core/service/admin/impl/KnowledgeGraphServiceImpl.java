@@ -64,7 +64,7 @@ public class KnowledgeGraphServiceImpl implements KnowledgeGraphService {
             courseId, getCourseName(courseId), bookInfo.getTitle(), graph,
             List.of(), 0,
             bookInfo.getExtractedAt() != null
-                ? bookInfo.getExtractedAt().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+                ? bookInfo.getExtractedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString()
                 : "");
     }
 
@@ -104,7 +104,7 @@ public class KnowledgeGraphServiceImpl implements KnowledgeGraphService {
         bookInfo.setKnowledgeGraph(graphJson);
         bookInfoMapper.updateById(bookInfo);
 
-        String generatedAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        String generatedAt = java.time.Instant.now().toString();
 
         return new KnowledgeGraphResult(
             courseId, getCourseName(courseId), bookInfo.getTitle(), graph, queries, ragSources.size(), generatedAt);
@@ -173,7 +173,7 @@ public class KnowledgeGraphServiceImpl implements KnowledgeGraphService {
             throw new RuntimeException("保存知识点树失败: " + e.getMessage(), e);
         }
 
-        String generatedAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        String generatedAt = java.time.Instant.now().toString();
         log.info("[KpTree] KP tree generation complete for course {}: {} queries, {} RAG sources",
             courseId, queries.size(), ragSources.size());
 

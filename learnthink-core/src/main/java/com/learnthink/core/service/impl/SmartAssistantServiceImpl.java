@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 智能助手服务实现类 —— 视频讲解 Scene 协议生成（含 TTS 时间戳）
@@ -62,19 +63,44 @@ public class SmartAssistantServiceImpl implements SmartAssistantService {
                 sceneChatClient.prompt()
                         .user(question)
                         .stream()
-                        .content()
+                        .chatResponse()
+                        .doOnNext(resp -> {
+                            // 诊断：检测 reasoning_content（思考模式未正确禁用的标志）
+                            if (resp.getResult() != null && resp.getResult().getOutput() != null
+                                    && resp.getResult().getOutput().getMetadata() != null) {
+                                String reasoning = (String) resp.getResult().getOutput().getMetadata().get("reasoning_content");
+                                if (reasoning != null && !reasoning.isEmpty()) {
+                                    log.warn("检测到 reasoning_content（长度={}），思考模式可能未正确禁用。" +
+                                            "请检查 extraBody 中 thinking 参数是否在流式请求中生效。", reasoning.length());
+                                }
+                            }
+                        })
+                        .map(resp -> {
+                            if (resp.getResult() != null && resp.getResult().getOutput() != null) {
+                                String text = resp.getResult().getOutput().getText();
+                                return text != null ? text : "";
+                            }
+                            return "";
+                        })
+                        .filter(text -> !text.isEmpty())
                         .transform(this::extractItemsFromStream)
                         .flatMapSequential(item -> processItemWithTts(item), 4)
-                        .onErrorResume(err -> {
-                            log.error("TTS 处理失败，跳过该场景", err);
-                            return Mono.empty();
+                        // 修复：LLM 流级别错误发射 error 事件，不再吞掉
+                        // TTS 错误已由 processItemWithTts 内部的 onErrorResume 降级处理
+                        .onErrorResume(error -> {
+                            log.error("视频讲解流处理发生错误", error);
+                            String msg = error.getMessage() != null ? error.getMessage() : "未知错误";
+                            try {
+                                Map<String, String> errorPayload = Map.of("message", "处理失败: " + msg);
+                                return Flux.just(SseEvent.named("error",
+                                        objectMapper.writeValueAsString(errorPayload)));
+                            } catch (Exception e) {
+                                return Flux.just(SseEvent.named("error",
+                                        "{\"message\":\"处理失败\"}"));
+                            }
                         }),
                 Flux.just(SseEvent.named("done", "{\"message\":\"回答完成\"}"))
-        ).onErrorResume(error -> {
-            log.error("视频讲解过程发生错误", error);
-            String msg = error.getMessage() != null ? error.getMessage() : "未知错误";
-            return Flux.just(SseEvent.named("error", "{\"message\":\"处理失败: " + msg + "\"}"));
-        });
+        );
     }
 
     /**
@@ -188,10 +214,29 @@ public class SmartAssistantServiceImpl implements SmartAssistantService {
     private Flux<SmartExplanationItemVO> extractItemsFromStream(Flux<String> chunks) {
         return Flux.create(sink -> {
             StringBuilder currentJson = new StringBuilder();
+            StringBuilder rawText = new StringBuilder(); // 诊断：累积原始文本
             ParseState state = new ParseState();
+            AtomicInteger extractedCount = new AtomicInteger(0);
+            AtomicInteger chunkCount = new AtomicInteger(0);
+            // 诊断：统计非字符串内的花括号
+            AtomicInteger openBraceCount = new AtomicInteger(0);
+            AtomicInteger closeBraceCount = new AtomicInteger(0);
+            AtomicInteger braceDepthLogCount = new AtomicInteger(0);
+            AtomicInteger quoteLogCount = new AtomicInteger(0);
 
-            chunks.subscribe(
+            var subscription = chunks.subscribe(
                     chunk -> {
+                        int idx = chunkCount.incrementAndGet();
+                        // 诊断日志：前 3 个 chunk 用 INFO 级别输出
+                        if (idx <= 3) {
+                            log.info("LLM chunk #{} (长度={}): {}", idx, chunk.length(),
+                                    chunk.substring(0, Math.min(chunk.length(), 300)));
+                        }
+                        // 累积原始文本（最多保留前 2000 字符用于诊断）
+                        if (rawText.length() < 2000) {
+                            rawText.append(chunk, 0, Math.min(chunk.length(), 2000 - rawText.length()));
+                        }
+
                         for (int i = 0; i < chunk.length(); i++) {
                             char c = chunk.charAt(i);
 
@@ -216,14 +261,38 @@ public class SmartAssistantServiceImpl implements SmartAssistantService {
                                     state.escape = true;
                                 } else if (c == '"') {
                                     state.inString = false;
+                                    // 诊断：记录引号关闭，前 30 次
+                                    if (quoteLogCount.incrementAndGet() <= 30) {
+                                        int start = Math.max(0, currentJson.length() - 30);
+                                        log.info("诊断: \"关闭字符串\" 紧前方30字符: [{}]",
+                                                currentJson.substring(start));
+                                    }
                                 }
                             } else {
                                 if (c == '"') {
                                     state.inString = true;
+                                    // 诊断：记录引号打开，前 30 次
+                                    if (quoteLogCount.incrementAndGet() <= 30) {
+                                        int start = Math.max(0, currentJson.length() - 30);
+                                        log.info("诊断: \"打开字符串\" 紧前方30字符: [{}]",
+                                                currentJson.substring(start));
+                                    }
                                 } else if (c == '{') {
                                     state.braceDepth++;
+                                    openBraceCount.incrementAndGet();
+                                    // 诊断：前 10 次花括号变化
+                                    if (braceDepthLogCount.incrementAndGet() <= 10) {
+                                        log.info("诊断: '{{' braceDepth={} (open#{})", 
+                                                state.braceDepth, openBraceCount.get());
+                                    }
                                 } else if (c == '}') {
                                     state.braceDepth--;
+                                    closeBraceCount.incrementAndGet();
+                                    // 诊断：前 10 次花括号变化
+                                    if (braceDepthLogCount.incrementAndGet() <= 10) {
+                                        log.info("诊断: '}}' braceDepth={} (close#{})", 
+                                                state.braceDepth, closeBraceCount.get());
+                                    }
                                     if (state.braceDepth == 0) {
                                         String json = currentJson.toString().trim();
                                         currentJson.setLength(0);
@@ -236,18 +305,87 @@ public class SmartAssistantServiceImpl implements SmartAssistantService {
                                             SmartExplanationItemVO item =
                                                     objectMapper.readValue(cleanedJson, SmartExplanationItemVO.class);
                                             sink.next(item);
+                                            extractedCount.incrementAndGet();
+                                            log.debug("成功提取场景 #{}: sceneIndex={}", 
+                                                    extractedCount.get(), item.getSceneIndex());
                                         } catch (Exception e) {
                                             log.error("JSON解析失败，跳过该场景: {}", json, e);
-                                            // 不中断流，继续处理后续场景
                                         }
+                                    }
+                                } else if (c == '\n' && state.braceDepth > 0) {
+                                    // NDJSON 容错：换行符是场景分隔符
+                                    // LLM 可能漏掉最外层闭合 }，尝试补全后提取
+                                    String json = currentJson.toString().trim();
+                                    if (!json.isEmpty()) {
+                                        StringBuilder fixed = new StringBuilder(json);
+                                        for (int d = 0; d < state.braceDepth; d++) {
+                                            fixed.append('}');
+                                        }
+                                        try {
+                                            String cleanedJson = cleanJsonString(fixed.toString());
+                                            SmartExplanationItemVO item =
+                                                    objectMapper.readValue(cleanedJson, SmartExplanationItemVO.class);
+                                            sink.next(item);
+                                            extractedCount.incrementAndGet();
+                                            log.info("NDJSON 容错提取场景 #{}: sceneIndex={}, 补全{}个}}",
+                                                    extractedCount.get(), item.getSceneIndex(), state.braceDepth);
+                                        } catch (Exception e) {
+                                            log.warn("NDJSON 换行符处补全解析失败，跳过: braceDepth={}, json长度={}",
+                                                    state.braceDepth, json.length());
+                                        }
+                                        // 无论成功失败，重置状态等待下一个 {
+                                        currentJson.setLength(0);
+                                        state.inObject = false;
+                                        state.inString = false;
+                                        state.escape = false;
+                                        state.braceDepth = 0;
                                     }
                                 }
                             }
                         }
                     },
                     sink::error,
-                    sink::complete
+                    () -> {
+                        log.info("LLM 流处理完成：共收到 {} 个 content chunk，提取 {} 个场景", 
+                                chunkCount.get(), extractedCount.get());
+                        log.info("诊断: 非字符串花括号统计 open={} close={} 最终braceDepth={} inObject={} inString={}",
+                                openBraceCount.get(), closeBraceCount.get(), state.braceDepth, state.inObject, state.inString);
+                        if (currentJson.length() > 0 && state.braceDepth > 0) {
+                            // 流结束时仍有未闭合的 JSON，尝试补全花括号后提取
+                            String json = currentJson.toString().trim();
+                            StringBuilder fixed = new StringBuilder(json);
+                            for (int d = 0; d < state.braceDepth; d++) {
+                                fixed.append('}');
+                            }
+                            try {
+                                String cleanedJson = cleanJsonString(fixed.toString());
+                                SmartExplanationItemVO item =
+                                        objectMapper.readValue(cleanedJson, SmartExplanationItemVO.class);
+                                sink.next(item);
+                                extractedCount.incrementAndGet();
+                                log.info("流结束容错提取场景 #{}: sceneIndex={}, 补全{}个}}",
+                                        extractedCount.get(), item.getSceneIndex(), state.braceDepth);
+                            } catch (Exception e) {
+                                log.warn("流结束补全解析失败: braceDepth={}, json末尾200字符: {}",
+                                        state.braceDepth,
+                                        currentJson.substring(Math.max(0, currentJson.length() - 200)));
+                            }
+                        } else if (currentJson.length() > 0) {
+                            log.warn("诊断: currentJson 残余长度={}，末尾200字符: {}", 
+                                    currentJson.length(),
+                                    currentJson.substring(Math.max(0, currentJson.length() - 200)));
+                        }
+                        if (extractedCount.get() == 0) {
+                            log.warn("未提取到任何场景！LLM 原始输出前 2000 字符:\n{}", rawText.toString());
+                        }
+                        sink.complete();
+                    }
             );
+
+            // 修复：sink 取消时同时取消上游订阅
+            sink.onCancel(() -> subscription.dispose());
+            sink.onDispose(() -> subscription.dispose());
+
         }, FluxSink.OverflowStrategy.BUFFER);
     }
 

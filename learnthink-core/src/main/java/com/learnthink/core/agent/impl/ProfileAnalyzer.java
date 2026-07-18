@@ -10,6 +10,7 @@ import com.learnthink.core.agent.orchestration.ResourceGenerationState;
 import com.learnthink.core.config.PromptLoader;
 import com.learnthink.core.domain.entity.ProfileVersion;
 import com.learnthink.core.repository.ProfileVersionMapper;
+import com.learnthink.common.util.LlmJson;
 import com.learnthink.core.service.KpAnchorService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -67,6 +68,14 @@ public class ProfileAnalyzer {
                 mdSet.getCoreProfileMd().length(),
                 mdSet.getLearningProfileMd().length(),
                 mdSet.getKnowledgeProfileMd().length());
+
+            if (mdSet.getCoreProfileMd().isBlank()
+                    && mdSet.getLearningProfileMd().isBlank()
+                    && mdSet.getKnowledgeProfileMd().isBlank()) {
+                log.warn("Profile MD is empty for userId={}, courseId={}, version={}",
+                    userId, courseId, profileVersion);
+                return AgentResult.error("Profile not yet generated - profile MD is empty");
+            }
 
             String response = chatClient.prompt()
                 .messages(
@@ -176,22 +185,41 @@ public class ProfileAnalyzer {
         }
     }
 
-    private ResourceGenerationState.ProfileSummary parseSummary(String json) {
-        try {
-            var node = objectMapper.readTree(json);
-            return new ResourceGenerationState.ProfileSummary(
-                objectMapper.convertValue(node.get("weakTop"), List.class),
-                objectMapper.convertValue(node.get("style"), List.class),
-                node.get("minutesPerDay").asInt(),
-                node.get("goal").asText(),
-                node.get("dimensionCount").asInt(),
-                null,
-                List.of()
-            );
-        } catch (Exception e) {
-            log.warn("Failed to parse ProfileSummary, using defaults: {}", e.getMessage());
+    private ResourceGenerationState.ProfileSummary parseSummary(String raw) {
+        JsonNode node = LlmJson.readTree(raw);
+        if (node == null) {
+            log.warn("Failed to parse ProfileSummary (invalid JSON), using defaults");
             return new ResourceGenerationState.ProfileSummary(
                 List.of(), List.of(), 30, "Unknown", 0, null, List.of());
         }
+
+        List<String> weakTop = objectMapper.convertValue(
+            node.get("weak_top"), List.class);
+        List<String> style = objectMapper.convertValue(
+            node.get("style"), List.class);
+        String goal = node.has("goal") ? node.get("goal").asText() : "Unknown";
+        int minutesPerDay = extractMinutesPerDay(node);
+
+        return new ResourceGenerationState.ProfileSummary(
+            weakTop != null ? weakTop : List.of(),
+            style != null ? style : List.of(),
+            minutesPerDay, goal, 7, null, List.of());
+    }
+
+    private int extractMinutesPerDay(JsonNode node) {
+        try {
+            JsonNode pref = node.get("preference");
+            if (pref != null && pref.has("pace")) {
+                String pace = pref.get("pace").asText();
+                var m = java.util.regex.Pattern.compile("(\\d+)\\s*小时").matcher(pace);
+                if (m.find()) return Integer.parseInt(m.group(1)) * 60;
+                m = java.util.regex.Pattern.compile("(\\d+)\\s*分钟").matcher(pace);
+                if (m.find()) return Integer.parseInt(m.group(1));
+            }
+            if (node.has("minutesPerDay") && node.get("minutesPerDay").canConvertToInt()) {
+                return node.get("minutesPerDay").asInt();
+            }
+        } catch (Exception ignored) {}
+        return 30;
     }
 }

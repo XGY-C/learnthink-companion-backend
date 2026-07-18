@@ -12,6 +12,7 @@ public class TutoringConfig {
     private GeneratorConfig generator = new GeneratorConfig();
     private DiagramConfig diagram = new DiagramConfig();
     private Phase2Config phase2 = new Phase2Config();
+    private SmartConfig smart = new SmartConfig();
 
     public ReactConfig getReact() { return react; }
     public void setReact(ReactConfig react) { this.react = react; }
@@ -25,6 +26,8 @@ public class TutoringConfig {
     public void setDiagram(DiagramConfig diagram) { this.diagram = diagram; }
     public Phase2Config getPhase2() { return phase2; }
     public void setPhase2(Phase2Config phase2) { this.phase2 = phase2; }
+    public SmartConfig getSmart() { return smart; }
+    public void setSmart(SmartConfig smart) { this.smart = smart; }
 
     public static class ReactConfig {
         private int maxIterations = 10;
@@ -97,5 +100,56 @@ public class TutoringConfig {
         private int threadPoolSize = 8;
         public int getThreadPoolSize() { return threadPoolSize; }
         public void setThreadPoolSize(int threadPoolSize) { this.threadPoolSize = threadPoolSize; }
+    }
+
+    /**
+     * Smart v2 模式配置。
+     */
+    public static class SmartConfig {
+        /** 最大交互轮数（兜底） */
+        private int maxInteractions = 20;
+        /** 最少交互轮数 */
+        private int minInteractions = 3;
+        /** 单工具超时（毫秒） */
+        private int toolTimeoutMs = 30000;
+        /** LLM 流式超时（毫秒） */
+        private int llmTimeoutMs = 120000;
+        /** 状态 TTL（秒，2小时） */
+        private int stateTtlSeconds = 7200;
+        /** 每轮最大工具调用次数 */
+        private int maxToolCallsPerTurn = 50;
+        /** 是否启用可视化工具 */
+        private boolean enableVisualTools = true;
+        /** 是否启用代码执行 */
+        private boolean enableCodeExecution = true;
+        /** 送入 LLM 的最大消息条数（约 6 轮） */
+        private int contextWindowMessages = 24;
+        /** 完整保留的轮数，更早的用摘要替代 */
+        private int contextWindowRounds = 6;
+        /** 工具结果最大字符数，超则截断 */
+        private int maxToolResultChars = 2000;
+
+        public int getMaxInteractions() { return maxInteractions; }
+        public void setMaxInteractions(int maxInteractions) { this.maxInteractions = maxInteractions; }
+        public int getMinInteractions() { return minInteractions; }
+        public void setMinInteractions(int minInteractions) { this.minInteractions = minInteractions; }
+        public int getToolTimeoutMs() { return toolTimeoutMs; }
+        public void setToolTimeoutMs(int toolTimeoutMs) { this.toolTimeoutMs = toolTimeoutMs; }
+        public int getLlmTimeoutMs() { return llmTimeoutMs; }
+        public void setLlmTimeoutMs(int llmTimeoutMs) { this.llmTimeoutMs = llmTimeoutMs; }
+        public int getStateTtlSeconds() { return stateTtlSeconds; }
+        public void setStateTtlSeconds(int stateTtlSeconds) { this.stateTtlSeconds = stateTtlSeconds; }
+        public int getMaxToolCallsPerTurn() { return maxToolCallsPerTurn; }
+        public void setMaxToolCallsPerTurn(int maxToolCallsPerTurn) { this.maxToolCallsPerTurn = maxToolCallsPerTurn; }
+        public boolean isEnableVisualTools() { return enableVisualTools; }
+        public void setEnableVisualTools(boolean enableVisualTools) { this.enableVisualTools = enableVisualTools; }
+        public boolean isEnableCodeExecution() { return enableCodeExecution; }
+        public void setEnableCodeExecution(boolean enableCodeExecution) { this.enableCodeExecution = enableCodeExecution; }
+        public int getContextWindowMessages() { return contextWindowMessages; }
+        public void setContextWindowMessages(int contextWindowMessages) { this.contextWindowMessages = contextWindowMessages; }
+        public int getContextWindowRounds() { return contextWindowRounds; }
+        public void setContextWindowRounds(int contextWindowRounds) { this.contextWindowRounds = contextWindowRounds; }
+        public int getMaxToolResultChars() { return maxToolResultChars; }
+        public void setMaxToolResultChars(int maxToolResultChars) { this.maxToolResultChars = maxToolResultChars; }
     }
 }

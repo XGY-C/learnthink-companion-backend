@@ -4,18 +4,27 @@ import com.learnthink.common.dto.plan.ActivitySubmitRequest;
 import com.learnthink.common.dto.plan.ActivitySubmitResponse;
 import com.learnthink.common.dto.plan.PlanConfirmRequest;
 import com.learnthink.common.dto.plan.PlanGenerateRequest;
+import com.learnthink.common.dto.plan.PlanLockModeRequest;
 import com.learnthink.common.dto.plan.PlanPreviewRequest;
 import com.learnthink.common.dto.plan.PlanResponse;
 import com.learnthink.common.dto.plan.PlanUpdateRequest;
+import com.learnthink.common.exception.BusinessException;
 import com.learnthink.common.result.Result;
 import com.learnthink.common.util.UserContextUtil;
 import com.learnthink.core.agent.orchestration.PlanGenerationOrchestrator;
+import com.learnthink.core.directanswer.event.FlushableSseEmitter;
 import com.learnthink.core.service.PlanService;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 学习路径 API (v3.0)
@@ -163,6 +172,66 @@ public class PlanController {
     }
 
     /**
+     * 对 quiz activity 的最近一次作答生成智能评估分析（SSE 流式）
+     */
+    @PostMapping(value = "/plan/activities/{activityId}/evaluation", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter evaluateActivity(@PathVariable String activityId,
+                                       HttpServletResponse response) {
+        FlushableSseEmitter emitter = new FlushableSseEmitter(10 * 60 * 1000L, response);
+        emitter.onTimeout(() -> log.warn("Evaluation SSE timeout: activityId={}", activityId));
+        emitter.onError(e -> log.error("Evaluation SSE error: activityId={}", activityId, e));
+
+        UserContextUtil.UserInfo userInfo = UserContextUtil.getCurrentUser();
+        if (userInfo == null || userInfo.getUserId() == null) {
+            throw new BusinessException(HttpStatus.UNAUTHORIZED.value(), "未登录，请先登录");
+        }
+        String userId = userInfo.getUserId();
+        CompletableFuture.runAsync(() -> {
+            try {
+                planService.evaluateQuizActivity(userId, activityId, emitter);
+            } catch (Exception e) {
+                log.error("Evaluation failed: activityId={}", activityId, e);
+                try {
+                    emitter.send(SseEmitter.event().name("error").data("评估失败"));
+                    emitter.complete();
+                } catch (Exception ignored) {
+                }
+            }
+        });
+        return emitter;
+    }
+
+    /**
+     * 获取 activity 下每个资源的学习状态（前端恢复 step 状态用）
+     */
+    @GetMapping("/plan/activities/{activityId}/resources/status")
+    public Result<List<Map<String, Object>>> getResourceStatus(
+            @PathVariable String activityId,
+            @RequestParam(required = false) String moduleId) {
+        String userId = UserContextUtil.getCurrentUserId();
+        return Result.success(planService.getResourceStatus(userId, activityId, moduleId));
+    }
+
+    /**
+     * 更新 activity 下某个资源的学习状态（前端切换资源时同步）
+     */
+    @PostMapping("/plan/activities/{activityId}/resources/status")
+    public Result<Void> updateResourceStatus(
+            @PathVariable String activityId,
+            @RequestParam(required = false) String moduleId,
+            @RequestBody Map<String, Object> body) {
+        String userId = UserContextUtil.getCurrentUserId();
+        String resourceType = (String) body.get("resource_type");
+        String status = (String) body.get("status");
+        Integer durationSeconds = body.get("duration_seconds") instanceof Number n ? n.intValue() : null;
+        if (resourceType == null || status == null) {
+            return Result.error("resource_type and status are required");
+        }
+        planService.updateResourceStatus(userId, activityId, moduleId, resourceType, status, durationSeconds);
+        return Result.success(null);
+    }
+
+    /**
      * 重新规划单个 module
      */
     @PostMapping("/plan/modules/{moduleId}/replan")
@@ -207,5 +276,18 @@ public class PlanController {
         } catch (UnsupportedOperationException e) {
             return Result.error("NOT_IMPLEMENTED");
         }
+    }
+
+    /**
+     * 切换学习路径锁定模式
+     */
+    @PatchMapping("/plan/lock-mode")
+    public Result<PlanResponse> updateLockMode(@RequestBody PlanLockModeRequest request) {
+        String userId = UserContextUtil.getCurrentUserId();
+        log.info("Update lock mode: userId={}, courseId={}, lockMode={}",
+                userId, request.getCourseId(), request.getLockMode());
+        PlanResponse resp = planService.updateLockMode(
+                userId, request.getCourseId(), request.getLockMode());
+        return Result.success(resp);
     }
 }

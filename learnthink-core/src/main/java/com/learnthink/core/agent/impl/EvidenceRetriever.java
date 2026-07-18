@@ -3,6 +3,7 @@ package com.learnthink.core.agent.impl;
 import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.runtime.AgentResult;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.agent.orchestration.SseAgentObservation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -50,6 +51,7 @@ public class EvidenceRetriever {
 
         log.info("=== EvidenceRetriever START === courseId={}, topic={}, type={}", courseId, topic, resourceType);
         Instant start = Instant.now();
+        setPipelineStageIfPossible(ctx, "RETRIEVING");
 
         // 第一步：构建基础查询
         String baseQuery = buildBaseQuery(topic, resourceType);
@@ -143,10 +145,11 @@ public class EvidenceRetriever {
         return switch (resourceType) {
             case "doc"     -> topic + " 概念定义 核心原理 应用场景";
             case "quiz"    -> topic + " 习题 例题 练习 测试题";
-            case "reading" -> topic + " 扩展阅读 前沿进展 相关领域";
+            case "reading" -> topic + " 拓展延伸 应用案例 原理分析 相关领域";
             case "code"    -> topic + " 代码实现 算法 编程示例";
             case "mindmap" -> topic + " 知识结构 概念关系 思维导图";
             case "video"   -> topic + " 概念讲解 可视化 动画演示";
+            case "html"    -> topic + " 概念定义 核心原理 应用场景 交互演示 可视化";
             default        -> topic;
         };
     }
@@ -229,5 +232,11 @@ public class EvidenceRetriever {
             String headingPath,
             double relevance
         ) {}
+    }
+
+    private void setPipelineStageIfPossible(AgentContext ctx, String stage) {
+        if (ctx.observation() instanceof SseAgentObservation sseObs) {
+            sseObs.setPipelineStage(stage);
+        }
     }
 }

@@ -25,17 +25,19 @@ import java.util.stream.Collectors;
  * <h3>图拓扑（含反馈循环）</h3>
  * <pre>
  *   聊天驱动路径：
- *     PROFILING → RETRIEVING → PLANNING(LLM) → GENERATING → REVIEWING → PUBLISHING
+ *     PROFILING -> RETRIEVING -> PLANNING(LLM) -> GENERATING -> REVIEWING -> ILLUSTRATING -> PUBLISHING
  *                                                       ↑        ↓
  *                                                       └────────┘ 重新生成被拒绝内容
  *                                         ↑                      │
  *                                         └──────────────────────┘ 失败过多时重新规划
  *
  *   计划驱动路径（planContext != null）：
- *     PROFILING → RETRIEVING → PLAN_DRIVEN(无 LLM) → GENERATING → REVIEWING → PUBLISHING
+ *     PROFILING -> RETRIEVING -> PLAN_DRIVEN(无 LLM) -> GENERATING -> REVIEWING -> ILLUSTRATING -> PUBLISHING
  *                                                        ↑        ↓
  *                                                        └────────┘ 重新生成被拒绝内容
  * </pre>
+ * <p>ILLUSTRATING 节点为审查通过的 doc 文档自动生成配图（SVG/Mermaid/图片），
+ * 是增强步骤，失败不阻断发布，始终路由到 PUBLISHING。
  */
 public class ResourceGenerationGraph {
 
@@ -54,6 +56,7 @@ public class ResourceGenerationGraph {
     private final TaskPersistenceService persistenceService;
     private final AgentManager agentManager;
     private final VideoRenderPoller videoRenderPoller;
+    private final IllustrationService illustrationService;
     private final PushService pushService;
     private final java.util.concurrent.ExecutorService generatorPool =
         java.util.concurrent.Executors.newFixedThreadPool(20);
@@ -68,6 +71,7 @@ public class ResourceGenerationGraph {
         TaskPersistenceService persistenceService,
         AgentManager agentManager,
         VideoRenderPoller videoRenderPoller,
+        IllustrationService illustrationService,
         PushService pushService
     ) {
         this.profileAnalyzer = profileAnalyzer;
@@ -79,6 +83,7 @@ public class ResourceGenerationGraph {
         this.persistenceService = persistenceService;
         this.agentManager = agentManager;
         this.videoRenderPoller = videoRenderPoller;
+        this.illustrationService = illustrationService;
         this.pushService = pushService;
     }
 
@@ -90,6 +95,7 @@ public class ResourceGenerationGraph {
             .addNode("PLAN_DRIVEN", this::doPlanDriven, "跳过 LLM，使用预规划条目")
             .addNode("GENERATING", this::doGenerating, "通过子生成器生成资源")
             .addNode("REVIEWING", this::doReviewing, "审查生成内容质量")
+            .addNode("ILLUSTRATING", this::doIllustrating, "为文档资源生成配图")
             .addNode("PUBLISHING", this::doPublishing, "发布已批准的资源")
             .addNode("FALLBACK", this::doFallback, "Generate with limited evidence (degraded mode)")
             .addEdge("PROFILING", "RETRIEVING")
@@ -99,9 +105,11 @@ public class ResourceGenerationGraph {
             .addConditionalEdge("RETRIEVING", this::routeAfterRetrieving)
             .addConditionalEdge("GENERATING", this::routeAfterGenerating)
             .addConditionalEdge("REVIEWING", this::routeAfterReviewing)
+            .addConditionalEdge("ILLUSTRATING", this::routeAfterIllustrating)
             .addConditionalEdge("PUBLISHING", this::routeAfterPublishing)
             .setEntryPoint("PROFILING")
             .setMaxCycles(20) // sub-topic iteration (up to 6 sub-topics × 3 passes each)
+            .setFailureDetector(s -> "FAILED".equals(s.status))
             .compile();
     }
 
@@ -113,6 +121,7 @@ public class ResourceGenerationGraph {
         log.info("=== PROFILING NODE START === taskId={}, userId={}, courseId={}", s.taskId, s.userId, s.courseId);
         advance(s, "PROFILING", 0, "Analyzing learning profile...");
         AgentContext ctx = buildContext(s);
+        setPipelineContext(ctx, "PROFILING", "分析学习画像，提取薄弱点和知识锚点");
 
         s.profileVersionId = persistenceService.resolveProfileVersionId(s.userId, s.courseId, s.profileVersion);
 
@@ -143,6 +152,8 @@ public class ResourceGenerationGraph {
         log.info("=== RETRIEVING NODE START === topic={}, resourceTypes={}", s.topic, s.resourceTypes);
         advance(s, "RETRIEVING", 15, "Retrieving course evidence...");
         AgentContext ctx = buildContext(s);
+        setPipelineContext(ctx, "RETRIEVING",
+            "从知识库检索证据，资源类型=" + String.join(",", s.resourceTypes));
 
         Map<String, List<ResourceGenerationState.SourceItem>> evidenceByType = new HashMap<>();
         List<ResourceGenerationState.SourceItem> merged = new ArrayList<>();
@@ -195,6 +206,8 @@ public class ResourceGenerationGraph {
             s.topic, feedback.planFeedback() != null ? "with feedback" : "initial");
         advance(s, "PLANNING", 35, "Planning resource pack...");
         AgentContext ctx = buildContext(s);
+        setPipelineContext(ctx, "PLANNING",
+            "规划资源结构，主题=" + s.topic);
 
         var result = curriculumPlanner.plan(
             s.profileSummary, retrieval.mergedSources(), s.topic, s.resourceTypes,
@@ -223,6 +236,9 @@ public class ResourceGenerationGraph {
         var preItems = s.planContext.items();
         log.info("=== PLAN_DRIVEN NODE START === pre-planned items: {}", preItems.size());
         advance(s, "PLAN_DRIVEN", 35, "Building resource plan from " + preItems.size() + " pre-planned activities...");
+        AgentContext planDrivenCtx = buildContext(s);
+        setPipelineContext(planDrivenCtx, "PLANNING",
+            "从 " + preItems.size() + " 个预规划活动构建资源计划");
 
         List<ResourceGenerationState.ResourcePlanItem> items = new ArrayList<>();
         List<ResourceGenerationState.SubTopic> subTopics = new ArrayList<>();
@@ -308,6 +324,9 @@ public class ResourceGenerationGraph {
             return s;
         }
 
+        setPipelineContext(ctx, "GENERATING",
+            "并行生成 " + itemsToGenerate.size() + " 个资源");
+
         // 广播子主题开始
         broadcastSubTopicStarted(s);
 
@@ -355,7 +374,13 @@ public class ResourceGenerationGraph {
                             result.output().content(),
                             result.output().confidence(),
                             result.output().sources() != null ? result.output().sources().size() : 0);
-                        if (checklist != null) checklist.markDone(item.title());
+                        if (checklist != null) {
+                            if ("video".equals(item.type())) {
+                                checklist.markRendering(item.title());
+                            } else {
+                                checklist.markDone(item.title());
+                            }
+                        }
                         if (s.eventBroadcaster != null) {
                             s.eventBroadcaster.broadcastEvent(s.taskId, "agent.generation.done",
                                 Map.of("jobId", s.taskId + "-" + item.type(), "resourceType", item.type(), "title", item.title()));
@@ -435,6 +460,7 @@ public class ResourceGenerationGraph {
             generation.artifacts().size(), progress.currentIndex() + 1, progress.totalCount());
         advance(s, "REVIEWING", 85, "Reviewing generated content...");
         AgentContext ctx = buildContext(s);
+        setPipelineContext(ctx, "REVIEWING", "审查生成内容质量");
 
         // 限定到当前子主题的产物
         var planning = s.planning;
@@ -503,6 +529,56 @@ public class ResourceGenerationGraph {
         return s;
     }
 
+    /**
+     * 配图节点 -- 为审查通过的 doc 类型文档自动生成配图（SVG / Mermaid / 像素图片），
+     * 插入到 Markdown 对应章节位置。配图是增强步骤，失败不阻断发布。
+     */
+    private ResourceGenerationState doIllustrating(ResourceGenerationState s) {
+        var generation = s.generation;
+        var planning = s.planning;
+        var progress = s.subTopicProgress;
+        log.info("=== ILLUSTRATING NODE START === artifacts={}, subTopic={}/{}",
+            generation.artifacts().size(), progress.currentIndex() + 1, progress.totalCount());
+        advance(s, "ILLUSTRATING", 90, "为文档生成配图...");
+        AgentContext ctx = buildContext(s);
+        setPipelineContext(ctx, "ILLUSTRATING", "为文档资源生成配图");
+
+        // 限定到当前子主题的 doc 产物
+        int stIndex = progress.currentIndex();
+        var subTopicItemTypes = planning.resourcePlan().items().stream()
+            .filter(i -> i.subTopicIndex() == stIndex)
+            .map(ResourceGenerationState.ResourcePlanItem::type)
+            .collect(Collectors.toSet());
+
+        ResourceGenerationState.GenerationData newGen = generation;
+        for (var entry : generation.artifacts().entrySet()) {
+            String type = entry.getKey();
+            if (!"doc".equals(type) || !subTopicItemTypes.contains(type)) {
+                continue;
+            }
+            var content = entry.getValue();
+            try {
+                if (s.eventBroadcaster != null) {
+                    s.eventBroadcaster.broadcastEvent(s.taskId, "agent.illustration.started",
+                        Map.of("resourceType", type, "title", content.title()));
+                }
+                var illustrated = illustrationService.illustrate(content, ctx);
+                newGen = newGen.withArtifact(type, illustrated);
+                if (s.eventBroadcaster != null) {
+                    s.eventBroadcaster.broadcastEvent(s.taskId, "agent.illustration.done",
+                        Map.of("resourceType", type, "title", content.title()));
+                }
+                log.info("Illustrated doc: {}", content.title());
+            } catch (Exception e) {
+                log.warn("Illustration failed for doc '{}', keeping original: {}",
+                    content.title(), e.getMessage());
+            }
+        }
+        s.generation = newGen;
+        advance(s, "ILLUSTRATING", 95, "配图完成");
+        return s;
+    }
+
     private ResourceGenerationState doPublishing(ResourceGenerationState s) {
         var publish = s.publish;
         var generation = s.generation;
@@ -515,6 +591,8 @@ public class ResourceGenerationGraph {
         advance(s, "PUBLISHING", 95,
             "Publishing sub-topic " + (progress.currentIndex() + 1) + "/" + progress.totalCount() + "...");
         AgentContext ctx = buildContext(s);
+        setPipelineContext(ctx, "PUBLISHING",
+            "发布子主题 " + (progress.currentIndex() + 1) + "/" + progress.totalCount());
 
         String packId = publish.packId() != null ? publish.packId() : UUID.randomUUID().toString();
         s.publish = publish.withPackId(packId);
@@ -584,6 +662,7 @@ public class ResourceGenerationGraph {
                         ? (rev.action() == ResourceGenerationState.ReviewAction.PUBLISH ? "approved" : "rejected")
                         : "pending";
                     persistenceService.saveResourceItem(itemId, packId, s.taskId,
+                        s.userId, s.courseId,
                         type, content.title(), content.content(),
                         content.contentMime(), content.confidence(),
                         content.sources() != null
@@ -670,6 +749,9 @@ public class ResourceGenerationGraph {
     private ResourceGenerationState doFallback(ResourceGenerationState s) {
         log.info("=== FALLBACK NODE START === KB unavailable, using limited guidance");
         advance(s, "FALLBACK", 35, "Knowledge base unavailable — generating with limited guidance...");
+        AgentContext fallbackCtx = buildContext(s);
+        setPipelineContext(fallbackCtx, "RETRIEVING",
+            "知识库不可用，使用通用知识生成（降级模式）");
 
         s.retrieval = new ResourceGenerationState.RetrievalData(List.of(), Map.of(), true, 0);
         var fallbackSubTopics = List.of(new ResourceGenerationState.SubTopic(
@@ -765,8 +847,8 @@ public class ResourceGenerationGraph {
         s.generation = newGen;
 
         if (rejectedTypes.isEmpty()) {
-            log.info("All resources approved - routing to PUBLISHING");
-            return "PUBLISHING";
+            log.info("All resources approved - routing to ILLUSTRATING");
+            return "ILLUSTRATING";
         }
 
         String feedback = feedbackBuilder.toString();
@@ -807,6 +889,11 @@ public class ResourceGenerationGraph {
                 newGen.regenerateCount());
         }
         s.generation = newGen;
+        return "ILLUSTRATING";
+    }
+
+    private String routeAfterIllustrating(ResourceGenerationState s) {
+        log.info("Routing from ILLUSTRATING to PUBLISHING");
         return "PUBLISHING";
     }
 
@@ -904,6 +991,13 @@ public class ResourceGenerationGraph {
                         .toList()
                 ));
             }
+        }
+    }
+
+    private void setPipelineContext(AgentContext ctx, String stage, String taskDesc) {
+        if (ctx.observation() instanceof SseAgentObservation sseObs) {
+            sseObs.setPipelineStage(stage);
+            sseObs.setCurrentTaskDesc(taskDesc);
         }
     }
 

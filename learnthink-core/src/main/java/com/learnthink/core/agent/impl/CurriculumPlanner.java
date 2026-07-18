@@ -3,6 +3,7 @@ package com.learnthink.core.agent.impl;
 import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.runtime.AgentResult;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.agent.orchestration.SseAgentObservation;
 import com.learnthink.core.config.PromptLoader;
 import com.learnthink.core.domain.entity.BookInfo;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -76,6 +77,7 @@ public class CurriculumPlanner {
         log.info("=== CurriculumPlanner START === topic={}, types={}, feedback={}",
                 topic, resourceTypes, feedback != null ? "with feedback" : "initial");
         Instant start = Instant.now();
+        setPipelineStageIfPossible(ctx, "PLANNING");
         String contextInfo = feedback != null
             ? "REPLANNING with feedback: " + feedback
             : "Initial planning";
@@ -307,17 +309,17 @@ public class CurriculumPlanner {
                 mapper.convertValue(node.get("items"),
                     mapper.getTypeFactory().constructCollectionType(List.class,
                         ResourceGenerationState.ResourcePlanItem.class));
-            // 标准化类型名称：LLM 可能输出 "document" 而非 "doc"
+            // 标准化类型名称：LLM 可能输出 "document" 而非 "doc"，"html_doc"/"htmldoc" 而非 "html"
             items = items.stream()
                 .map(item -> {
-                    ResourceGenerationState.ResourcePlanItem normalized =
-                        "document".equals(item.type())
-                        ? new ResourceGenerationState.ResourcePlanItem(
-                            "doc", item.title(), item.difficulty(), item.estimatedMinutes(),
-                            item.format(), item.keyPoints(), item.personalizationNote(),
-                            item.subTopicIndex(), item.activityId())
-                        : item;
-                    return normalized;
+                    String t = item.type();
+                    if ("document".equals(t)) t = "doc";
+                    if ("html_doc".equals(t) || "htmldoc".equals(t)) t = "html";
+                    if (t.equals(item.type())) return item;
+                    return new ResourceGenerationState.ResourcePlanItem(
+                        t, item.title(), item.difficulty(), item.estimatedMinutes(),
+                        item.format(), item.keyPoints(), item.personalizationNote(),
+                        item.subTopicIndex(), item.activityId());
                 })
                 .toList();
 
@@ -350,5 +352,11 @@ public class CurriculumPlanner {
             case "advanced" -> "4-5 (高难度：侧重评价和创造，引入挑战性问题与开放设计)";
             default -> difficulty + " — 请映射到 1-5 Bloom 层级 (1=识记, 2=理解, 3=应用, 4=分析, 5=评价/创造)";
         };
+    }
+
+    private void setPipelineStageIfPossible(AgentContext ctx, String stage) {
+        if (ctx.observation() instanceof SseAgentObservation sseObs) {
+            sseObs.setPipelineStage(stage);
+        }
     }
 }

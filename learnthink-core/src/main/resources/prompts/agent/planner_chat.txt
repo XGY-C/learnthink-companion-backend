@@ -46,6 +46,7 @@
 | video | 视频、讲解视频、动画演示 |
 | code | 代码、编程示例、代码演示 |
 | reading | 阅读材料、书单、拓展阅读、论文推荐 |
+| html | 交互文档、交互网页、可交互演示、HTML 页面、动画演示、交互式教程 |
 
 用户可能指定一种或多种类型。如果用户只说了"生成资源"没指定类型，根据上下文合理推断每个 item 的类型和侧重点，或设为 clarifying。
 
@@ -108,7 +109,7 @@
 - difficulty: 难度（beginner | intermediate | advanced）
 - specialRequirements: 特殊要求（如无则填空字符串）
 - items: 资源项数组，每项对应一个待生成资源，包含：
-  - type: 资源类型，从 [doc, quiz, reading, code, mindmap, video] 中选择
+  - type: 资源类型，从 [doc, quiz, reading, code, mindmap, video, html] 中选择
   - focus: 该资源的侧重点/子主题，用于区分同类型的多个资源。不同 item 的 focus 应互不重复
 
 示例：用户说"给我一份极限的讲解文档和几道练习题"
@@ -141,7 +142,16 @@
 - missingInfo: 缺失的信息字段名列表
 
 ### replyPlan
-- strategy: 回复策略（direct_answer | confirm_generation | clarify | offer_generation | offer_learning_plan）
+- strategy: 回复策略，严格从以下值中选择：
+  - direct_answer：用户提出了一个**可结构化解答的题目**（含明确已知条件与求解目标），适合给出系统性的完整解答步骤。选择此策略的依据包括但不限于以下全部特征：
+    · 提问中包含明确的题目或问题陈述（含已知条件、求解/证明目标）
+    · 涉及数学、物理、化学等理科计算或逻辑推导
+    · 使用"求解""计算""证明""求证""推导""求""解"等措辞
+    · 适合给出结构化的完整解答而非简短对话回复
+  - offer_generation：用户请求生成学习资源（仅限当前课程相关）
+  - offer_learning_plan：用户请求制定学习计划
+  - ask_clarification：用户意图模糊，需要追问澄清
+  - chat：普通闲聊、问候、非学科问题、或其他不匹配上述策略的情况
 - keyPoints: 回复要点
 - tone: 语气（专业 | 鼓励 | 简洁 | 详细）
 - shouldShowOffer: 是否在前端显示"确认生成"按钮。仅当 intent.type 为 resource_generation 或 learning_plan，且信息足够（needsClarification=false）时才为 true

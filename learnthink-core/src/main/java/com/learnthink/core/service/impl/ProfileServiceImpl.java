@@ -8,9 +8,11 @@ import com.learnthink.common.dto.profile.ProfileMdSet;
 import com.learnthink.common.dto.profile.ProfileVersionItemDto;
 import com.learnthink.core.config.PromptLoader;
 import com.learnthink.core.domain.entity.Profile;
-import com.learnthink.core.domain.entity.ProfileChat;
+import com.learnthink.core.domain.entity.ChatSession;
+import com.learnthink.core.domain.entity.ChatMessage;
 import com.learnthink.core.domain.entity.ProfileVersion;
-import com.learnthink.core.repository.ProfileChatMapper;
+import com.learnthink.core.repository.ChatMessageMapper;
+import com.learnthink.core.repository.ChatSessionMapper;
 import com.learnthink.core.repository.ProfileMapper;
 import com.learnthink.core.repository.ProfileVersionMapper;
 import com.learnthink.core.service.ProfileService;
@@ -44,7 +46,8 @@ public class ProfileServiceImpl implements ProfileService {
 
     private final ProfileMapper profileMapper;
     private final ProfileVersionMapper profileVersionMapper;
-    private final ProfileChatMapper profileChatMapper;
+    private final ChatSessionMapper chatSessionMapper;
+    private final ChatMessageMapper chatMessageMapper;
     private final ChatClient.Builder chatClientBuilder;
     private final ObjectMapper objectMapper;
     private final PromptLoader promptLoader;
@@ -54,7 +57,8 @@ public class ProfileServiceImpl implements ProfileService {
 
     public ProfileServiceImpl(ProfileMapper profileMapper,
                               ProfileVersionMapper profileVersionMapper,
-                              ProfileChatMapper profileChatMapper,
+                              ChatSessionMapper chatSessionMapper,
+                              ChatMessageMapper chatMessageMapper,
                               @Qualifier("chatChatClientBuilder") ChatClient.Builder chatClientBuilder,
                               ObjectMapper objectMapper,
                               PromptLoader promptLoader,
@@ -63,7 +67,8 @@ public class ProfileServiceImpl implements ProfileService {
                               ProfileBehaviorAccumulatorService behaviorAccumulatorService) {
         this.profileMapper = profileMapper;
         this.profileVersionMapper = profileVersionMapper;
-        this.profileChatMapper = profileChatMapper;
+        this.chatSessionMapper = chatSessionMapper;
+        this.chatMessageMapper = chatMessageMapper;
         this.chatClientBuilder = chatClientBuilder;
         this.objectMapper = objectMapper;
         this.promptLoader = promptLoader;
@@ -98,7 +103,7 @@ public class ProfileServiceImpl implements ProfileService {
         result.put("user_id", userId);
         result.put("course_id", courseId);
         result.put("version", pv.getVersion());
-        result.put("updated_at", pv.getCreatedAt() != null ? pv.getCreatedAt().toString() : "");
+        result.put("updated_at", pv.getCreatedAt() != null ? pv.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : "");
 
         // Parse displayJson and build display_profile + dimensions
         Map<String, Object> displayProfile = null;
@@ -135,7 +140,7 @@ public class ProfileServiceImpl implements ProfileService {
         return profileVersionMapper.selectList(q).stream()
                 .map(pv -> new ProfileVersionItemDto(
                         pv.getVersion(),
-                        pv.getCreatedAt() != null ? pv.getCreatedAt().toString() : "",
+                        pv.getCreatedAt() != null ? pv.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : "",
                         "chat"
                 ))
                 .toList();
@@ -849,5 +854,36 @@ public class ProfileServiceImpl implements ProfileService {
         public void setValue(String value) { this.value = value; }
         public int getOccurrenceCount() { return occurrenceCount; }
         public void setOccurrenceCount(int occurrenceCount) { this.occurrenceCount = occurrenceCount; }
+    }
+
+    /**
+     * 只取 type='chat' 会话的用户消息做画像分析（缺口4）。
+     * 供未来批量画像分析入口使用，当前 handleChatEnd 由 ChatServiceImpl 传入已过滤的消息列表。
+     */
+    private List<Map<String, String>> filterChatMessages(String userId, String courseId) {
+        List<ChatSession> sessions = chatSessionMapper.selectList(
+            new LambdaQueryWrapper<ChatSession>()
+                .eq(ChatSession::getUserId, userId)
+                .eq(ChatSession::getCourseId, courseId)
+                .eq(ChatSession::getType, "chat")
+                .isNull(ChatSession::getProfileVersionId)
+        );
+        if (sessions.isEmpty()) return List.of();
+
+        List<String> sessionIds = sessions.stream().map(ChatSession::getId).toList();
+        List<ChatMessage> messages = chatMessageMapper.selectList(
+            new LambdaQueryWrapper<ChatMessage>()
+                .in(ChatMessage::getSessionId, sessionIds)
+                .eq(ChatMessage::getRole, "user")
+                .orderByAsc(ChatMessage::getSeqNum)
+        );
+
+        return messages.stream().map(m -> {
+            Map<String, String> map = new LinkedHashMap<>();
+            map.put("role", m.getRole());
+            map.put("content", m.getContent());
+            map.put("at", m.getCreatedAt() != null ? m.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : "");
+            return map;
+        }).collect(Collectors.toList());
     }
 }

@@ -31,6 +31,9 @@ public class ReActPromptBuilder {
 
         String adaptiveInjection = strategyTendency + "\n" + contentAssociations + "\n" + styleParams;
 
+        // sub_mode 教学策略注入
+        String subModeStrategy = buildSubModeStrategy(context.subMode());
+
         return base
             .replace("{question}", Objects.toString(context.question(), ""))
             .replace("{profile.knowledgeBaseSummary}",
@@ -43,7 +46,28 @@ public class ReActPromptBuilder {
             .replace("{pathPosition}", formatPathPosition(context.pathPosition()))
             .replace("{recentLearning}", formatRecentLearning(context.recentLearning()))
             .replace("{recentTutoring}", formatRecentTutoring(context.recentTutoring()))
-            .replace("{自适应注入：三层画像指令}", adaptiveInjection);
+            .replace("{自适应注入：三层画像指令}", adaptiveInjection)
+            .replace("{subModeStrategy}", subModeStrategy);
+    }
+
+    /**
+     * 根据 sub_mode 构建教学策略注入指令。
+     * subMode: smart | guided | direct | test
+     */
+    private String buildSubModeStrategy(String subMode) {
+        if (subMode == null || subMode.isBlank() || "smart".equals(subMode)) {
+            return "根据学生水平自适应选择最佳教学策略，平衡引导与直接解答。";
+        } else if ("guided".equals(subMode)) {
+            return "采用苏格拉底式引导教学：通过递进式提问启发学生思考，引导学生自己发现答案。"
+                + "在制定执行计划时，优先使用逐步引导、场景化问题和假设验证方式编排教学章节。";
+        } else if ("direct".equals(subMode)) {
+            return "采用直接讲授模式：给出清晰、完整、结构化的解答，适合基础薄弱或需要快速回顾的学生。"
+                + "在制定执行计划时，优先使用知识讲解、实例演示和总结归纳的方式编排教学章节。";
+        } else if ("test".equals(subMode)) {
+            return "采用测验评估模式：通过设计题目来检验学生对知识点的掌握程度。"
+                + "在制定执行计划时，优先设计递进难度的问题链、知识点覆盖检测和即时反馈机制。";
+        }
+        return "自适应策略";
     }
 
     public List<Message> buildMessages(TutoringContext context, ReactState reactState) {

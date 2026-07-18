@@ -1,5 +1,6 @@
 package com.learnthink.common.dto.user;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -22,4 +23,14 @@ public class NotificationResponse {
     private String refId;
     private String refType;
     private String createdAt;
+
+    @JsonProperty("isRead")
+    public boolean isRead() {
+        return isRead;
+    }
+
+    @JsonProperty("isPushed")
+    public boolean isPushed() {
+        return isPushed;
+    }
 }

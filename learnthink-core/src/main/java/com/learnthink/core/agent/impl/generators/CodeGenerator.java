@@ -65,7 +65,7 @@ public class CodeGenerator extends AutonomousGenerator implements TypeGenerator 
             boolean forceLowConfidence, String reviewFeedback,
             ResourceGenerationState.GeneratedContent original, AgentContext ctx) {
         String sp = getGenPrompt(item) + "\n\n## 修改\n" + reviewFeedback;
-        String um = "需修改：\n" + (original.content() != null ? original.content().substring(0, Math.min(2000, original.content().length())) : "");
+        String um = "需修改：\n" + (original.content() != null ? original.content() : "");
         String content = chatClient.prompt().messages(new SystemMessage(sp), new UserMessage(um)).call().content();
         log.info("[AI-RESPONSE][CodeGenerator] revise length={} chars\n{}",
             content != null ? content.length() : 0,
@@ -92,7 +92,7 @@ public class CodeGenerator extends AutonomousGenerator implements TypeGenerator 
     }
     private ToolCallback buildRagCallback(AgentContext ctx) {
         if (ragTool == null) return null;
-        return new com.learnthink.core.agent.impl.RagToolCallback(ragTool, ctx.courseId(), null, null);
+        return new com.learnthink.core.agent.tools.callbacks.DelegatingToolCallback(ragTool, java.util.Map.of("course_id", ctx.courseId()));
     }
     @Override protected String getSelfReviewSystemPrompt(String t) { return promptLoader.get("agent/self_review_code"); }
     @Override protected boolean shouldRetrieveMore(GenerationTask t, List<ResourceGenerationState.SourceItem> s) { return s.size() < 2; }

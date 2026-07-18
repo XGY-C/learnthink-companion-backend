@@ -31,11 +31,21 @@ public class TokenAuthenticationFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 
+        // 优先从 Authorization Header 获取 token
         String authorization = request.getHeader("Authorization");
+        String accessToken = null;
 
         if (StringUtils.hasText(authorization) && authorization.startsWith("Bearer ")) {
-            String accessToken = authorization.substring(7);
+            accessToken = authorization.substring(7);
+        } else {
+            // EventSource 不支持自定义 Header，SSE 端点通过 query param 传递 token
+            String tokenParam = request.getParameter("token");
+            if (StringUtils.hasText(tokenParam)) {
+                accessToken = tokenParam;
+            }
+        }
 
+        if (StringUtils.hasText(accessToken)) {
             try {
                 Map<String, Object> tokenInfo = tokenStorageService.getAccessTokenInfo(accessToken);
                 if (tokenInfo != null) {

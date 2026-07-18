@@ -19,4 +19,13 @@ public interface AgentObservation {
 
     /** 出错时调用 */
     default void onError(String agentName, Throwable error) {}
+
+    /**
+     * Agent 进行推理/思考时调用（非决策性质的思考过程）。
+     * 与 {@link #onDecision} 互补：onThink 记录思考过程，onDecision 记录决策动作。
+     *
+     * @param agentName  Agent 名称
+     * @param thought   思考内容（如 LLM 的 CoT 推理、检索策略权衡）
+     */
+    default void onThink(String agentName, String thought) {}
 }

@@ -9,7 +9,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * LearnThink Web应用启动类
  */
 @SpringBootApplication(scanBasePackages = {"com.learnthink"})
-@MapperScan({"com.learnthink.core.repository", "com.learnthink.core.tutoring.repository"})
+@MapperScan({"com.learnthink.core.repository", "com.learnthink.core.tutoring.repository", "com.learnthink.core.directanswer.repository"})
 @EnableScheduling
 public class LearnthinkWebApplication {
 

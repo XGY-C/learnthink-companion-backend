@@ -28,7 +28,7 @@ public class UserConverter {
                 .bio(user.getBio())
                 .major(user.getMajor())
                 .grade(user.getGrade())
-                .createdAt(user.getCreatedAt() != null ? user.getCreatedAt().toString() : null)
+                .createdAt(user.getCreatedAt() != null ? user.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : null)
                 .build();
     }
 }

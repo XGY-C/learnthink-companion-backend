@@ -1,5 +1,6 @@
 package com.learnthink.common.dto.plan;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import java.util.List;
 import java.util.Map;
@@ -14,13 +15,16 @@ public class ActivitySubmitRequest {
     private List<AnswerItem> answers;
 
     /** learn/explore 类型：停留秒数 */
+    @JsonProperty("duration_seconds")
     private Integer durationSeconds;
 
     /** learn 类型：是否检测到页面交互 */
+    @JsonProperty("interaction_detected")
     private Boolean interactionDetected;
 
     @Data
     public static class AnswerItem {
+        @JsonProperty("question_id")
         private String questionId;
         private String answer;
     }

@@ -1,6 +1,9 @@
 package com.learnthink.web.controller;
 
 import com.learnthink.common.dto.user.ChangePasswordRequest;
+import com.learnthink.common.dto.user.DailyActivityResponse;
+import com.learnthink.common.dto.user.DailyDetailResponse;
+import com.learnthink.common.dto.user.LearningHeartbeatRequest;
 import com.learnthink.common.dto.user.LearningStatsResponse;
 import com.learnthink.common.dto.user.NotificationResponse;
 import com.learnthink.common.dto.user.UpdateProfileRequest;
@@ -13,11 +16,14 @@ import com.learnthink.core.domain.entity.User;
 import com.learnthink.core.service.NotificationService;
 import com.learnthink.core.service.UserService;
 import com.learnthink.core.service.UserStatsService;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.time.LocalDate;
 import java.util.List;
 
 /**
@@ -110,12 +116,59 @@ public class UserController {
         return Result.success();
     }
 
+    @GetMapping("/me/notifications/unread-count")
+    public Result<java.util.Map<String, Object>> getUnreadCount() {
+        String userId = UserContextUtil.getCurrentUserId();
+        int count = notificationService.getUnreadCount(userId);
+        return Result.success(java.util.Map.of("unreadCount", count));
+    }
+
+    @DeleteMapping("/me/notifications/{id}")
+    public Result<Void> deleteNotification(@PathVariable String id) {
+        String userId = UserContextUtil.getCurrentUserId();
+        notificationService.deleteNotification(id, userId);
+        return Result.success();
+    }
+
     // ==================== 学习统计 ====================
 
     @GetMapping("/me/stats")
     public Result<LearningStatsResponse> getStats(@RequestParam String courseId) {
         String userId = UserContextUtil.getCurrentUserId();
         return Result.success(userStatsService.getStats(userId, courseId));
+    }
+
+    /**
+     * 学习心跳上报
+     */
+    @PostMapping("/me/learning-heartbeat")
+    public Result<Void> heartbeat(@RequestBody @Valid LearningHeartbeatRequest request) {
+        String userId = UserContextUtil.getCurrentUserId();
+        userStatsService.recordHeartbeat(userId, request.getCourseId(), request.getDeltaSeconds());
+        return Result.success();
+    }
+
+    /**
+     * 获取日历热力图数据
+     */
+    @GetMapping("/me/daily-activity")
+    public Result<DailyActivityResponse> getDailyActivity(
+            @RequestParam(required = false) String courseId,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate) {
+        String userId = UserContextUtil.getCurrentUserId();
+        return Result.success(userStatsService.getDailyActivity(userId, courseId, startDate, endDate));
+    }
+
+    /**
+     * 获取某日学习详情
+     */
+    @GetMapping("/me/daily-detail")
+    public Result<DailyDetailResponse> getDailyDetail(
+            @RequestParam(required = false) String courseId,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+        String userId = UserContextUtil.getCurrentUserId();
+        return Result.success(userStatsService.getDailyDetail(userId, courseId, date));
     }
 
     @DeleteMapping("/me")

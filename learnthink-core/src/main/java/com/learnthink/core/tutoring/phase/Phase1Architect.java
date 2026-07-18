@@ -32,7 +32,8 @@ public class Phase1Architect {
         context = new TutoringContext(userId, requestContext.question(),
             requestContext.sessionId(), context.profileSnapshot(), context.pathPosition(),
             context.recentLearning(), context.recentTutoring(),
-            requestContext.reactState(), requestContext.clarificationResponse());
+            requestContext.reactState(), requestContext.clarificationResponse(),
+            requestContext.subMode());
 
         // Determine if new session or continuation
         if (context.sessionId() != null && !context.sessionId().isBlank()) {
@@ -50,7 +51,8 @@ public class Phase1Architect {
             context = new TutoringContext(context.userId(), context.question(), sessionId,
                 context.profileSnapshot(), context.pathPosition(),
                 context.recentLearning(), context.recentTutoring(),
-                context.reactState(), context.clarificationResponse());
+                context.reactState(), context.clarificationResponse(),
+                context.subMode());
         }
 
         // Emit started
@@ -66,7 +68,12 @@ public class Phase1Architect {
         }
 
         // Send answer-mode events
-        emitter.planMode("answer");
+        if (plan.isGuided()) {
+            // guided 模式：发送 guided 专属计划事件
+            emitter.planMode("guided");
+        } else {
+            emitter.planMode("answer");
+        }
         if (plan.questionAnalysis() != null) {
             emitter.planAnalysis(plan.questionAnalysis());
         }
@@ -80,7 +87,8 @@ public class Phase1Architect {
             emitter.planResources(plan.resourceRequirements().size());
         }
         emitter.planDone(plan.planId(), plan.teachingThesis(),
-            plan.sectionBlueprints() != null ? plan.sectionBlueprints().size() : 0,
+            plan.isGuided() ? plan.guidedSteps().size() :
+                (plan.sectionBlueprints() != null ? plan.sectionBlueprints().size() : 0),
             plan.resourceRequirements() != null ? plan.resourceRequirements().size() : 0,
             plan.diagramCount());
 

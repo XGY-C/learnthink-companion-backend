@@ -31,6 +31,19 @@ public class ActivitySubmitResponse {
     /** quiz 严重未达标时非 null */
     private AutoActionDto autoAction;
 
+    /** 逐题评判结果 */
+    private List<QuestionResult> questionResults;
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class QuestionResult {
+        private String questionId;
+        /** correct / incorrect / partial */
+        private String result;
+    }
+
     @Data
     @Builder
     @NoArgsConstructor

@@ -22,6 +22,9 @@
 
 {自适应注入：三层画像指令}
 
+### 教学模式策略
+{subModeStrategy}
+
 ## 你的任务
 
 在 ReAct 循环中完成以下判断：
@@ -128,3 +131,88 @@ Action: ask_clarification | output_plan
 - 所有 reasoning 字段使用自然语言，不要输出数字分数
 - 如果本轮是第 10 轮且仍未完成，必须输出 `output_plan`，在 reasoning 中标注"达到最大轮次，基于现有最佳理解制定计划"
 - clarification 中的 options 数量不固定，但通常 2-4 个。选项应互斥且有明确区分度
+
+## guided 模式专用输出格式
+
+当 subMode = "guided" 时，Action = output_plan 的 JSON 中：
+- **不输出 sectionBlueprints**
+- 改为输出 **guidedSteps**，每个 step 对应一个认知阶段：
+
+```json
+{
+  "planId": "uuid字符串",
+  "timestamp": "ISO8601时间戳",
+  "mode": "answer",
+  "clarificationDecision": {
+    "action": "proceed",
+    "reasoning": "为什么可以制定计划"
+  },
+  "questionAnalysis": {
+    "questionType": "conceptual|procedural|example|comparison|application",
+    "domain": "所属学科领域",
+    "subDomain": "子领域",
+    "difficulty": "beginner|intermediate|advanced",
+    "keyConcepts": ["核心概念1", "核心概念2"],
+    "prerequisiteGaps": [],
+    "realIntent": "学生的真实需求"
+  },
+  "teachingThesis": "教学核心论点",
+  "personalization": {
+    "strategy": "教学策略",
+    "depth": "深入|适中|浅显",
+    "adaptations": {}
+  },
+  "resourceRequirements": [
+    {
+      "id": "res_1",
+      "query": "检索关键词",
+      "forSection": "step_1",
+      "priority": "high|medium|low",
+      "expectedUse": "资源的用途说明"
+    }
+  ],
+  "guidedSteps": [
+    {
+      "id": "step_1",
+      "order": 1,
+      "stage": "understanding",
+      "title": "理解问题",
+      "guidanceHint": "引导学生识别题目中的已知条件和求解目标",
+      "expectedAnswer": "预期学生应给出的回答要点（用于评估，不展示给学生）",
+      "hintChain": ["第一次答错时的提示", "第二次答错时的提示"],
+      "allowRevealAnswer": true,
+      "resourceRefs": "res_1"
+    },
+    {
+      "id": "step_2",
+      "order": 2,
+      "stage": "analysis",
+      "title": "分析思路",
+      "guidanceHint": "引导学生建立解题方向",
+      "expectedAnswer": "预期答案要点",
+      "hintChain": ["提示1", "提示2"],
+      "allowRevealAnswer": true,
+      "resourceRefs": "res_1"
+    }
+  ],
+  "qualitySpec": {
+    "keyClaims": ["关键论断"],
+    "requireSourceCitation": false,
+    "forbiddenPhrases": []
+  }
+}
+```
+
+### guidedSteps 的 5 个认知阶段
+
+1. **understanding（理解问题）**：引导学生识别题目关键信息和约束
+2. **analysis（分析思路）**：引导学生建立已知→未知的桥梁
+3. **recall（知识回忆）**：激活相关知识点
+4. **execution（解题执行）**：引导学生逐步推导
+5. **verification（验证反思）**：引导学生检验答案合理性
+
+### guidedSteps 关键约束
+- guidedSteps 中**不得包含任何直接答案或完整解答**
+- expectedAnswer 是用于 AI 评估学生回答的参考，不展示给学生
+- hintChain 提供 2 条递进提示（第一次答错给提示1，第二次给提示2）
+- 通常 3-5 个步骤，按认知阶段顺序排列

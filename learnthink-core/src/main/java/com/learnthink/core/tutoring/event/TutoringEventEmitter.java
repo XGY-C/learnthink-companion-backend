@@ -7,17 +7,80 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class TutoringEventEmitter {
     private static final Logger log = LoggerFactory.getLogger(TutoringEventEmitter.class);
     private final SseEmitter emitter;
 
+    /** 收集 ReAct 思考过程，供持久化使用 */
+    private final java.util.List<java.util.Map<String, Object>> reactThoughts = new java.util.ArrayList<>();
+
+    /** 心跳调度器 */
+    private ScheduledExecutorService heartbeatScheduler;
+    private final AtomicBoolean heartbeatActive = new AtomicBoolean(false);
+
     public TutoringEventEmitter(SseEmitter emitter) {
         this.emitter = emitter;
+        startHeartbeat();
+    }
+
+    public java.util.List<java.util.Map<String, Object>> getReactThoughts() {
+        return reactThoughts;
+    }
+
+    /**
+     * Phase 5 H3: SSE 心跳 — 每 30s 发送空注释，防止代理/Nginx 断开连接。
+     */
+    private void startHeartbeat() {
+        if (heartbeatActive.get()) return;
+        heartbeatActive.set(true);
+        heartbeatScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "tutoring-sse-heartbeat");
+            t.setDaemon(true);
+            return t;
+        });
+        heartbeatScheduler.scheduleAtFixedRate(() -> {
+            try {
+                emitter.send(SseEmitter.event().comment("heartbeat"));
+            } catch (IOException e) {
+                log.debug("Tutoring SSE heartbeat failed (client disconnected)");
+                stopHeartbeat();
+            } catch (Exception e) {
+                log.debug("Tutoring SSE heartbeat error: {}", e.getMessage());
+            }
+        }, 30, 30, TimeUnit.SECONDS);
+    }
+
+    /**
+     * 在 done/error/complete 时停止心跳。
+     */
+    private void stopHeartbeat() {
+        heartbeatActive.set(false);
+        if (heartbeatScheduler != null && !heartbeatScheduler.isShutdown()) {
+            heartbeatScheduler.shutdown();
+        }
     }
 
     public void started(String sessionId) {
         send("tutoring.started", Map.of("sessionId", sessionId));
+    }
+
+    /** 发送 ReAct 思考过程（ Thought + Action ） */
+    public void reactThought(int iteration, String thought, String action) {
+        send("tutoring.react.thought", Map.of(
+            "iteration", iteration,
+            "thought", thought,
+            "action", action));
+        // 收集用于持久化
+        java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("iteration", iteration);
+        entry.put("thought", thought);
+        entry.put("action", action);
+        reactThoughts.add(entry);
     }
 
     public void planMode(String mode) {
@@ -134,11 +197,57 @@ public class TutoringEventEmitter {
         send("tutoring.section.regenerated", Map.of("sectionId", sectionId, "content", content));
     }
 
+    // ===== Guided Mode Events =====
+
+    public void guidedStepStart(String stepId, String stage, String title,
+                                int stepIndex, int totalSteps) {
+        send("tutoring.guided.step_start", Map.of(
+            "stepId", stepId, "stage", stage, "title", title,
+            "stepIndex", stepIndex, "totalSteps", totalSteps));
+    }
+
+    public void guidedGuidanceChunk(String stepId, String chunk) {
+        send("tutoring.guided.guidance_chunk", Map.of("stepId", stepId, "chunk", chunk));
+    }
+
+    public void guidedQuestion(String stepId, String question) {
+        send("tutoring.guided.question", Map.of("stepId", stepId, "question", question));
+    }
+
+    public void guidedWaitingAnswer(String stepId, int attempt, int maxAttempts, boolean allowReveal) {
+        send("tutoring.guided.waiting_answer", Map.of(
+            "stepId", stepId, "attempt", attempt,
+            "maxAttempts", maxAttempts, "allowReveal", allowReveal));
+    }
+
+    public void guidedFeedback(String stepId, String feedback, String hint,
+                               boolean allowReveal, boolean canAdvance) {
+        send("tutoring.guided.feedback", Map.of(
+            "stepId", stepId, "feedback", feedback, "hint", hint,
+            "allowReveal", allowReveal, "canAdvance", canAdvance));
+    }
+
+    public void guidedStepDone(String stepId, String evaluation, long timeSpentMs) {
+        send("tutoring.guided.step_done", Map.of(
+            "stepId", stepId, "evaluation", evaluation, "timeSpentMs", timeSpentMs));
+    }
+
+    public void guidedRevealed(String stepId, String answer, String explanation) {
+        send("tutoring.guided.revealed", Map.of(
+            "stepId", stepId, "answer", answer, "explanation", explanation));
+    }
+
+    public void guidedSummaryChunk(String chunk) {
+        send("tutoring.guided.summary", Map.of("chunk", chunk));
+    }
+
     public void done(String sessionId) {
+        stopHeartbeat();
         send("tutoring.done", Map.of("sessionId", sessionId));
     }
 
     public void error(String code, String message, String phase, boolean retryable) {
+        stopHeartbeat();
         send("tutoring.error", Map.of(
             "code", code, "message", message, "phase", phase, "retryable", retryable));
     }
@@ -152,6 +261,7 @@ public class TutoringEventEmitter {
     }
 
     public void complete() {
+        stopHeartbeat();
         try { emitter.complete(); } catch (Exception ignored) {}
     }
 

@@ -45,4 +45,13 @@ public class SceneVO {
 
     /** 场景画布背景（可选，覆盖默认） */
     private String background;
+
+    /** 交互配置（可选）--存在则场景播完后暂停，弹出选择题等待用户答题 */
+    private Map<String, Object> interactive;
+
+    /** 交互型可视化（可选）--true 表示到 duration 暂停等用户操作后点"继续" */
+    private Boolean waitForUser;
+
+    /** 交互提示文案（可选）--显示在"继续"按钮上方 */
+    private String interactHint;
 }

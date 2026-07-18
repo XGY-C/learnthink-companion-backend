@@ -29,6 +29,7 @@ public class GenerationChecklist {
     }
 
     public void markGenerating(String title) { statusMap.put(title, ItemStatus.GENERATING); }
+    public void markRendering(String title) { statusMap.put(title, ItemStatus.RENDERING); }
     public void markDone(String title) { statusMap.put(title, ItemStatus.DONE); }
     public void markFailed(String title) { statusMap.put(title, ItemStatus.FAILED); }
     public ItemStatus status(String title) { return statusMap.getOrDefault(title, ItemStatus.PENDING); }
@@ -36,7 +37,8 @@ public class GenerationChecklist {
     public int doneCount() { return count(ItemStatus.DONE); }
     public int failedCount() { return count(ItemStatus.FAILED); }
     public int generatingCount() { return count(ItemStatus.GENERATING); }
-    public int pendingCount() { return totalCount() - doneCount() - failedCount() - generatingCount(); }
+    public int renderingCount() { return count(ItemStatus.RENDERING); }
+    public int pendingCount() { return totalCount() - doneCount() - failedCount() - generatingCount() - renderingCount(); }
     public int totalCount() { return items.size(); }
 
     public double progressPercent() {
@@ -73,11 +75,19 @@ public class GenerationChecklist {
             m.put("status", status(item.title()).name().toLowerCase());
             itemList.add(m);
         }
-        return Map.of("taskId", taskId, "topic", topic,
-            "totalCount", totalCount(), "doneCount", doneCount(),
-            "failedCount", failedCount(), "pendingCount", pendingCount(),
-            "generatingCount", generatingCount(), "progressPercent", progressPercent(),
-            "items", itemList, "createdAt", createdAt.toString());
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("taskId", taskId);
+        result.put("topic", topic);
+        result.put("totalCount", totalCount());
+        result.put("doneCount", doneCount());
+        result.put("failedCount", failedCount());
+        result.put("pendingCount", pendingCount());
+        result.put("generatingCount", generatingCount());
+        result.put("renderingCount", renderingCount());
+        result.put("progressPercent", progressPercent());
+        result.put("items", itemList);
+        result.put("createdAt", createdAt.toString());
+        return result;
     }
 
     // ---- 类型定义 ----
@@ -88,7 +98,7 @@ public class GenerationChecklist {
         List<String> keyPoints, String personalizationNote, int priority
     ) {}
 
-    public enum ItemStatus { PENDING, GENERATING, DONE, FAILED }
+    public enum ItemStatus { PENDING, GENERATING, RENDERING, DONE, FAILED }
 
     public String taskId() { return taskId; }
     public String topic() { return topic; }

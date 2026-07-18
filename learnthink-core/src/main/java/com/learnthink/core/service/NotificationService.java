@@ -18,4 +18,7 @@ public interface NotificationService {
 
     /** 未读数量 */
     int getUnreadCount(String userId);
+
+    /** 删除单条通知 */
+    void deleteNotification(String notificationId, String userId);
 }

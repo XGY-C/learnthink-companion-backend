@@ -80,4 +80,13 @@ public interface ChatService {
      * @param chatId 目标会话ID
      */
     void endSession(String userId, String chatId);
+
+    /**
+     * 给消息设置反馈（like / dislike / null 取消）。
+     *
+     * @param userId    当前用户ID
+     * @param messageId 消息ID
+     * @param feedback  反馈值
+     */
+    void setFeedback(String userId, String messageId, String feedback);
 }

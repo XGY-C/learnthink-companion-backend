@@ -59,7 +59,7 @@ public class TeacherReviewController {
             m.put("contentRef", item.getContentRef());
             m.put("sourcesJson", item.getSourcesJson());
             m.put("courseId", packCourseMap.getOrDefault(item.getPackId(), courseId));
-            m.put("createdAt", item.getCreatedAt());
+            m.put("createdAt", item.getCreatedAt() != null ? item.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : null);
             return m;
         }).collect(Collectors.toList());
 

@@ -55,15 +55,14 @@ public class SectionRegenerator {
             .content();
 
         StringBuilder content = new StringBuilder();
-        stream.doOnNext(chunk -> content.append(chunk))
-            .doOnComplete(() -> {
-                emitter.sectionRegenerated(sectionId, content.toString());
-                log.info("Section {} regenerated with action {}", sectionId, action);
-            })
-            .doOnError(error -> {
-                log.error("Section regeneration failed for {}: {}", sectionId, error.getMessage());
-                emitter.error("REGENERATE_FAILED", error.getMessage(), "3", true);
-            })
-            .subscribe();
+        try {
+            stream.doOnNext(chunk -> content.append(chunk))
+                .blockLast();
+            emitter.sectionRegenerated(sectionId, content.toString());
+            log.info("Section {} regenerated with action {}", sectionId, action);
+        } catch (Exception error) {
+            log.error("Section regeneration failed for {}: {}", sectionId, error.getMessage());
+            emitter.error("REGENERATE_FAILED", error.getMessage(), "3", true);
+        }
     }
 }

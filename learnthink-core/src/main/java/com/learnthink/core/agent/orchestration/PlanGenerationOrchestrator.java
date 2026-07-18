@@ -1162,6 +1162,7 @@ public class PlanGenerationOrchestrator {
                 plan.setCurrentVersion(newVersion);
                 plan.setPlanJson(finalPlanJson);
                 plan.setStatus(status);
+                plan.setLockMode("sequential");
                 if (chatId != null) plan.setChatId(chatId);
                 plan.setCreatedAt(LocalDateTime.now());
                 plan.setUpdatedAt(LocalDateTime.now());

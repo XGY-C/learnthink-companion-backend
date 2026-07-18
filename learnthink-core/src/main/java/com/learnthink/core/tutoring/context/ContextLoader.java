@@ -28,7 +28,7 @@ public class ContextLoader {
         List<Map<String, Object>> recentTutoring = loadRecentTutoring(userId);
 
         return new TutoringContext(userId, null, null, profileSnapshot, pathPosition,
-            recentLearning, recentTutoring, null, null);
+            recentLearning, recentTutoring, null, null, null);
     }
 
     private Map<String, Object> loadProfileSnapshot(String userId) {

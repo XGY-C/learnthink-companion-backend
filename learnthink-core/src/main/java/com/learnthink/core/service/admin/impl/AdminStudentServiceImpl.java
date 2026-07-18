@@ -75,14 +75,15 @@ public class AdminStudentServiceImpl implements AdminStudentService {
         }
 
         // 批量获取最后活动时间（单次查询，内存分组）
-        Map<String, LocalDateTime> lastActiveMap = new HashMap<>();
+        Map<String, String> lastActiveMap = new HashMap<>();
         if (!userIds.isEmpty()) {
             List<LearningEvent> recentEvents = learningEventMapper.selectList(
                 new LambdaQueryWrapper<LearningEvent>()
                     .in(LearningEvent::getUserId, userIds)
                     .orderByDesc(LearningEvent::getCreatedAt));
             for (LearningEvent e : recentEvents) {
-                lastActiveMap.putIfAbsent(e.getUserId(), e.getCreatedAt());
+                lastActiveMap.putIfAbsent(e.getUserId(), e.getCreatedAt() != null
+                    ? e.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : null);
             }
         }
 
@@ -98,9 +99,8 @@ public class AdminStudentServiceImpl implements AdminStudentService {
             .status(u.getStatus() != null ? u.getStatus() : "enabled")
             .courseCount(courseCountMap.getOrDefault(u.getId(), 0))
             .totalLearningMinutes(learningMinutesMap.getOrDefault(u.getId(), 0))
-            .lastActiveAt(lastActiveMap.containsKey(u.getId())
-                ? lastActiveMap.get(u.getId()).toString() : null)
-            .createdAt(u.getCreatedAt() != null ? u.getCreatedAt().toString() : null)
+            .lastActiveAt(lastActiveMap.get(u.getId()))
+            .createdAt(u.getCreatedAt() != null ? u.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : null)
             .build()).collect(Collectors.toList());
     }
 
