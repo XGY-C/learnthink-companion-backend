@@ -86,6 +86,7 @@ public class TaskPersistenceService {
         }
         // 初始化任务状态为待处理，进度为 0
         task.setPercent(0);
+        task.setCreatedAt(LocalDateTime.now());
         // 持久化任务记录到数据库
         taskMapper.insert(task);
         log.info("任务已创建：id={} type={}", task.getId(), taskType);
@@ -337,6 +338,7 @@ public class TaskPersistenceService {
 
     @Transactional
     public String saveResourceItem(String itemId, String packId, String taskId,
+                                    String userId, String courseId,
                                     String type, String title, String content,
                                     String mimeType, String confidence,
                                     List<Map<String, Object>> sources,
@@ -344,7 +346,10 @@ public class TaskPersistenceService {
                                     int subTopicIndex) {
         ResourceItem item = new ResourceItem();
         item.setId(itemId);
+        item.setUserId(userId);
+        item.setCourseId(courseId);
         item.setPackId(packId);
+        item.setFolderId(null);
         item.setTaskId(taskId);
         item.setType(type);
         item.setTitle(title);

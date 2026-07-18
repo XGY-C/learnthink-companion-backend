@@ -52,7 +52,7 @@ public record PlannerOutput(
 
     /** 单个资源项：类型 + 侧重点 */
     public record ResourceItem(
-        /** 资源类型：doc | quiz | mindmap | video | code | reading */
+        /** 资源类型：doc | quiz | mindmap | video | code | reading | html */
         String type,
         /** 该资源的侧重点/子主题 */
         String focus
@@ -172,7 +172,7 @@ public record PlannerOutput(
             null,
             null,
             null,
-            new ReplyPlan("direct_answer", List.of(), "neutral", false)
+            new ReplyPlan("chat", List.of(), "neutral", false)
         );
     }
 

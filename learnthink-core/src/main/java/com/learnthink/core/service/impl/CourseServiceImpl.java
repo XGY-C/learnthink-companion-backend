@@ -158,7 +158,7 @@ public class CourseServiceImpl implements CourseService {
         detail.put("emoji", course.getEmoji() != null ? course.getEmoji() : "📚");
         detail.put("enrolledCount", enrolledCount);
         detail.put("isEnrolled", userEnrolled > 0);
-        detail.put("createdAt", course.getCreatedAt());
+        detail.put("createdAt", course.getCreatedAt() != null ? course.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : null);
 
         return detail;
     }

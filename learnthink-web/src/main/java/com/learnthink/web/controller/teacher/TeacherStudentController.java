@@ -70,7 +70,7 @@ public class TeacherStudentController {
                             .orderByDesc(LearningEvent::getCreatedAt));
             for (LearningEvent e : recentEvents) {
                 lastActiveMap.putIfAbsent(e.getUserId(),
-                        e.getCreatedAt() != null ? e.getCreatedAt().toString() : null);
+                        e.getCreatedAt() != null ? e.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : null);
             }
         }
 
@@ -153,7 +153,7 @@ public class TeacherStudentController {
             m.put("learningProfileMd", v.getLearningProfileMd());
             m.put("knowledgeProfileMd", v.getKnowledgeProfileMd());
             m.put("displayJson", v.getDisplayJson());
-            m.put("createdAt", v.getCreatedAt());
+            m.put("createdAt", v.getCreatedAt() != null ? v.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : null);
             return m;
         }).collect(Collectors.toList());
         return Result.success(result);

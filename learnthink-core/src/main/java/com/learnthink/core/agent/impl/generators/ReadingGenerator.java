@@ -4,6 +4,7 @@ import com.learnthink.core.agent.impl.AutonomousGenerator;
 import com.learnthink.core.agent.impl.RagTool;
 import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.agent.tools.visual.VisualCodeExtractor;
 import com.learnthink.core.config.PromptLoader;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -31,7 +32,7 @@ public class ReadingGenerator extends AutonomousGenerator implements TypeGenerat
     }
 
     @Override public String type() { return "reading"; }
-    @Override public boolean requiresSourceCoverage() { return false; }
+    @Override public boolean requiresSourceCoverage() { return true; }
 
     @Override
     public ResourceGenerationState.GeneratedContent generate(
@@ -42,14 +43,21 @@ public class ReadingGenerator extends AutonomousGenerator implements TypeGenerat
 
         GenerationTask task = new GenerationTask("ReadingGenerator", "reading", item.title(), item.title(),
             item.keyPoints(), item.difficulty(), item.personalizationNote(),
-            profile != null ? profile.style() : List.of(), List.of(),
+            profile != null ? profile.style() : List.of(),
+            profile != null ? profile.weakTop() : List.of(),
             reviewFeedback, typeSources);
 
         GenerationResult result = runAutonomousLoop(task, ctx);
         if (result.content() == null) throw new RuntimeException("Reading generation failed");
 
-        return new ResourceGenerationState.GeneratedContent(item.title(), result.content(),
-            "text/markdown", result.sources(), "medium",
+        String cleaned = VisualCodeExtractor.unfoldInlineSvg(result.content())
+            .replaceAll("\\[source:\\s*[^\\]]+\\]", "");
+        if (forceLowConfidence && result.confidence() < 0.6) {
+            cleaned = "> ⚠️ 注意：本文基于有限的参考资料生成，部分内容可能不够全面。\n\n" + cleaned;
+        }
+        return new ResourceGenerationState.GeneratedContent(item.title(), cleaned,
+            "text/markdown", result.sources(),
+            result.confidence() >= 0.8 ? "high" : result.confidence() >= 0.5 ? "medium" : "low",
             Map.of("generator", "ReadingGenerator", "autonomous", true, "confidence", result.confidence()));
     }
 
@@ -61,11 +69,12 @@ public class ReadingGenerator extends AutonomousGenerator implements TypeGenerat
             boolean forceLowConfidence, String reviewFeedback,
             ResourceGenerationState.GeneratedContent original, AgentContext ctx) {
         String sp = getGenPrompt(item, profile) + "\n\n## 修改\n" + reviewFeedback;
-        String um = "需修改：\n" + (original.content() != null ? original.content().substring(0, Math.min(2000, original.content().length())) : "");
+        String um = "需修改：\n" + (original.content() != null ? original.content() : "");
         String content = chatClient.prompt().messages(new SystemMessage(sp), new UserMessage(um)).call().content();
         log.info("[AI-RESPONSE][ReadingGenerator] revise length={} chars\n{}",
             content != null ? content.length() : 0,
             content != null ? content.substring(0, Math.min(2000, content.length())) : "null");
+        content = VisualCodeExtractor.unfoldInlineSvg(content);
         return new ResourceGenerationState.GeneratedContent(item.title(), content, "text/markdown", typeSources,
             "medium", Map.of("generator", "ReadingGenerator", "revised", true));
     }
@@ -87,10 +96,10 @@ public class ReadingGenerator extends AutonomousGenerator implements TypeGenerat
     }
     private ToolCallback buildRagCallback(AgentContext ctx) {
         if (ragTool == null) return null;
-        return new com.learnthink.core.agent.impl.RagToolCallback(ragTool, ctx.courseId(), null, null);
+        return new com.learnthink.core.agent.tools.callbacks.DelegatingToolCallback(ragTool, java.util.Map.of("course_id", ctx.courseId()));
     }
     @Override protected String getSelfReviewSystemPrompt(String t) { return promptLoader.get("agent/self_review_reading"); }
-    @Override protected boolean shouldRetrieveMore(GenerationTask t, List<ResourceGenerationState.SourceItem> s) { return false; }
+    @Override protected boolean shouldRetrieveMore(GenerationTask t, List<ResourceGenerationState.SourceItem> s) { return s.size() < 3; }
     @Override protected String getGenerationSystemPrompt(GenerationTask task, List<ResourceGenerationState.SourceItem> sources) {
         return getGenPrompt(task);
     }

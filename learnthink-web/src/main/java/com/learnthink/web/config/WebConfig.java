@@ -19,7 +19,7 @@ public class WebConfig implements WebMvcConfigurer {
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/**")
                 .allowedOriginPatterns("*")
-                .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
+                .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
                 .allowedHeaders("*")
                 .allowCredentials(true)
                 .maxAge(3600);
@@ -29,7 +29,7 @@ public class WebConfig implements WebMvcConfigurer {
     public void addInterceptors(InterceptorRegistry registry) {
         // 注册认证拦截器，排除公开接口
         registry.addInterceptor(authInterceptor)
-                .addPathPatterns("/chat/**", "/tasks/**", "/test/**", "/example/**", "/user/**", "/resource-packs/**", "/resources/**", "/courses/**", "/admin/**", "/teacher/**")
-                .excludePathPatterns("/auth/**", "/chat/*/send/stream", "/tasks/*/events");
+                .addPathPatterns("/chat/**", "/tasks/**", "/test/**", "/example/**", "/user/**", "/resource-packs/**", "/resources/**", "/courses/**", "/admin/**", "/teacher/**", "/forum/**", "/notes/**", "/notebooks/**", "/notifications/**")
+                .excludePathPatterns("/auth/**", "/chat/*/send/stream", "/tasks/*/events", "/notifications/sse");
     }
 }

@@ -2,6 +2,7 @@ package com.learnthink.web.rag;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -17,6 +18,7 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class RagIngestService {
 
+    @Qualifier("ragRestTemplate")
     private final RestTemplate ragRestTemplate;
 
     /**

@@ -2,8 +2,10 @@ package com.learnthink.web.controller;
 
 import com.learnthink.common.dto.chat.*;
 import com.learnthink.common.result.Result;
+import com.learnthink.common.util.AliOSSUtil;
 import com.learnthink.common.util.UserContextUtil;
 import com.learnthink.core.service.ChatService;
+import com.learnthink.core.service.FileParserService;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -11,6 +13,7 @@ import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
@@ -24,6 +27,41 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class ChatController {
 
     private final ChatService chatService;
+    private final FileParserService fileParserService;
+    private final AliOSSUtil aliOSSUtil;
+
+    /**
+     * 上传文件到聊天会话，解析文本内容供 AI 上下文使用。
+     * 支持：txt/md/csv/json/xml/yaml/log/code/html 等纯文本格式，
+     * 以及图片（骨架，暂不解析内容）。
+     */
+    @PostMapping("/upload")
+    public Result<ChatUploadResponse> uploadFile(@RequestParam("file") MultipartFile file) {
+        String userId = UserContextUtil.getCurrentUserId();
+        if (file.isEmpty()) {
+            return Result.error(400, "上传文件为空");
+        }
+
+        FileParserService.ParseResult parseResult = fileParserService.parse(file);
+        String ossUrl = null;
+
+        try {
+            ossUrl = aliOSSUtil.upload(file, "chat/" + userId + "/files/");
+        } catch (IOException e) {
+            log.error("OSS upload failed", e);
+            return Result.error(500, "文件上传失败");
+        }
+
+        ChatUploadResponse resp = new ChatUploadResponse(
+            ossUrl,
+            file.getOriginalFilename(),
+            parseResult.fileSize(),
+            parseResult.contentType(),
+            parseResult.isSuccess() ? parseResult.parsedText() : parseResult.errorMessage(),
+            parseResult.isImage()
+        );
+        return Result.success(resp);
+    }
 
     /**
      * 开始或恢复课程的画像构建对话会话。
@@ -135,6 +173,20 @@ public class ChatController {
         log.info("End session: userId={}, chatId={}", userId, chatId);
         chatService.endSession(userId, chatId);
         return Result.success(null, "会话已结束，画像更新已触发");
+    }
+
+    /**
+     * 给消息添加反馈（like / dislike）。
+     * PATCH /chat/messages/{messageId}/feedback
+     */
+    @PatchMapping("/messages/{messageId}/feedback")
+    public Result<Void> setFeedback(
+        @PathVariable String messageId,
+        @RequestBody FeedbackRequest request
+    ) {
+        String userId = UserContextUtil.getCurrentUserId();
+        chatService.setFeedback(userId, messageId, request.getFeedback());
+        return Result.success();
     }
 
     private void sendSse(SseEmitter emitter, SseEvent event) {

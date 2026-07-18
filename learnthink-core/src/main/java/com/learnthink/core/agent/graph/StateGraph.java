@@ -2,6 +2,7 @@ package com.learnthink.core.agent.graph;
 
 import java.util.*;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * 用于多智能体编排的通用状态图。
@@ -15,6 +16,7 @@ public class StateGraph<S> {
     private final Map<String, List<GraphEdge<S>>> edges = new HashMap<>();
     private String entryPoint;
     private int maxCycles = 3;
+    private Predicate<S> failureDetector;
 
     public StateGraph<S> addNode(String name, Function<S, S> processor) {
         return addNode(name, processor, null);
@@ -56,6 +58,17 @@ public class StateGraph<S> {
         return this;
     }
 
+    /**
+     * 设置失败检测器。每个节点执行完毕后，GraphRunner 会调用此谓词，
+     * 若返回 true 则立即终止图执行（软失败机制）。
+     * <p>节点处理器通过设置状态字段（如 {@code status="FAILED"}）来触发，
+     * 而无需抛异常。</p>
+     */
+    public StateGraph<S> setFailureDetector(Predicate<S> detector) {
+        this.failureDetector = detector;
+        return this;
+    }
+
     public GraphRunner<S> compile() {
         if (entryPoint == null) {
             throw new IllegalStateException("Entry point must be set before compiling");
@@ -69,6 +82,7 @@ public class StateGraph<S> {
     Map<String, List<GraphEdge<S>>> getEdges() { return edges; }
     String getEntryPoint() { return entryPoint; }
     int getMaxCycles() { return maxCycles; }
+    Predicate<S> getFailureDetector() { return failureDetector; }
 
     /**
      * 流畅图构建的 Builder 风格入口。

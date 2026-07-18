@@ -48,5 +48,10 @@ public class QuizAttempt {
 
     private Integer durationSeconds;
 
+    /**
+     * AI 智能评估分析文本（做题专用维度）
+     */
+    private String evaluation;
+
     private LocalDateTime createdAt;
 }

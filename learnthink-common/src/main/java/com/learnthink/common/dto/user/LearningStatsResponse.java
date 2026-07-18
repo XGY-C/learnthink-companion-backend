@@ -15,6 +15,7 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 public class LearningStatsResponse {
+    private int todayMinutes;
     private int totalHours;
     private int weekHours;
     private int resourcePackCount;
@@ -32,6 +33,9 @@ public class LearningStatsResponse {
 
     /** 画像版本历史 */
     private List<ProfileHistoryEntry> profileHistory;
+
+    /** 最近学习动态（对话/练习/阅读，按时间倒序） */
+    private List<RecentActivityEntry> recentActivities;
 
     @Data
     @Builder
@@ -60,5 +64,16 @@ public class LearningStatsResponse {
         private String createdAt;
         private String trigger;
         private List<String> summary;
+    }
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class RecentActivityEntry {
+        private String type;       // chat | practice | reading
+        private String label;      // 主文案
+        private String detail;     // 副信息（可为空）
+        private String time;       // ISO-8601 时间，前端格式化为相对时间
     }
 }

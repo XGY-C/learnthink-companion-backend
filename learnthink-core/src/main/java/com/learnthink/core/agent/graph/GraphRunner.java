@@ -98,6 +98,12 @@ public class GraphRunner<S> {
                 throw new GraphException(currentNode, e.getMessage(), e);
             }
 
+            // 软失败检测：节点处理器通过设置状态字段标记失败，无需抛异常
+            if (graph.getFailureDetector() != null && graph.getFailureDetector().test(state)) {
+                log.warn("State marked as failed after node '{}' - stopping graph execution", currentNode);
+                break;
+            }
+
             // 确定下一个节点
             String nextNode = resolveNextNode(currentNode, state);
             if (nextNode != null) {

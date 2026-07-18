@@ -21,6 +21,7 @@ public class PlanResponse {
     private Integer profileVersion;
     private String courseId;
     private String status;
+    private String lockMode;
     private String createdAt;
 
     private List<ModuleDto> modules;

@@ -82,14 +82,17 @@ public class VideoRenderPoller {
                 String videoUrl = extractVideoUrl(body);
                 if (videoUrl != null) {
                     updateResourceItemVideoUrl(resourceItemId, videoUrl);
+                    broadcastVideoReady(resourceItemId, taskId);
                     log.info("视频URL已更新到数据库: resourceItemId={}, videoUrl={}", resourceItemId, videoUrl);
                 } else {
                     log.warn("任务完成但未找到videoUrl: manimTaskId={}", manimTaskId);
                     updateResourceItemFailed(resourceItemId);
+                    broadcastVideoFailed(resourceItemId, taskId);
                 }
             } else if ("FAILED".equals(status)) {
                 log.warn("视频渲染失败: manimTaskId={}, resourceItemId={}", manimTaskId, resourceItemId);
                 updateResourceItemFailed(resourceItemId);
+                broadcastVideoFailed(resourceItemId, taskId);
             } else {
                 scheduleRetry(manimTaskId, resourceItemId, taskId, attempt);
             }
@@ -204,5 +207,29 @@ public class VideoRenderPoller {
         item.setStatus(status);
         item.setUpdatedAt(LocalDateTime.now());
         resourceItemMapper.updateById(item);
+    }
+
+    private void broadcastVideoReady(String resourceItemId, String taskId) {
+        try {
+            ResourceItem item = resourceItemMapper.selectById(resourceItemId);
+            if (item != null && eventBroadcaster != null) {
+                eventBroadcaster.broadcastEvent(taskId, "checklist.video.ready",
+                    Map.of("type", "video", "title", item.getTitle() != null ? item.getTitle() : "视频资源"));
+            }
+        } catch (Exception e) {
+            log.warn("广播视频就绪事件失败: {}", e.getMessage());
+        }
+    }
+
+    private void broadcastVideoFailed(String resourceItemId, String taskId) {
+        try {
+            ResourceItem item = resourceItemMapper.selectById(resourceItemId);
+            if (item != null && eventBroadcaster != null) {
+                eventBroadcaster.broadcastEvent(taskId, "checklist.video.failed",
+                    Map.of("type", "video", "title", item.getTitle() != null ? item.getTitle() : "视频资源"));
+            }
+        } catch (Exception e) {
+            log.warn("广播视频失败事件失败: {}", e.getMessage());
+        }
     }
 }

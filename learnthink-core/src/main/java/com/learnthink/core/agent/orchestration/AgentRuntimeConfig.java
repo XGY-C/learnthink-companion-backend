@@ -5,7 +5,17 @@ import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.impl.*;
 import com.learnthink.core.agent.impl.generators.*;
 import com.learnthink.core.agent.manager.AgentManager;
+import com.learnthink.core.agent.tools.visual.SmartSvgTool;
+import com.learnthink.core.agent.tools.visual.GenerateSvgChartTool;
+import com.learnthink.core.agent.tools.visual.GenerateChartTool;
+import com.learnthink.core.agent.tools.visual.GenerateMermaidTool;
+import com.learnthink.core.agent.tools.visual.GenerateHtmlTool;
+import com.learnthink.core.agent.tools.visual.GenerateVisualizationTool;
+import com.learnthink.core.agent.tools.visual.GenerateThreeJsTool;
+import com.learnthink.core.agent.tools.visual.GenerateMindmapTool;
+import com.learnthink.common.util.AliOSSUtil;
 import com.learnthink.core.config.LearnThinkProperties;
+import com.learnthink.core.config.PromptLoader;
 import com.learnthink.core.repository.BookInfoMapper;
 import com.learnthink.core.repository.KnowledgeDocumentMapper;
 import com.learnthink.core.service.PushService;
@@ -47,9 +57,13 @@ public class AgentRuntimeConfig {
             @Qualifier("sparkRestTemplate") RestTemplate sparkRestTemplate,
             LearnThinkProperties props) {
         var spark = props.getSpark();
+        var qwen = props.getQwenImage();
         return new ImageGenerationTool(
-            sparkRestTemplate, spark.getAppId(), spark.getApiKey(),
-            spark.getApiSecret(), spark.getDomain(), spark.getBaseUrl());
+            sparkRestTemplate, props.getImageProvider(),
+            spark.getAppId(), spark.getApiKey(), spark.getApiSecret(),
+            spark.getDomain(), spark.getBaseUrl(),
+            qwen.getApiKey(), qwen.getModel(), qwen.getBaseUrl(),
+            qwen.isPromptExtend(), qwen.isWatermark());
     }
 
     @Bean
@@ -58,17 +72,85 @@ public class AgentRuntimeConfig {
         return new SvgGenerationTool(builder);
     }
 
+    // ── Smart v2 可视化工具（三阶段流水线）──
+
+    @Bean
+    public SmartSvgTool smartSvgTool(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder builder) {
+        return new SmartSvgTool(builder);
+    }
+
+    @Bean
+    public GenerateChartTool generateChartTool(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder builder) {
+        return new GenerateChartTool(builder);
+    }
+
+    @Bean
+    public GenerateMermaidTool generateMermaidTool(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder builder) {
+        return new GenerateMermaidTool(builder);
+    }
+
+    @Bean
+    public GenerateSvgChartTool generateSvgChartTool(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder builder) {
+        return new GenerateSvgChartTool(builder);
+    }
+
+    @Bean
+    public GenerateHtmlTool generateHtmlTool(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder builder) {
+        return new GenerateHtmlTool(builder);
+    }
+
+    @Bean
+    public GenerateVisualizationTool generateVisualizationTool(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder builder) {
+        return new GenerateVisualizationTool(builder);
+    }
+
+    @Bean
+    public GenerateThreeJsTool generateThreeJsTool(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder builder,
+            PromptLoader promptLoader) {
+        return new GenerateThreeJsTool(builder, promptLoader);
+    }
+
+    @Bean
+    public GenerateMindmapTool generateMindmapTool(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder builder) {
+        return new GenerateMindmapTool(builder);
+    }
+
     @Bean
     public AgentManager agentManager(
             DocumentGenerator docGen, ExerciseGenerator quizGen,
-            ReadingGenerator readGen, CodeGenerator codeGen, MindmapGenerator mapGen) {
+            ReadingGenerator readGen, CodeGenerator codeGen, MindmapGenerator mapGen,
+            HtmlDocumentGenerator htmlGen) {
         AgentManager mgr = new AgentManager();
         mgr.register("doc", docGen, 3);
         mgr.register("quiz", quizGen, 2);
         mgr.register("reading", readGen, 2);
         mgr.register("code", codeGen, 2);
         mgr.register("mindmap", mapGen, 2);
+        mgr.register("html", htmlGen, 2);
         return mgr;
+    }
+
+    @Bean
+    public IllustrationService illustrationService(
+            @Qualifier("generationChatClientBuilder") ChatClient.Builder builder,
+            SmartSvgTool smartSvgTool,
+            GenerateSvgChartTool generateSvgChartTool,
+            GenerateMermaidTool generateMermaidTool,
+            ImageGenerationTool imageGenerationTool,
+            AliOSSUtil aliOSSUtil,
+            PromptLoader promptLoader) {
+        return new IllustrationService(
+            builder.build(),
+            smartSvgTool, generateSvgChartTool, generateMermaidTool,
+            imageGenerationTool, aliOSSUtil, promptLoader);
     }
 
     @Bean
@@ -107,11 +189,12 @@ public class AgentRuntimeConfig {
         TaskPersistenceService persistenceService,
         AgentManager agentManager,
         VideoRenderPoller videoRenderPoller,
+        IllustrationService illustrationService,
         PushService pushService) {
 
         return new ResourceGenerationGraph(
             profileAnalyzer, evidenceRetriever, curriculumPlanner,
             resourceGenerator, contentReviewer, publisher, persistenceService,
-            agentManager, videoRenderPoller, pushService);
+            agentManager, videoRenderPoller, illustrationService, pushService);
     }
 }

@@ -82,7 +82,7 @@ public class ReActLoop {
                 List<Message> messages = promptBuilder.buildMessages(
                     new TutoringContext(context.userId(), accumulatedQuestion, context.sessionId(),
                         context.profileSnapshot(), context.pathPosition(),
-                        context.recentLearning(), context.recentTutoring(), currentState, null),
+                        context.recentLearning(), context.recentTutoring(), currentState, null, context.subMode()),
                     null);
 
                 // Streaming call with accumulated text
@@ -101,6 +101,9 @@ public class ReActLoop {
 
                 log.info("ReAct iteration {}: action={}, thought={}",
                     iteration, turn.action(), turn.thought().substring(0, Math.min(80, turn.thought().length())));
+
+                // 通过 SSE 发送思考过程给前端
+                emitter.reactThought(iteration, turn.thought(), turn.action());
 
                 // Save architect entry to history
                 Map<String, Object> architectEntry = new HashMap<>();

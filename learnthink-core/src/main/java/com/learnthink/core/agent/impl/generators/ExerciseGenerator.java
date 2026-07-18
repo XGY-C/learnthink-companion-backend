@@ -62,7 +62,7 @@ public class ExerciseGenerator extends AutonomousGenerator implements TypeGenera
             boolean forceLowConfidence, String reviewFeedback,
             ResourceGenerationState.GeneratedContent original, AgentContext ctx) {
         String sp = getGenPrompt(item, profile) + "\n\n## 修改要求\n" + reviewFeedback;
-        String um = "需修改的题目：\n" + (original.content() != null ? original.content().substring(0, Math.min(2000, original.content().length())) : "");
+        String um = "需修改的题目：\n" + (original.content() != null ? original.content() : "");
         String content = chatClient.prompt().messages(new SystemMessage(sp), new UserMessage(um)).call().content();
         log.info("[AI-RESPONSE][ExerciseGenerator] revise length={} chars\n{}",
             content != null ? content.length() : 0,
@@ -90,7 +90,7 @@ public class ExerciseGenerator extends AutonomousGenerator implements TypeGenera
 
     private ToolCallback buildRagCallback(AgentContext ctx) {
         if (ragTool == null) return null;
-        return new com.learnthink.core.agent.impl.RagToolCallback(ragTool, ctx.courseId(), null, null);
+        return new com.learnthink.core.agent.tools.callbacks.DelegatingToolCallback(ragTool, java.util.Map.of("course_id", ctx.courseId()));
     }
 
     @Override protected String getSelfReviewSystemPrompt(String t) { return promptLoader.get("agent/self_review_quiz"); }

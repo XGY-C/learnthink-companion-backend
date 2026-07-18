@@ -20,6 +20,8 @@ import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -75,9 +77,9 @@ public class TaskController {
             item.put("stage", task.getStage());
             item.put("percent", task.getPercent());
             item.put("errorMessage", task.getErrorMessage());
-            item.put("createdAt", task.getCreatedAt() != null ? task.getCreatedAt().toString() : null);
-            item.put("startedAt", task.getStartedAt() != null ? task.getStartedAt().toString() : null);
-            item.put("finishedAt", task.getFinishedAt() != null ? task.getFinishedAt().toString() : null);
+            item.put("createdAt", formatTaskTime(task.getCreatedAt(), task.getStartedAt()));
+            item.put("startedAt", task.getStartedAt() != null ? task.getStartedAt().atZone(ZoneId.systemDefault()).toInstant().toString() : null);
+            item.put("finishedAt", task.getFinishedAt() != null ? task.getFinishedAt().atZone(ZoneId.systemDefault()).toInstant().toString() : null);
 
             // 从 requestedResourceTypes JSON 中解析资源类型
             List<String> resourceTypes = parseResourceTypes(task.getRequestedResourceTypes());
@@ -123,6 +125,12 @@ public class TaskController {
         return Result.success(result);
     }
 
+    private String formatTaskTime(LocalDateTime createdAt, LocalDateTime startedAt) {
+        LocalDateTime t = createdAt != null ? createdAt : startedAt;
+        if (t == null) return null;
+        return t.atZone(ZoneId.systemDefault()).toInstant().toString();
+    }
+
     private List<String> parseResourceTypes(String json) {
         if (json == null || json.isBlank()) return List.of();
         try {
@@ -163,9 +171,10 @@ public class TaskController {
         result.put("stage", task.getStage() != null ? task.getStage() : "");
         result.put("percent", task.getPercent() != null ? task.getPercent() : 0);
         result.put("topic", task.getTopic() != null ? task.getTopic() : "");
-        result.put("created_at", task.getCreatedAt() != null ? task.getCreatedAt().toString() : "");
-        result.put("started_at", task.getStartedAt() != null ? task.getStartedAt().toString() : "");
-        result.put("finished_at", task.getFinishedAt() != null ? task.getFinishedAt().toString() : "");
+        String createdAtStr = formatTaskTime(task.getCreatedAt(), task.getStartedAt());
+        result.put("created_at", createdAtStr != null ? createdAtStr : "");
+        result.put("started_at", task.getStartedAt() != null ? task.getStartedAt().atZone(ZoneId.systemDefault()).toInstant().toString() : "");
+        result.put("finished_at", task.getFinishedAt() != null ? task.getFinishedAt().atZone(ZoneId.systemDefault()).toInstant().toString() : "");
         result.put("error_code", task.getErrorCode());
         result.put("error_message", task.getErrorMessage());
 

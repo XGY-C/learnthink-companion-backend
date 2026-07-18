@@ -4,6 +4,8 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
+
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -28,4 +30,6 @@ public class ChatSendRequest {
      * <p>用于确认消息（如"确认生成xxx"），此时生成任务已在客户端启动。</p>
      */
     private Boolean skipGenerationIntent;
+    /** 上传的文件附件列表 */
+    private List<ChatFileAttachment> files;
 }

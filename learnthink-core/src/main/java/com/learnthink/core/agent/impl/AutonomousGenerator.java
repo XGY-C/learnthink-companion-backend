@@ -3,11 +3,13 @@ package com.learnthink.core.agent.impl;
 import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.runtime.AgentResult;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.agent.orchestration.SseAgentObservation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.tool.ToolCallback;
 
 import java.util.ArrayList;
@@ -33,7 +35,7 @@ public abstract class AutonomousGenerator {
     protected static final Logger log = LoggerFactory.getLogger(AutonomousGenerator.class);
 
     protected static final int MAX_ITERATIONS = 3;
-    protected static final long MAX_TIME_MS = 120_000;
+    protected static final long MAX_TIME_MS = 180_000;
 
     protected final ChatClient chatClient;
     protected final List<ToolCallback> tools;
@@ -56,6 +58,10 @@ public abstract class AutonomousGenerator {
         int iteration = 0;
         GenerationResult bestResult = null;
         String agentName = task.agentName();
+
+        setPipelineStageIfPossible(ctx, "GENERATING");
+        setTaskDescIfPossible(ctx, String.format("生成%s「%s」，难度=%s，证据=%d条",
+            task.type(), task.title(), task.difficulty(), task.preSources().size()));
 
         // 阶段1：研究（自主 RAG 检索）
         List<ResourceGenerationState.SourceItem> allSources = new ArrayList<>(task.preSources());
@@ -87,6 +93,12 @@ public abstract class AutonomousGenerator {
                 break;
             }
             iteration++;
+
+            setTaskDescIfPossible(ctx, String.format("生成%s「%s」迭代 %d/%d%s",
+                task.type(), task.title(), iteration, MAX_ITERATIONS,
+                reviewFeedback != null ? " (修订中)" : ""));
+            ctx.observation().onThink(agentName,
+                "开始第 " + iteration + " 轮" + (reviewFeedback != null ? "修订" : "生成"));
 
             ctx.observation().onDecision(agentName, "ITERATION",
                 "迭代 " + iteration + "/" + MAX_ITERATIONS
@@ -293,7 +305,7 @@ public abstract class AutonomousGenerator {
             Output JSON: {"satisfied": true/false, "confidence": 0.0-1.0, "feedback": "specific issues"}
             """,
             task.type(), task.title(), task.topic(),
-            content.length() > 3000 ? content.substring(0, 3000) + "..." : content,
+            content,
             formatSourcesBrief(sources));
     }
 
@@ -383,6 +395,61 @@ public abstract class AutonomousGenerator {
                 s.chapterTitle() != null ? " " + s.chapterTitle() : "",
                 s.quote() != null ? s.quote().substring(0, Math.min(100, s.quote().length())) : ""))
             .reduce("", (a, b) -> a + b + "\n");
+    }
+
+    // ---- LLM 调用封装（捕获 reasoning_content） ----
+
+    /**
+     * 调用 LLM 生成内容，并捕获 DeepSeek reasoning_content 作为思考链事件（无工具回调）。
+     */
+    protected String callLlm(String sysPrompt, String userMsg, String agentName, AgentContext ctx) {
+        ChatResponse response = chatClient.prompt()
+            .messages(new SystemMessage(sysPrompt), new UserMessage(userMsg))
+            .call()
+            .chatResponse();
+        extractAndEmitReasoning(response, agentName, ctx);
+        return response.getResult().getOutput().getText();
+    }
+
+    /**
+     * 调用 LLM 生成内容，并捕获 DeepSeek reasoning_content 作为思考链事件（带工具回调）。
+     */
+    protected String callLlm(String sysPrompt, String userMsg, String agentName,
+                              AgentContext ctx, ToolCallback... toolCallbacks) {
+        var prompt = chatClient.prompt()
+            .messages(new SystemMessage(sysPrompt), new UserMessage(userMsg));
+        if (toolCallbacks != null && toolCallbacks.length > 0) {
+            prompt = prompt.toolCallbacks(toolCallbacks);
+        }
+        ChatResponse response = prompt.call().chatResponse();
+        extractAndEmitReasoning(response, agentName, ctx);
+        return response.getResult().getOutput().getText();
+    }
+
+    private void extractAndEmitReasoning(ChatResponse response, String agentName, AgentContext ctx) {
+        if (response.getMetadata() == null) return;
+        Object rc = response.getMetadata().get("reasoning_content");
+        if (rc instanceof String s && !s.isBlank()) {
+            ctx.observation().onThink(agentName, summarizeReasoning(s));
+        }
+    }
+
+    private String summarizeReasoning(String reasoning) {
+        if (reasoning.length() <= 500) return reasoning;
+        return reasoning.substring(0, 200) + "\n...\n"
+            + reasoning.substring(reasoning.length() - 200);
+    }
+
+    private void setPipelineStageIfPossible(AgentContext ctx, String stage) {
+        if (ctx.observation() instanceof SseAgentObservation sseObs) {
+            sseObs.setPipelineStage(stage);
+        }
+    }
+
+    private void setTaskDescIfPossible(AgentContext ctx, String desc) {
+        if (ctx.observation() instanceof SseAgentObservation sseObs) {
+            sseObs.setCurrentTaskDesc(desc);
+        }
     }
 
     // ---- 内部类型 ----

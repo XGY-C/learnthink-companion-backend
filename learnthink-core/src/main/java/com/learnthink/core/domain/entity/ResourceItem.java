@@ -16,7 +16,13 @@ public class ResourceItem {
     @TableId(type = IdType.ASSIGN_UUID)
     private String id;
 
+    private String userId;
+
+    private String courseId;
+
     private String packId;
+
+    private String folderId;
 
     private String taskId;
 

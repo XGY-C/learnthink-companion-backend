@@ -35,8 +35,12 @@ public class LearnThinkProperties {
     private Map<String, ProviderConfig> providers = new HashMap<>();
     /** 各模型预设配置（chat/reasoning/generation/unified），key 为预设名称 */
     private Map<String, ModelPreset> models = new HashMap<>();
+    /** 图片生成提供者："spark"（讯飞）或 "qwen"（千问/DashScope） */
+    private String imageProvider = "spark";
     /** 讯飞 Spark 平台配置（图片生成等） */
     private SparkConfig spark = new SparkConfig();
+    /** 千问 Qwen-Image 配置（DashScope 文生图） */
+    private QwenImageConfig qwenImage = new QwenImageConfig();
 
     public String getDialogueMode() { return dialogueMode; }
     public void setDialogueMode(String dialogueMode) { this.dialogueMode = dialogueMode; }
@@ -47,8 +51,14 @@ public class LearnThinkProperties {
     public Map<String, ModelPreset> getModels() { return models; }
     public void setModels(Map<String, ModelPreset> models) { this.models = models; }
 
+    public String getImageProvider() { return imageProvider; }
+    public void setImageProvider(String imageProvider) { this.imageProvider = imageProvider; }
+
     public SparkConfig getSpark() { return spark; }
     public void setSpark(SparkConfig spark) { this.spark = spark; }
+
+    public QwenImageConfig getQwenImage() { return qwenImage; }
+    public void setQwenImage(QwenImageConfig qwenImage) { this.qwenImage = qwenImage; }
 
     /** AI 提供者配置 */
     public static class ProviderConfig {
@@ -110,5 +120,30 @@ public class LearnThinkProperties {
         public void setDomain(String domain) { this.domain = domain; }
         public String getBaseUrl() { return baseUrl; }
         public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
+    }
+
+    /** 千问 Qwen-Image 配置（阿里云 DashScope 文生图） */
+    public static class QwenImageConfig {
+        /** DashScope API Key */
+        private String apiKey;
+        /** 模型名称，如 qwen-image-2.0、qwen-image-2.0-pro */
+        private String model = "qwen-image-2.0";
+        /** DashScope 多模态生成 API 地址 */
+        private String baseUrl = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
+        /** 是否启用提示词改写（短 prompt 补充细节） */
+        private boolean promptExtend = true;
+        /** 是否添加水印 */
+        private boolean watermark = false;
+
+        public String getApiKey() { return apiKey; }
+        public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+        public String getModel() { return model; }
+        public void setModel(String model) { this.model = model; }
+        public String getBaseUrl() { return baseUrl; }
+        public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
+        public boolean isPromptExtend() { return promptExtend; }
+        public void setPromptExtend(boolean promptExtend) { this.promptExtend = promptExtend; }
+        public boolean isWatermark() { return watermark; }
+        public void setWatermark(boolean watermark) { this.watermark = watermark; }
     }
 }

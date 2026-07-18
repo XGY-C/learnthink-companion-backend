@@ -12,6 +12,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -47,10 +48,8 @@ public class BookInfoTool implements AgentTool {
         return """
             {
               "type": "object",
-              "properties": {
-                "course_id": {"type": "string", "description": "课程UUID"}
-              },
-              "required": ["course_id"]
+              "properties": {},
+              "required": []
             }""";
     }
 
@@ -92,21 +91,22 @@ public class BookInfoTool implements AgentTool {
     public BookInfo resolveBookInfo(String courseId) {
         if (courseId == null || courseId.isBlank()) return null;
         try {
-            KnowledgeDocument doc = documentMapper.selectOne(
+            List<KnowledgeDocument> docs = documentMapper.selectList(
                 new LambdaQueryWrapper<KnowledgeDocument>()
                     .eq(KnowledgeDocument::getCourseId, courseId)
-                    .last("LIMIT 1"));
-            if (doc == null) {
-                log.debug("No KnowledgeDocument found for courseId={}", courseId);
+                    .eq(KnowledgeDocument::getSourceType, "主教材"));
+            if (docs.isEmpty()) {
+                log.debug("No KnowledgeDocument with source_type=主教材 for courseId={}", courseId);
                 return null;
             }
-            BookInfo bookInfo = bookInfoMapper.selectOne(
-                new LambdaQueryWrapper<BookInfo>()
-                    .eq(BookInfo::getDocumentId, doc.getId()));
-            if (bookInfo == null) {
-                log.debug("No BookInfo found for documentId={}", doc.getId());
+            for (KnowledgeDocument doc : docs) {
+                BookInfo bookInfo = bookInfoMapper.selectOne(
+                    new LambdaQueryWrapper<BookInfo>()
+                        .eq(BookInfo::getDocumentId, doc.getId()));
+                if (bookInfo != null) return bookInfo;
+                log.debug("No BookInfo for 主教材 documentId={}, try next", doc.getId());
             }
-            return bookInfo;
+            return null;
         } catch (Exception e) {
             log.warn("Failed to resolve BookInfo for courseId={}: {}", courseId, e.getMessage());
             return null;

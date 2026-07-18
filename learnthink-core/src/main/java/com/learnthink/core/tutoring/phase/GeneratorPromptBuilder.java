@@ -149,4 +149,238 @@ public class GeneratorPromptBuilder {
         }
         return Objects.toString(obj, "");
     }
+
+    // ===== Guided Mode Prompt Methods =====
+
+    /**
+     * 调用点②：引导讲解 + 提问生成的系统提示词。
+     */
+    public String buildGuidedGuidancePrompt(GuidedStep step, ResolvedResources resources,
+                                             Map<String, Object> profile, String question,
+                                             GuidedDialogueHistory history,
+                                             int stepIndex, int totalSteps) {
+        String base = promptLoader.get("tutoring/guided-generator-system");
+
+        String originalQuestion = history != null ? history.originalQuestion() : question;
+        String previousTurns = formatPreviousTurns(history);
+        String resourcesText = formatStepResources(resources, step.resourceRefs());
+
+        return base
+            .replace("{originalQuestion}", originalQuestion)
+            .replace("{stage}", Objects.toString(step.stage(), ""))
+            .replace("{title}", Objects.toString(step.title(), ""))
+            .replace("{guidanceHint}", Objects.toString(step.guidanceHint(), ""))
+            .replace("{stepIndex}", String.valueOf(stepIndex))
+            .replace("{totalSteps}", String.valueOf(totalSteps))
+            .replace("{resources}", resourcesText)
+            .replace("{profile.knowledgeBaseSummary}",
+                Objects.toString(profile != null ? profile.getOrDefault("knowledgeBaseSummary", "") : "", ""))
+            .replace("{profile.cognitiveStyle}",
+                Objects.toString(profile != null ? profile.getOrDefault("cognitiveStyle", "textual") : "textual"))
+            .replace("{profile.weakPoints}", formatList(profile != null ? profile.get("weakPoints") : null))
+            .replace("{profile.learningPace}",
+                Objects.toString(profile != null ? profile.getOrDefault("learningPace", "moderate") : "moderate"))
+            .replace("{previousTurns}", previousTurns);
+    }
+
+    /**
+     * 调用点④：过渡反馈的系统提示词（答对后推进下一步前）。
+     */
+    public String buildGuidedFeedbackPrompt(GuidedStep step, String studentAnswer,
+                                             String evaluation, GuidedStep nextStep,
+                                             GuidedDialogueHistory history) {
+        String originalQuestion = history != null ? history.originalQuestion() : "";
+        String previousTurnsSummary = formatPreviousTurns(history);
+
+        return """
+            你是一位引导教师。学生刚完成了一个步骤，你要生成一段简短的过渡反馈（50-100字），然后自然引出下一步。
+
+            ## 原始问题
+            %s
+
+            ## 当前步骤
+            - 阶段：%s: %s
+            - 学生回答：%s
+            - 评估结果：%s
+
+            ## 下一步
+            - 下一阶段：%s: %s
+
+            ## 之前步骤摘要
+            %s
+
+            ## 要求
+            1. 先肯定学生在当前步骤的表现（1-2句）
+            2. 自然过渡到下一步要思考的方向（1-2句）
+            3. 不要给出下一步的答案或具体内容
+            4. 语气鼓励、简洁
+            """.formatted(
+                originalQuestion,
+                step.stage(), step.title(),
+                studentAnswer,
+                evaluation,
+                nextStep != null ? nextStep.stage() : "",
+                nextStep != null ? nextStep.title() : "",
+                previousTurnsSummary
+            );
+    }
+
+    /**
+     * 调用点⑤：揭示答案解释的系统提示词。
+     */
+    public String buildGuidedRevealedPrompt(GuidedStep step, GuidedStepState state,
+                                             String previousAttempts,
+                                             GuidedDialogueHistory history) {
+        String originalQuestion = history != null ? history.originalQuestion() : "";
+        String previousTurnsSummary = formatPreviousTurns(history);
+
+        return """
+            你是一位引导教师。学生在当前步骤多次尝试后选择查看答案，你需要给出答案并解释为什么。
+
+            ## 原始问题
+            %s
+
+            ## 当前步骤
+            - 阶段：%s: %s
+            - 提出的问题：%s
+            - 预期答案要点：%s
+            - 学生之前的尝试：%s
+
+            ## 之前步骤摘要
+            %s
+
+            ## 要求
+            1. 给出本步骤的正确答案
+            2. 解释为什么这个答案是正确的
+            3. 结合学生之前的错误尝试，指出他们可能在哪里卡住了
+            4. 鼓励学生：卡住是正常的，理解答案后继续
+            5. 不要给出后续步骤的答案
+            """.formatted(
+                originalQuestion,
+                step.stage(), step.title(),
+                state != null ? state.question() : "",
+                step.expectedAnswer(),
+                previousAttempts,
+                previousTurnsSummary
+            );
+    }
+
+    /**
+     * 调用点⑥：总结回顾的系统提示词。
+     */
+    public String buildGuidedSummaryPrompt(ExecutionPlan plan, String question,
+                                            GuidedDialogueHistory history,
+                                            Map<String, Object> profile) {
+        String originalQuestion = history != null ? history.originalQuestion() : question;
+        String fullStepsSummary = formatFullStepsSummary(history);
+
+        String questionType = "";
+        String keyConcepts = "";
+        String realIntent = "";
+        if (plan.questionAnalysis() != null) {
+            questionType = plan.questionAnalysis().questionType();
+            keyConcepts = formatList(plan.questionAnalysis().keyConcepts());
+            realIntent = plan.questionAnalysis().realIntent();
+        }
+
+        return """
+            ## 系统角色
+            你是一位引导教师，现在要帮助学生回顾整个解题过程。
+
+            ## 原始问题
+            %s
+
+            ## 问题分析
+            - 题型：%s
+            - 核心概念：%s
+            - 学生真实意图：%s
+
+            ## 完整解题步骤回顾
+            %s
+
+            ## 学生画像
+            - 知识基础：%s
+            - 薄弱点：%s
+
+            ## 你的任务
+            1. 引导学生回顾完整的解题思路链
+            2. 强调每个阶段的关键思考点
+            3. 指出学生在哪些步骤表现出色，哪些步骤有困难
+            4. 指出可以迁移到其他题目的通用方法
+            5. 鼓励学生反思自己的思考过程
+
+            ## 约束
+            - 语气鼓励、总结性
+            - 篇幅 200-400 字
+            """.formatted(
+                originalQuestion,
+                questionType,
+                keyConcepts,
+                realIntent,
+                fullStepsSummary,
+                Objects.toString(profile != null ? profile.getOrDefault("knowledgeBaseSummary", "") : "", ""),
+                formatList(profile != null ? profile.get("weakPoints") : null)
+            );
+    }
+
+    /** 格式化之前步骤的交互历史（详细版，用于 streamGuidance） */
+    private String formatPreviousTurns(GuidedDialogueHistory history) {
+        if (history == null || history.turns() == null || history.turns().isEmpty()) {
+            return "无（这是第一步）";
+        }
+        StringBuilder sb = new StringBuilder();
+        int idx = 0;
+        for (var turn : history.turns()) {
+            idx++;
+            sb.append("### 步骤").append(idx).append("：").append(turn.title()).append("\n");
+            sb.append("- AI引导：").append(truncate(turn.guidanceContent(), 100)).append("\n");
+            sb.append("- AI提问：").append(turn.question()).append("\n");
+            sb.append("- 学生回答：").append(turn.studentAnswer()).append("\n");
+            sb.append("- AI反馈：").append(truncate(turn.feedback(), 100)).append("\n\n");
+        }
+        return sb.toString();
+    }
+
+    /** 格式化完整步骤摘要（用于总结） */
+    private String formatFullStepsSummary(GuidedDialogueHistory history) {
+        if (history == null || history.turns() == null || history.turns().isEmpty()) {
+            return "无步骤记录";
+        }
+        StringBuilder sb = new StringBuilder();
+        int idx = 0;
+        for (var turn : history.turns()) {
+            idx++;
+            sb.append("### 步骤").append(idx).append("：").append(turn.title())
+              .append("（").append(turn.stage()).append("）\n");
+            sb.append("- AI提问：").append(turn.question()).append("\n");
+            sb.append("- 学生回答：").append(turn.studentAnswer()).append("\n");
+            sb.append("- 评估结果：").append(turn.evaluation())
+              .append("（尝试").append(turn.attempts()).append("次）\n\n");
+        }
+        return sb.toString();
+    }
+
+    /** 按步骤的 resourceRefs 过滤并格式化资源 */
+    private String formatStepResources(ResolvedResources resources, String resourceRefs) {
+        if (resources == null || resources.isEmpty() || resourceRefs == null || resourceRefs.isBlank()) {
+            return "无可用资源";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String refId : resourceRefs.split(",")) {
+            refId = refId.trim();
+            List<RetrievedChunk> chunks = resources.getForRequirement(refId);
+            if (!chunks.isEmpty()) {
+                for (var chunk : chunks) {
+                    sb.append("- [ref:").append(chunk.chunkId()).append("] ")
+                        .append(chunk.content()).append("\n");
+                }
+            }
+        }
+        return sb.length() > 0 ? sb.toString() : "无可用资源";
+    }
+
+    private String truncate(String text, int maxLen) {
+        if (text == null) return "";
+        return text.length() > maxLen ? text.substring(0, maxLen) + "..." : text;
+    }
 }

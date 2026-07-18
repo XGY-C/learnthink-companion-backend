@@ -29,4 +29,16 @@ public class ChatMessagesResponse {
      * 前端据此将 _pendingPlan 挂载到正确的消息上，而非 fallback 到最后一条 assistant。
      */
     private Integer planOfferMessageIdx;
+
+    /**
+     * 若该 chat 关联了智能辅导会话，则返回对应 tutoring_sessions.id。
+     * 前端据此加载 /tutoring/{sessionId}/history 以恢复结构化辅导视图。
+     */
+    private String tutoringSessionId;
+
+    /**
+     * 会话主模式：chat / lecture / resource / plan。
+     * 由 getMessages() 基于会话表 type 与消息 mode 推断后填充，供前端恢复会话图标。
+     */
+    private String type;
 }

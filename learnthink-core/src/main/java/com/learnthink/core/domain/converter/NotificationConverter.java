@@ -27,7 +27,7 @@ public class NotificationConverter {
                 .isPushed(notification.getIsPushed() != null && notification.getIsPushed())
                 .refId(notification.getRefId())
                 .refType(notification.getRefType())
-                .createdAt(notification.getCreatedAt() != null ? notification.getCreatedAt().toString() : null)
+                .createdAt(notification.getCreatedAt() != null ? notification.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : null)
                 .build();
     }
 }

@@ -34,7 +34,7 @@ public class UserContextExampleController {
         result.put("resourceId", "resource-" + System.currentTimeMillis());
         result.put("userId", userId);  // 自动关联当前用户
         result.put("data", resourceData);
-        result.put("createdAt", System.currentTimeMillis());
+        result.put("createdAt", java.time.Instant.now().toString());
         
         log.info("用户 {} 创建了资源: {}", userId, resourceData);
         
@@ -139,7 +139,7 @@ public class UserContextExampleController {
         result.put("resourceId", resourceId);
         result.put("updatedBy", currentUserId);
         result.put("updateData", updateData);
-        result.put("updatedAt", System.currentTimeMillis());
+        result.put("updatedAt", java.time.Instant.now().toString());
         
         log.info("用户 {} 更新了资源 {}", currentUserId, resourceId);
         

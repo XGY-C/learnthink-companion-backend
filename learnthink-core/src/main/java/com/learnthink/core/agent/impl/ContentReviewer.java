@@ -3,6 +3,7 @@ package com.learnthink.core.agent.impl;
 import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.runtime.AgentResult;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.agent.orchestration.SseAgentObservation;
 import com.learnthink.core.config.PromptLoader;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,6 +20,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 内容审查器，负责对生成内容进行分层审计和独立RAG事实核查。
@@ -41,6 +44,7 @@ public class ContentReviewer {
     private final RagTool ragTool;
     private final ResourceGenerator resourceGenerator;
     private final ObjectMapper mapper = new ObjectMapper();
+    private static final Pattern FENCE_BLOCK = Pattern.compile("```(?:\\w+)?\\s*([\\s\\S]*?)\\s*```");
 
     public ContentReviewer(@Qualifier("reasoningChatClientBuilder") ChatClient.Builder chatClientBuilder,
                            PromptLoader promptLoader,
@@ -62,6 +66,7 @@ public class ContentReviewer {
         log.info("=== ContentReviewer START === type={}, sources={}, forceLowConfidence={}",
                 resourceType, sources.size(), forceLowConfidence);
         Instant start = Instant.now();
+        setPipelineStageIfPossible(ctx, "REVIEWING");
         String systemPrompt = promptLoader.get("agent/reviewer");
         ctx.observation().onPrompt("ContentReviewer", systemPrompt,
             Map.of("type", resourceType, "sourcesCount", sources.size(),
@@ -211,10 +216,11 @@ public class ContentReviewer {
         return switch (resourceType) {
             case "doc"     -> null; // doc format varies by LLM output, skip R1
             case "quiz"    -> checkQuizFormat(content);
-            case "reading" -> null; // format varies, skip R1
+            case "reading" -> checkReadingFormat(content);
             case "code"    -> checkCodeFormat(content);
             case "mindmap" -> checkMindmapFormat(content);
             case "video"   -> null; // video format varies by render pipeline, skip R1
+            case "html"    -> null; // html format varies, skip R1 - rely on self-review + jsoup
             default        -> null;
         };
     }
@@ -232,7 +238,7 @@ public class ContentReviewer {
 
     private ResourceGenerationState.ReviewResult checkQuizFormat(String content) {
         try {
-            var node = mapper.readTree(content);
+            var node = mapper.readTree(extractJsonContent(content));
             var questions = node.get("questions");
             if (questions == null || !questions.isArray()) {
                 return formatFailure("quiz", "Missing or invalid 'questions' array");
@@ -247,26 +253,27 @@ public class ContentReviewer {
         return null;
     }
 
-    /** Reading 产出 Markdown 推荐书单，检查 Markdown 结构而非 JSON */
+    /** Reading 产出拓展阅读文章，检查 Markdown 文章结构 */
     private ResourceGenerationState.ReviewResult checkReadingFormat(String content) {
         if (content == null || content.isBlank()) {
             return formatFailure("reading", "Content is empty");
         }
-        // 必须有 ## 或 ### 级别标题
-        long headingCount = content.lines()
-            .filter(line -> line.trim().matches("^#{2,3}\\s+.*"))
-            .count();
-        if (headingCount < 2) {
-            return formatFailure("reading",
-                "Expected at least 2 Markdown headings (## or ###), found " + headingCount);
+        // 必须有 # 一级标题
+        if (!content.matches("(?s).*^#\\s+.*$.*")) {
+            return formatFailure("reading", "Missing top-level heading (#)");
         }
-        // 必须有列表项（每条推荐）
-        long listItemCount = content.lines()
-            .filter(line -> line.trim().matches("^[-*]\\s+.*"))
+        // 必须有 ## 二级标题 >= 3 个
+        long h2 = content.lines()
+            .filter(line -> line.trim().matches("^##\\s+.*"))
             .count();
-        if (listItemCount < 3) {
+        if (h2 < 3) {
             return formatFailure("reading",
-                "Expected at least 3 list items, found " + listItemCount);
+                "Expected at least 3 section headings (##), found " + h2);
+        }
+        // 必须有来源引用标记
+        if (!content.contains("[来源：")) {
+            return formatFailure("reading",
+                "Missing source citation markers [来源：...] in content");
         }
         return null;
     }
@@ -274,7 +281,7 @@ public class ContentReviewer {
     /** Code 产出 JSON：校验 files/steps 字段存在且合法 */
     private ResourceGenerationState.ReviewResult checkCodeFormat(String content) {
         try {
-            var root = mapper.readTree(content);
+            var root = mapper.readTree(extractJsonContent(content));
             if (!root.has("files") || root.get("files").isEmpty()) {
                 return formatFailure("code", "Missing or empty 'files' array");
             }
@@ -305,7 +312,7 @@ public class ContentReviewer {
     /** Mindmap 产出 JSON 嵌套结构 {root: {text, children: [...]}} */
     private ResourceGenerationState.ReviewResult checkMindmapFormat(String content) {
         try {
-            var root = mapper.readTree(content);
+            var root = mapper.readTree(extractJsonContent(content));
             var rootObj = root.get("root");
             if (rootObj == null || !rootObj.isObject()) {
                 return formatFailure("mindmap", "Missing or invalid 'root' object");
@@ -352,6 +359,42 @@ public class ContentReviewer {
             List.of(new ResourceGenerationState.ReviewReason("R1", "fail", detail)),
             0.0,
             ResourceGenerationState.ReviewAction.RETRY);
+    }
+
+    /**
+     * 从 LLM 输出中提取纯 JSON 文本。
+     * 逐个匹配 ``` 代码块并尝试解析，正确处理多代码块场景。
+     */
+    private String extractJsonContent(String content) {
+        if (content == null || content.isBlank()) return content;
+        String text = content.trim();
+
+        // 已经是合法 JSON
+        if (isValidJson(text)) return text;
+
+        // 逐个尝试 ``` 代码块
+        Matcher matcher = FENCE_BLOCK.matcher(text);
+        while (matcher.find()) {
+            String candidate = matcher.group(1).trim();
+            if (isValidJson(candidate)) return candidate;
+        }
+
+        // 兜底：首个 { 到末尾 }
+        int start = text.indexOf('{');
+        int end = text.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            return text.substring(start, end + 1);
+        }
+        return text;
+    }
+
+    private boolean isValidJson(String json) {
+        try {
+            mapper.readTree(json);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**
@@ -484,6 +527,12 @@ public class ContentReviewer {
         private static final List<String> BLOCKED = List.of(/* loaded from config in production */);
         boolean isBlocked(String content) {
             return BLOCKED.stream().anyMatch(p -> content.toLowerCase().contains(p.toLowerCase()));
+        }
+    }
+
+    private void setPipelineStageIfPossible(AgentContext ctx, String stage) {
+        if (ctx.observation() instanceof SseAgentObservation sseObs) {
+            sseObs.setPipelineStage(stage);
         }
     }
 }

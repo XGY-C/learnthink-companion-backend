@@ -6,9 +6,12 @@ import com.learnthink.core.service.EmailVerificationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
+import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.stereotype.Service;
+
+import jakarta.mail.MessagingException;
+import jakarta.mail.internet.MimeMessage;
 
 import java.security.SecureRandom;
 import java.time.Duration;
@@ -123,35 +126,49 @@ public class EmailVerificationServiceImpl implements EmailVerificationService {
      * 发送验证码邮件
      */
     private void sendEmail(String to, String code) {
-        SimpleMailMessage message = new SimpleMailMessage();
-        message.setFrom("3929483358@qq.com"); // 发件人必须与SMTP授权用户一致
-        message.setTo(to);
-        message.setSubject("【学思伴行】账户注册验证码 - 安全验证");
-        message.setText(String.format(
-            "尊敬的学思伴行用户：\n\n" +
-            "您好！感谢您选择学思伴行（LearnThink Companion）智能学习平台。\n\n" +
-            "为了保障您的账户安全，我们正在进行身份验证。请使用以下验证码完成注册流程：\n\n" +
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-            "         验 证 码：%s          \n" +
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
-            "重要提示：\n" +
-            "• 该验证码有效期为 5 分钟，请及时使用\n" +
-            "• 请勿将验证码泄露给任何人，包括自称客服的人员\n" +
-            "• 如非本人操作，请立即忽略此邮件并联系我们的客服团队\n" +
-            "• 本验证码仅用于本次注册验证，不可重复使用\n\n" +
-            "如有任何疑问，欢迎随时联系我们：\n" +
-            "官方网站：https://www.learnthink.com\n" +
-            "客服热线：400-xxx-xxxx\n" +
-            "服务时间：工作日 9:00-18:00\n\n" +
-            "祝您在学思伴行平台获得愉快的学习体验！\n\n" +
-            "此致\n" +
-            "敬礼\n\n" +
-            "学思伴行（LearnThink Companion）产品团队\n" +
-            "智能教育科技事业部\n" +
-            "© 2026 LearnThink. All Rights Reserved.",
-            code
-        ));
-        
-        mailSender.send(message);
+        String html = buildEmailHtml(code);
+        try {
+            MimeMessage mime = mailSender.createMimeMessage();
+            MimeMessageHelper helper = new MimeMessageHelper(mime, "utf-8");
+            helper.setFrom("3929483358@qq.com");
+            helper.setTo(to);
+            helper.setSubject("【学思伴行】验证您的电子邮箱");
+            helper.setText(html, true);
+            mailSender.send(mime);
+        } catch (MessagingException e) {
+            throw new RuntimeException("邮件构建失败", e);
+        }
+    }
+
+    private String buildEmailHtml(String code) {
+        StringBuilder digits = new StringBuilder();
+        for (char c : code.toCharArray()) {
+            digits.append(String.format(
+                "<td style=\"width:52px;height:60px;background:#f7f8fc;border:1px solid #e8ecf4;border-radius:12px;text-align:center;vertical-align:middle;font-size:26px;font-weight:700;color:#1a1a2e;font-family:'SF Mono','Fira Code',Consolas,monospace;padding:0;\">%s</td>",
+                c
+            ));
+        }
+        return String.format(
+            "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1.0\"></head>" +
+            "<body style=\"margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;background:#f5f6fa;\">" +
+            "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%%\" style=\"padding:40px 0;\"><tr><td align=\"center\">" +
+            "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:480px;width:100%%;background:#fff;border-radius:20px;box-shadow:0 4px 24px rgba(0,0,0,0.06);\"><tr><td style=\"padding:48px 44px 40px;\">" +
+            /* brand */
+            "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" style=\"margin-bottom:36px;\"><tr><td style=\"width:8px;height:8px;background:#2B6FFF;border-radius:50%;padding:0;\"></td><td style=\"padding:0 0 0 8px;font-size:15px;font-weight:600;color:#1a1a2e;letter-spacing:0.5px;\">学思伴行</td></tr></table>" +
+            /* title */
+            "<h1 style=\"font-size:22px;font-weight:700;color:#1a1a2e;margin:0 0 16px;\">验证您的电子邮箱</h1>" +
+            "<p style=\"font-size:14px;color:#6e6e8a;margin:0 0 6px;\">您好，</p>" +
+            "<p style=\"font-size:14px;line-height:1.6;color:#6e6e8a;margin:0 0 32px;\">感谢您使用学思伴行。您正在进行邮箱验证，您的专属验证码为：</p>" +
+            /* code digits */
+            "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" style=\"margin:0 auto 24px;\"><tr>%s</tr></table>" +
+            "<p style=\"text-align:center;font-size:13px;color:#a0a0b8;line-height:1.6;margin:0 0 2px;\">此验证码将在 <strong style=\"color:#2B6FFF;font-weight:600;\">15 分钟</strong> 后失效。请勿将此验证码转发或泄露给他人。</p>" +
+            "<p style=\"text-align:center;font-size:13px;color:#a0a0b8;line-height:1.6;margin:0 0 28px;\">如果这不是您的操作，请忽略此邮件，您的账号依然安全。</p>" +
+            /* divider */
+            "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%%\" style=\"margin-bottom:20px;\"><tr><td style=\"height:1px;background:#f0f1f5;padding:0;\"></td></tr></table>" +
+            /* footer */
+            "<p style=\"font-size:12px;line-height:1.7;color:#b8b8d0;margin:0;\">学思伴行 © 2026<br>系统自动发信，请勿直接回复。</p>" +
+            "</td></tr></table></td></tr></table></body></html>",
+            digits
+        );
     }
 }

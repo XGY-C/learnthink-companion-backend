@@ -6,12 +6,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learnthink.common.dto.plan.ActivitySubmitRequest;
 import com.learnthink.common.dto.plan.ActivitySubmitResponse;
 import com.learnthink.common.dto.plan.PlanResponse;
+import com.learnthink.common.exception.BusinessException;
+import com.learnthink.core.config.PromptLoader;
 import com.learnthink.core.domain.entity.*;
 import com.learnthink.core.repository.*;
 import com.learnthink.core.service.PlanService;
 import com.learnthink.core.service.PushService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -38,8 +43,11 @@ public class PlanServiceImpl implements PlanService {
     private final ProfileVersionMapper profileVersionMapper;
     private final ResourceItemMapper resourceItemMapper;
     private final ResourcePackMapper resourcePackMapper;
+    private final LearningRecordMapper learningRecordMapper;
     private final ObjectMapper objectMapper;
     private final PushService pushService;
+    private final ChatClient shortAnswerClient;
+    private final PromptLoader promptLoader;
 
     public PlanServiceImpl(LearningPlanMapper planMapper,
                            LearningPlanVersionMapper planVersionMapper,
@@ -49,8 +57,11 @@ public class PlanServiceImpl implements PlanService {
                            ProfileVersionMapper profileVersionMapper,
                            ResourceItemMapper resourceItemMapper,
                            ResourcePackMapper resourcePackMapper,
+                           LearningRecordMapper learningRecordMapper,
                            ObjectMapper objectMapper,
-                           PushService pushService) {
+                           PushService pushService,
+                           @Qualifier("chatChatClientBuilder") ChatClient.Builder chatClientBuilder,
+                           PromptLoader promptLoader) {
         this.planMapper = planMapper;
         this.planVersionMapper = planVersionMapper;
         this.subPlanMapper = subPlanMapper;
@@ -59,8 +70,11 @@ public class PlanServiceImpl implements PlanService {
         this.profileVersionMapper = profileVersionMapper;
         this.resourceItemMapper = resourceItemMapper;
         this.resourcePackMapper = resourcePackMapper;
+        this.learningRecordMapper = learningRecordMapper;
         this.objectMapper = objectMapper;
         this.pushService = pushService;
+        this.shortAnswerClient = chatClientBuilder.build();
+        this.promptLoader = promptLoader;
     }
 
     // ==================== 查询 ====================
@@ -93,12 +107,17 @@ public class PlanServiceImpl implements PlanService {
             throw new IllegalArgumentException("Activity not found: " + activityId);
         }
 
+        if ("sequential".equals(ctx.plan().getLockMode())
+                && "locked".equals(ctx.activity().get("status"))) {
+            throw new BusinessException("该活动尚未解锁，请先完成前置活动");
+        }
+
         Map<String, Object> activity = ctx.activity();
         String type = (String) activity.get("type");
-        Map<String, Object> criteria = castMap(activity.get("completionCriteria"));
+        Map<String, Object> criteria = getCompletionCriteria(activity);
         double threshold = criteria.get("threshold") instanceof Number n ? n.doubleValue() : QUIZ_PASS_THRESHOLD;
 
-        if ("quiz".equals(type)) {
+        if ("quiz".equals(type) || (request.getAnswers() != null && !request.getAnswers().isEmpty())) {
             return submitQuizActivity(userId, ctx, activity, threshold, request);
         } else {
             return submitNonQuizActivity(userId, ctx, activity, type, request);
@@ -111,7 +130,7 @@ public class PlanServiceImpl implements PlanService {
                                                        ActivitySubmitRequest request) {
         String activityId = (String) activity.get("activity_id");
         String moduleId = (String) ctx.subPlan().getModuleId();
-        Map<String, Object> criteria = castMap(activity.get("completionCriteria"));
+        Map<String, Object> criteria = getCompletionCriteria(activity);
 
         // 0. 加载 quiz ResourceItem 获取正确答案
         List<QuestionDef> questions = loadQuizQuestions(activity);
@@ -127,7 +146,7 @@ public class PlanServiceImpl implements PlanService {
         attempt.setTopic((String) activity.get("title"));
         attempt.setActivityId(activityId);
         attempt.setScore(BigDecimal.valueOf(score.score()));
-        writeAttemptAnswers(attempt, request, weakTags);
+        writeAttemptAnswers(attempt, request, weakTags, score.questionResults());
         quizAttemptMapper.insert(attempt);
 
         // 3. 写 learning_events
@@ -161,7 +180,7 @@ public class PlanServiceImpl implements PlanService {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("score", score.score());
         result.put("time_spent", request.getDurationSeconds() != null ? (double) request.getDurationSeconds() : 0);
-        result.put("completed_at", LocalDateTime.now().toString());
+        result.put("completed_at", java.time.Instant.now().toString());
         result.put("weak_tags", weakTags);
         activity.put("result", result);
 
@@ -172,9 +191,11 @@ public class PlanServiceImpl implements PlanService {
             criteria.put("met", true);
             activity.put("status", "completed");
             activity.put("retry_count", 0);
+            writeLearningRecords(ctx, activity, "completed", request.getDurationSeconds());
             saveSubPlan(ctx);
             updateModuleStatus(ctx);
             recomputeModuleMastery(ctx);
+            unlockAfterActivityComplete(ctx, activityId);
 
             return ActivitySubmitResponse.builder()
                     .activityId(activityId)
@@ -184,6 +205,7 @@ public class PlanServiceImpl implements PlanService {
                     .weakTags(weakTags)
                     .moduleStatus(getModuleStatus(ctx, moduleId))
                     .moduleMastery(getModuleMastery(ctx, moduleId))
+                    .questionResults(score.questionResults())
                     .build();
         }
 
@@ -194,6 +216,7 @@ public class PlanServiceImpl implements PlanService {
 
             ActivitySubmitResponse.AutoActionDto autoAction = insertFallbackLearnQuiz(ctx, activity, weakTags, threshold);
 
+            writeLearningRecords(ctx, activity, "failed", request.getDurationSeconds());
             saveSubPlan(ctx);
             updateModuleStatus(ctx);
 
@@ -208,6 +231,7 @@ public class PlanServiceImpl implements PlanService {
                     .retriesRemaining(0)
                     .moduleStatus(getModuleStatus(ctx, moduleId))
                     .autoAction(autoAction)
+                    .questionResults(score.questionResults())
                     .build();
         }
 
@@ -223,6 +247,7 @@ public class PlanServiceImpl implements PlanService {
 
             ActivitySubmitResponse.AutoActionDto autoAction = insertFallbackLearnQuiz(ctx, activity, weakTags, threshold);
 
+            writeLearningRecords(ctx, activity, "failed", request.getDurationSeconds());
             saveSubPlan(ctx);
             updateModuleStatus(ctx);
 
@@ -237,22 +262,26 @@ public class PlanServiceImpl implements PlanService {
                     .retriesRemaining(0)
                     .moduleStatus(getModuleStatus(ctx, moduleId))
                     .autoAction(autoAction)
+                    .questionResults(score.questionResults())
                     .build();
         }
 
         // 允许重试
+        writeLearningRecords(ctx, activity, "in_progress", request.getDurationSeconds());
         saveSubPlan(ctx);
         updateModuleStatus(ctx);
 
         return ActivitySubmitResponse.builder()
                 .activityId(activityId)
                 .activityCompleted(false)
+                .status("in_progress")
                 .score(s)
                 .weakTags(weakTags)
                 .retryCount(retryCount)
                 .retryAllowed(true)
                 .retriesRemaining(MAX_RETRIES - retryCount)
                 .moduleStatus(getModuleStatus(ctx, moduleId))
+                .questionResults(score.questionResults())
                 .build();
     }
 
@@ -262,7 +291,7 @@ public class PlanServiceImpl implements PlanService {
                                                           ActivitySubmitRequest request) {
         String activityId = (String) activity.get("activity_id");
         String moduleId = (String) ctx.subPlan().getModuleId();
-        Map<String, Object> criteria = castMap(activity.get("completionCriteria"));
+        Map<String, Object> criteria = getCompletionCriteria(activity);
         int estMinutes = activity.get("estimated_minutes") instanceof Number n ? n.intValue() : 25;
 
         boolean completed;
@@ -282,12 +311,18 @@ public class PlanServiceImpl implements PlanService {
             activity.put("status", "completed");
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("time_spent", request.getDurationSeconds() != null ? (double) request.getDurationSeconds() : 0);
-            result.put("completed_at", LocalDateTime.now().toString());
+            result.put("completed_at", java.time.Instant.now().toString());
             activity.put("result", result);
         }
 
+        String resourceStatus = completed ? "completed" : "in_progress";
+        if (activity.get("status") != null && "failed".equals(activity.get("status"))) {
+            resourceStatus = "failed";
+        }
+        writeLearningRecords(ctx, activity, resourceStatus, request.getDurationSeconds());
         saveSubPlan(ctx);
         updateModuleStatus(ctx);
+        unlockAfterActivityComplete(ctx, activityId);
 
         writeLearningEvent(userId, type.equals("explore") ? "resource_opened" : "resource_opened", Map.of(
                 "activity_id", activityId,
@@ -308,9 +343,32 @@ public class PlanServiceImpl implements PlanService {
 
     private List<QuestionDef> loadQuizQuestions(Map<String, Object> activity) {
         Map<String, Object> resource = castMap(activity.get("resource"));
-        if (resource == null) return List.of();
+
+        // 兼容 learn 活动中 quiz 作为 resources 数组元素的情况
+        // （sub_plan 中 quiz 不是独立 activity，而是 learn 的 resources[] 中的一个 resource_type）
+        if (resource == null) {
+            List<Map<String, Object>> resources = castMapList(activity.get("resources"));
+            for (Map<String, Object> r : resources) {
+                if ("quiz".equals(r.get("resource_type"))) {
+                    resource = r;
+                    log.info("Found quiz resource in resources array for activity_id={}, packId={}",
+                            activity.get("activity_id"), r.get("resource_pack_id"));
+                    break;
+                }
+            }
+        }
+
+        if (resource == null) {
+            log.warn("Quiz activity has no resource field and no quiz resource in resources array, activity_id={}",
+                    activity.get("activity_id"));
+            return List.of();
+        }
+
         String packId = (String) resource.get("resource_pack_id");
-        if (packId == null) return List.of();
+        if (packId == null) {
+            log.warn("Quiz activity resource has no resource_pack_id, resource keys={}", resource.keySet());
+            return List.of();
+        }
 
         try {
             List<ResourceItem> items = resourceItemMapper.selectList(
@@ -331,60 +389,231 @@ public class PlanServiceImpl implements PlanService {
             }
             Map<String, Object> quizObj = objectMapper.readValue(contentJson, mapType());
             List<Map<String, Object>> questionList = castMapList(quizObj.get("questions"));
-            return questionList.stream()
-                .map(q -> new QuestionDef(
-                    (String) q.get("question_id"),
-                    (String) q.get("answer"),
-                    castStringList(castMap(q.get("tags")).get("mistakes")),
-                    castStringList(castMap(q.get("tags")).get("knowledge"))
-                ))
+            List<QuestionDef> result = questionList.stream()
+                .map(q -> {
+                    Map<String, Object> tags = castMap(q.get("tags"));
+                    return new QuestionDef(
+                        qId(q),
+                        (String) q.get("type"),
+                        (String) q.get("content"),
+                        (String) q.get("answer"),
+                        tags != null ? castStringList(tags.get("mistakes")) : List.of(),
+                        tags != null ? castStringList(tags.get("knowledge")) : List.of()
+                    );
+                })
                 .toList();
+            log.info("Loaded {} quiz questions, IDs={}", result.size(),
+                    result.stream().map(q -> q.questionId).toList());
+            return result;
         } catch (Exception e) {
             log.error("Failed to load quiz questions for activity", e);
             return List.of();
         }
     }
 
+    /** 兼容 generator 输出的 id(整数) 和手动构造的 question_id(字符串) */
+    private String qId(Map<String, Object> q) {
+        String id = (String) q.get("question_id");
+        if (id != null) return id;
+        Object rawId = q.get("id");
+        return rawId != null ? String.valueOf(rawId) : null;
+    }
+
     // ==================== 评分逻辑 ====================
 
     private ScoreResult scoreQuiz(ActivitySubmitRequest request, List<QuestionDef> questions) {
         if (request.getAnswers() == null || request.getAnswers().isEmpty()) {
-            return new ScoreResult(0.0, 0, 0, List.of());
+            return new ScoreResult(0.0, 0, 0, List.of(), List.of());
         }
 
         // Build lookup: questionId → QuestionDef
         Map<String, QuestionDef> lookup = new LinkedHashMap<>();
         for (QuestionDef q : questions) {
-            lookup.put(q.questionId, q);
+            if (q.questionId != null) lookup.put(q.questionId, q);
         }
 
         int correct = 0;
-        int total = request.getAnswers().size();
+        int totalQuestions = questions.size();
+        // 使用题目总数作为分母，而非仅提交的答案数，避免未作答题目拉高正确率
+        int total = totalQuestions > 0 ? totalQuestions : request.getAnswers().size();
+        double weightedScore = 0;
         Set<String> weakTagSet = new LinkedHashSet<>();
+        LinkedHashMap<String, String> resultMap = new LinkedHashMap<>();
+        List<ActivitySubmitRequest.AnswerItem> shortAnswerItems = new ArrayList<>();
 
+        // First pass: score objective + fill-in-blank, collect short-answer items
         for (ActivitySubmitRequest.AnswerItem ans : request.getAnswers()) {
             QuestionDef q = lookup.get(ans.getQuestionId());
             if (q == null) {
                 log.warn("Answer submitted for unknown question_id={}", ans.getQuestionId());
+                resultMap.put(ans.getQuestionId(), "incorrect");
                 continue;
             }
-            if (q.answer != null && q.answer.equals(ans.getAnswer())) {
+
+            if ("SHORT_ANSWER".equals(q.type)) {
+                shortAnswerItems.add(ans);
+                continue; // evaluate in second pass
+            }
+
+            String result = "incorrect";
+            if (q.answer != null && ans.getAnswer() != null && !ans.getAnswer().isBlank()) {
+                if ("FILL_IN_BLANK".equals(q.type)) {
+                    // containment match
+                    String userAns = ans.getAnswer().trim().toLowerCase();
+                    String refAns = q.answer.trim().toLowerCase();
+                    if (userAns.contains(refAns) || refAns.contains(userAns)) {
+                        result = "correct";
+                    }
+                } else {
+                    // SINGLE_CHOICE / TRUE_FALSE / MULTIPLE_CHOICE: exact match (case-insensitive)
+                    if (q.answer.trim().equalsIgnoreCase(ans.getAnswer().trim())) {
+                        result = "correct";
+                    }
+                }
+            }
+
+            if ("correct".equals(result)) {
                 correct++;
+                weightedScore += 1.0;
             } else {
                 if (q.mistakeTags != null) weakTagSet.addAll(q.mistakeTags);
                 if (q.knowledgeTags != null) weakTagSet.addAll(q.knowledgeTags);
             }
+            resultMap.put(ans.getQuestionId(), result);
         }
 
-        double score = total > 0 ? (double) correct / total : 0;
+        // Second pass: evaluate SHORT_ANSWER via LLM
+        if (!shortAnswerItems.isEmpty()) {
+            Map<String, String> saResults = evaluateShortAnswers(shortAnswerItems, lookup);
+            for (ActivitySubmitRequest.AnswerItem ans : shortAnswerItems) {
+                QuestionDef q = lookup.get(ans.getQuestionId());
+                String r = saResults.getOrDefault(ans.getQuestionId(), "incorrect");
+                if ("correct".equals(r)) {
+                    correct++;
+                    weightedScore += 1.0;
+                } else if ("partial".equals(r)) {
+                    weightedScore += 0.5;
+                } else {
+                    if (q != null) {
+                        if (q.mistakeTags != null) weakTagSet.addAll(q.mistakeTags);
+                        if (q.knowledgeTags != null) weakTagSet.addAll(q.knowledgeTags);
+                    }
+                }
+                resultMap.put(ans.getQuestionId(), r);
+            }
+        }
+
+        // Build questionResults: submitted answers + unanswered questions (all marked incorrect)
+        List<ActivitySubmitResponse.QuestionResult> questionResults = new ArrayList<>();
+        for (ActivitySubmitRequest.AnswerItem ans : request.getAnswers()) {
+            String r = resultMap.getOrDefault(ans.getQuestionId(), "incorrect");
+            questionResults.add(makeResult(ans.getQuestionId(), r));
+        }
+        // 补全未作答的题目，确保 questionResults 覆盖全部题目
+        for (QuestionDef q : questions) {
+            if (q.questionId != null && !resultMap.containsKey(q.questionId)) {
+                questionResults.add(makeResult(q.questionId, "incorrect"));
+            }
+        }
+
+        double score = total > 0 ? weightedScore / total : 0;
         List<String> weakTags = new ArrayList<>(weakTagSet);
-        log.info("Quiz scored: {}/{} correct, score={}, weakTags={}", correct, total, score, weakTags);
-        return new ScoreResult(score, correct, total, weakTags);
+        log.info("Quiz scored: {}/{} correct (weighted={}), score={}, weakTags={}, totalQuestions={}",
+                correct, total, weightedScore, score, weakTags, totalQuestions);
+        return new ScoreResult(score, correct, total, weakTags, questionResults);
     }
 
-    private void writeAttemptAnswers(QuizAttempt attempt, ActivitySubmitRequest request, List<String> weakTags) {
+    private ActivitySubmitResponse.QuestionResult makeResult(String questionId, String result) {
+        var r = new ActivitySubmitResponse.QuestionResult();
+        r.setQuestionId(questionId);
+        r.setResult(result);
+        return r;
+    }
+
+    /** 批量 LLM 简答评判：一次调用评判所有简答题 */
+    private Map<String, String> evaluateShortAnswers(
+            List<ActivitySubmitRequest.AnswerItem> items,
+            Map<String, QuestionDef> lookup) {
+        StringBuilder prompt = new StringBuilder(promptLoader.get("evaluate/short_answer"));
+        prompt.append("\n\n## 题目与学生答案\n");
+        for (int i = 0; i < items.size(); i++) {
+            ActivitySubmitRequest.AnswerItem ans = items.get(i);
+            QuestionDef q = lookup.get(ans.getQuestionId());
+            prompt.append(String.format("""
+                    题目 %d:
+                    问题: %s
+                    参考答案: %s
+                    学生答案: %s
+                    """, i + 1, q != null ? q.content : "", q != null ? q.answer : "", ans.getAnswer()));
+        }
+        prompt.append("\n请按顺序输出每道题的评判结果，每行格式：题目索引|结果（correct/partial/incorrect）");
+
         try {
-            attempt.setAnswersJson(objectMapper.writeValueAsString(request.getAnswers()));
+            String response = shortAnswerClient.prompt()
+                .user(prompt.toString())
+                .call()
+                .content();
+            log.info("Short-answer LLM evaluation raw:\n{}", response);
+            return parseShortAnswerResults(response, items);
+        } catch (Exception e) {
+            log.error("Short-answer LLM evaluation failed", e);
+            Map<String, String> fallback = new HashMap<>();
+            for (var item : items) {
+                fallback.put(item.getQuestionId(), "incorrect");
+            }
+            return fallback;
+        }
+    }
+
+    private Map<String, String> parseShortAnswerResults(String response, List<ActivitySubmitRequest.AnswerItem> items) {
+        Map<String, String> results = new HashMap<>();
+        if (response == null || response.isBlank()) {
+            for (var item : items) results.put(item.getQuestionId(), "incorrect");
+            return results;
+        }
+        String[] lines = response.split("\n");
+        for (String line : lines) {
+            line = line.trim();
+            if (line.isEmpty()) continue;
+            String[] parts = line.split("\\|");
+            if (parts.length < 2) continue;
+            try {
+                int idx = Integer.parseInt(parts[0].trim());
+                String result = parts[1].trim().toLowerCase();
+                if (idx >= 1 && idx <= items.size()) {
+                    if ("correct".equals(result) || "partial".equals(result) || "incorrect".equals(result)) {
+                        results.put(items.get(idx - 1).getQuestionId(), result);
+                    }
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+        // fill missing items as incorrect
+        for (var item : items) {
+            results.putIfAbsent(item.getQuestionId(), "incorrect");
+        }
+        return results;
+    }
+
+    private void writeAttemptAnswers(QuizAttempt attempt, ActivitySubmitRequest request,
+                                     List<String> weakTags,
+                                     List<ActivitySubmitResponse.QuestionResult> questionResults) {
+        try {
+            List<Map<String, Object>> enriched = new ArrayList<>();
+            Map<String, String> resultMap = new LinkedHashMap<>();
+            if (questionResults != null) {
+                for (var qr : questionResults) {
+                    resultMap.put(qr.getQuestionId(), qr.getResult());
+                }
+            }
+            for (var ans : request.getAnswers()) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("question_id", ans.getQuestionId());
+                entry.put("answer", ans.getAnswer());
+                String r = resultMap.get(ans.getQuestionId());
+                if (r != null) entry.put("result", r);
+                enriched.add(entry);
+            }
+            attempt.setAnswersJson(objectMapper.writeValueAsString(enriched));
             attempt.setWeakTags(objectMapper.writeValueAsString(weakTags));
             attempt.setDurationSeconds(request.getDurationSeconds());
         } catch (Exception e) {
@@ -392,8 +621,190 @@ public class PlanServiceImpl implements PlanService {
         }
     }
 
-    private record QuestionDef(String questionId, String answer, List<String> mistakeTags, List<String> knowledgeTags) {}
-    private record ScoreResult(double score, int correct, int total, List<String> weakTags) {}
+    private record QuestionDef(String questionId, String type, String content, String answer, List<String> mistakeTags, List<String> knowledgeTags) {}
+    private record ScoreResult(double score, int correct, int total, List<String> weakTags, List<ActivitySubmitResponse.QuestionResult> questionResults) {}
+
+    // ==================== 智能评估 ====================
+
+    private static final String QUIZ_EVAL_SYSTEM_PROMPT = """
+            你是学思伴行（LearnThink Companion）的学习评估专家。
+            请根据学生的本次做题数据，生成客观、专业的智能评估分析。
+
+            【输出规范】
+            严格按以下 Markdown 结构输出，不得增删章节，不得输出结构之外的内容：
+            ## 表现概述
+            <得分、正确率、等级（优秀/良好/合格/待改进）一句话概述>
+
+            ## 掌握诊断
+            - 已掌握：<本次做对题目反映的知识点>
+            - 薄弱点：<本次做错或薄弱的知识点，结合错题说明为何薄弱>
+
+            ## 错题分析
+            <逐道错题分析：错在哪、混淆了什么、正确思路是什么；若全对则写"本次无错题">
+
+            ## 改进建议
+            1. <针对薄弱点的具体可操作建议，2-3 条>
+
+            【要求】
+            - 评语具体、指向本次作答，避免空话套话
+            - 不要复述题目原文，引用关键点即可
+            - 只输出评估，不要寒暄与解释
+            """;
+
+    @Override
+    public void evaluateQuizActivity(String userId, String activityId, SseEmitter emitter) {
+        try {
+            Container ctx = findActivityContainer(userId, activityId);
+            if (ctx == null) {
+                sendEvalError(emitter, "未找到该学习活动");
+                return;
+            }
+            Map<String, Object> activity = ctx.activity();
+            boolean isStandaloneQuiz = "quiz".equals(activity.get("type"));
+
+            List<QuestionDef> questions = loadQuizQuestions(activity);
+            if (questions.isEmpty()) {
+                sendEvalError(emitter, isStandaloneQuiz ? "未找到题目内容" : "该活动不含练习题，无法评估");
+                return;
+            }
+
+            QuizAttempt attempt = quizAttemptMapper.selectOne(
+                    new LambdaQueryWrapper<QuizAttempt>()
+                            .eq(QuizAttempt::getUserId, userId)
+                            .eq(QuizAttempt::getActivityId, activityId)
+                            .orderByDesc(QuizAttempt::getCreatedAt)
+                            .last("LIMIT 1"));
+            if (attempt == null) {
+                sendEvalError(emitter, "尚未提交作答，无法评估");
+                return;
+            }
+
+            // 独立 quiz 活动：检查缓存，只评估一次；非独立 quiz（learn 中的 quiz 资源）：每次重新评估，不落库
+            if (isStandaloneQuiz && attempt.getEvaluation() != null && !attempt.getEvaluation().isBlank()) {
+                emitter.send(SseEmitter.event().name("chunk").data(attempt.getEvaluation()));
+                emitter.send(SseEmitter.event().name("done").data(""));
+                emitter.complete();
+                return;
+            }
+
+            String evalInput = buildEvaluationInput(attempt, questions);
+
+            StringBuilder full = new StringBuilder();
+            shortAnswerClient.prompt()
+                    .system(QUIZ_EVAL_SYSTEM_PROMPT)
+                    .user(evalInput)
+                    .stream()
+                    .content()
+                    .doOnNext(chunk -> {
+                        full.append(chunk);
+                        try {
+                            emitter.send(SseEmitter.event().name("chunk").data(chunk));
+                        } catch (Exception ignored) {
+                        }
+                    })
+                    .blockLast();
+
+            if (full.isEmpty()) {
+                sendEvalError(emitter, "评估生成失败");
+                return;
+            }
+
+            // 仅独立 quiz 活动落库保存评估结果；learn 中的 quiz 资源只展示不保存
+            if (isStandaloneQuiz) {
+                try {
+                    attempt.setEvaluation(full.toString());
+                    quizAttemptMapper.updateById(attempt);
+                } catch (Exception e) {
+                    log.warn("Persist quiz evaluation failed: {}", e.getMessage());
+                }
+            }
+
+            emitter.send(SseEmitter.event().name("done").data(""));
+            emitter.complete();
+        } catch (Exception e) {
+            log.error("evaluateQuizActivity failed: activityId={}", activityId, e);
+            sendEvalError(emitter, "评估失败: " + e.getMessage());
+        }
+    }
+
+    private String buildEvaluationInput(QuizAttempt attempt, List<QuestionDef> questions) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("【学生作答数据】\n");
+        sb.append("得分：").append(attempt.getScore()).append("\n");
+
+        List<String> weakTags = parseStringList(attempt.getWeakTags());
+        sb.append("薄弱标签：").append(weakTags.isEmpty() ? "无" : String.join("、", weakTags)).append("\n\n");
+        sb.append("【各题作答】\n");
+
+        List<Map<String, Object>> answers = parseAnswersJson(attempt.getAnswersJson());
+        Map<String, QuestionDef> qLookup = new LinkedHashMap<>();
+        for (QuestionDef q : questions) {
+            if (q.questionId() != null) qLookup.put(q.questionId(), q);
+        }
+
+        int idx = 1;
+        for (Map<String, Object> ans : answers) {
+            String qid = String.valueOf(ans.getOrDefault("question_id", ""));
+            String studentAns = String.valueOf(ans.getOrDefault("answer", ""));
+            String result = String.valueOf(ans.getOrDefault("result", "incorrect"));
+            QuestionDef q = qLookup.get(qid);
+
+            sb.append("第").append(idx++).append("题");
+            if (q != null) {
+                sb.append("（").append(typeLabel(q.type())).append("）：\n");
+                sb.append("题目：").append(q.content()).append("\n");
+                sb.append("学生答案：").append(studentAns).append("\n");
+                sb.append("正确答案：").append(q.answer()).append("\n");
+            } else {
+                sb.append("：\n题目：（未知题目）\n学生答案：").append(studentAns).append("\n");
+            }
+            sb.append("结果：")
+                    .append("correct".equals(result) ? "✓ 正确"
+                            : "partial".equals(result) ? "△ 部分正确"
+                            : "✗ 错误")
+                    .append("\n\n");
+        }
+        return sb.toString();
+    }
+
+    private void sendEvalError(SseEmitter emitter, String message) {
+        try {
+            emitter.send(SseEmitter.event().name("error").data(message));
+            emitter.complete();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private String typeLabel(String type) {
+        if (type == null) return "题目";
+        return switch (type) {
+            case "SINGLE_CHOICE" -> "单选题";
+            case "MULTIPLE_CHOICE" -> "多选题";
+            case "TRUE_FALSE" -> "判断题";
+            case "FILL_IN_BLANK" -> "填空题";
+            case "SHORT_ANSWER" -> "简答题";
+            default -> "题目";
+        };
+    }
+
+    private List<Map<String, Object>> parseAnswersJson(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<Map<String, Object>>>() {});
+        } catch (Exception e) {
+            log.warn("parseAnswersJson failed: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    private List<String> parseStringList(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<String>>() {});
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
 
     // ==================== 回退重学 ====================
 
@@ -419,9 +830,12 @@ public class PlanServiceImpl implements PlanService {
         learnActivity.put("title", "回顾：" + weakTagsStr);
         learnActivity.put("description", "针对薄弱点的回顾学习");
         learnActivity.put("requires", new ArrayList<>());
-        learnActivity.put("resource", hasExistingDoc
-            ? Map.of("source", "matched", "resource_pack_id", fallbackPackId, "resource_type", "doc", "generation_status", (String) null)
-            : Map.of("source", "generated", "resource_pack_id", (String) null, "resource_type", "doc", "generation_status", "pending"));
+        Map<String, Object> learnResource = new LinkedHashMap<>();
+        learnResource.put("source", hasExistingDoc ? "matched" : "generated");
+        learnResource.put("resource_pack_id", hasExistingDoc ? fallbackPackId : null);
+        learnResource.put("resource_type", "doc");
+        learnResource.put("generation_status", hasExistingDoc ? null : "pending");
+        learnActivity.put("resource", learnResource);
         learnActivity.put("estimated_minutes", 20);
         learnActivity.put("order", failedOrder);
         learnActivity.put("completion_criteria", Map.of("type", "resource_open", "threshold", 10, "met", false));
@@ -437,7 +851,12 @@ public class PlanServiceImpl implements PlanService {
         quizActivity.put("title", "重新检验：" + failedTitle);
         quizActivity.put("description", "检验回顾后的掌握情况");
         quizActivity.put("requires", List.of(learnId));
-        quizActivity.put("resource", Map.of("source", "generated", "resource_pack_id", (String) null, "resource_type", "quiz", "generation_status", "pending"));
+        Map<String, Object> quizResource = new LinkedHashMap<>();
+        quizResource.put("source", "generated");
+        quizResource.put("resource_pack_id", null);
+        quizResource.put("resource_type", "quiz");
+        quizResource.put("generation_status", "pending");
+        quizActivity.put("resource", quizResource);
         quizActivity.put("estimated_minutes", 20);
         quizActivity.put("order", failedOrder + 1);
         quizActivity.put("completion_criteria", Map.of("type", "quiz_score", "threshold", threshold, "met", false));
@@ -465,7 +884,7 @@ public class PlanServiceImpl implements PlanService {
         // 记录 adjustments
         List<Map<String, Object>> adjustments = castMapList(ctx.subPlanObj().get("adjustments"));
         Map<String, Object> adj = new LinkedHashMap<>();
-        adj.put("at", LocalDateTime.now().toString());
+        adj.put("at", java.time.Instant.now().toString());
         adj.put("reason", "正确率 " + String.format("%.0f%%", getResultScore(failedActivity) * 100) +
                 " 严重低于阈值(" + String.format("%.0f%%", threshold * 100) + ")，薄弱点：" + weakTagsStr + "。已插入回顾学习+重新检验");
         adj.put("diff", Map.of(
@@ -513,10 +932,26 @@ public class PlanServiceImpl implements PlanService {
             updatePlanModuleStatus(ctx, moduleId, "in_progress");
         }
 
-        // 模块刚刚变成 completed → 检查下一模块资源并推送
+        // 模块刚刚变成 completed → 记录事件、检查下一模块资源并推送
         String newStatus = getModuleStatus(ctx, moduleId);
         if ("completed".equals(newStatus) && !"completed".equals(oldStatus)) {
+            // 查找模块标题
+            List<Map<String, Object>> modules = castMapList(ctx.planObj().get("modules"));
+            String moduleTitle = moduleId;
+            for (Map<String, Object> m : modules) {
+                if (moduleId.equals(m.get("module_id"))) {
+                    moduleTitle = (String) m.getOrDefault("title", moduleId);
+                    break;
+                }
+            }
+            writeLearningEvent(ctx.plan().getUserId(), "node_completed", Map.of(
+                    "module_id", moduleId,
+                    "title", moduleTitle,
+                    "plan_id", ctx.plan().getId(),
+                    "course_id", ctx.plan().getCourseId()
+            ));
             tryPushPathNext(ctx, moduleId);
+            unlockDependentModules(ctx, moduleId);
         }
     }
 
@@ -640,6 +1075,84 @@ public class PlanServiceImpl implements PlanService {
         }
     }
 
+    @Override
+    public List<Map<String, Object>> getResourceStatus(String userId, String activityId, String moduleId) {
+        Container ctx = findActivityContainer(userId, activityId, moduleId);
+        if (ctx == null) return List.of();
+
+        String planId = ctx.plan().getId();
+        String resolvedModuleId = ctx.subPlan().getModuleId();
+
+        List<LearningRecord> records = learningRecordMapper.findByActivity(userId, planId, resolvedModuleId, activityId);
+        Map<String, LearningRecord> recordMap = new LinkedHashMap<>();
+        for (LearningRecord r : records) {
+            recordMap.put(r.getResourceType(), r);
+        }
+
+        List<Map<String, Object>> resources = castMapList(ctx.activity().get("resources"));
+        if (resources.isEmpty()) {
+            Map<String, Object> resource = castMap(ctx.activity().get("resource"));
+            if (resource != null) resources = List.of(resource);
+        }
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> r : resources) {
+            String resourceType = (String) r.get("resource_type");
+            if (resourceType == null) continue;
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("resource_type", resourceType);
+            LearningRecord record = recordMap.get(resourceType);
+            if (record != null) {
+                item.put("status", record.getStatus());
+                item.put("duration_seconds", record.getDurationSeconds());
+                item.put("completed_at", record.getCompletedAt() != null ? record.getCompletedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : null);
+            } else {
+                item.put("status", null);
+                item.put("duration_seconds", null);
+                item.put("completed_at", null);
+            }
+            result.add(item);
+        }
+        return result;
+    }
+
+    @Override
+    public void updateResourceStatus(String userId, String activityId, String moduleId, String resourceType, String status, Integer durationSeconds) {
+        Container ctx = findActivityContainer(userId, activityId, moduleId);
+        if (ctx == null) return;
+
+        List<Map<String, Object>> resources = castMapList(ctx.activity().get("resources"));
+        Map<String, Object> targetResource = null;
+        for (Map<String, Object> r : resources) {
+            if (resourceType.equals(r.get("resource_type"))) {
+                targetResource = r;
+                break;
+            }
+        }
+        if (targetResource == null) {
+            Map<String, Object> resource = castMap(ctx.activity().get("resource"));
+            if (resource != null && resourceType.equals(resource.get("resource_type"))) {
+                targetResource = resource;
+            }
+        }
+        if (targetResource == null) return;
+
+        LearningRecord record = new LearningRecord();
+        record.setUserId(userId);
+        record.setCourseId(ctx.plan().getCourseId());
+        record.setPlanId(ctx.plan().getId());
+        record.setModuleId(ctx.subPlan().getModuleId());
+        record.setActivityId(activityId);
+        record.setResourcePackId((String) targetResource.get("resource_pack_id"));
+        record.setResourceType(resourceType);
+        record.setStatus(status);
+        record.setDurationSeconds(durationSeconds != null ? durationSeconds : 0);
+        if ("completed".equals(status)) {
+            record.setCompletedAt(LocalDateTime.now());
+        }
+        learningRecordMapper.upsert(record);
+    }
+
     private String getModuleStatus(Container ctx, String moduleId) {
         List<Map<String, Object>> modules = castMapList(ctx.planObj().get("modules"));
         return modules.stream()
@@ -661,6 +1174,10 @@ public class PlanServiceImpl implements PlanService {
     // ==================== 辅助方法 ====================
 
     private Container findActivityContainer(String userId, String activityId) {
+        return findActivityContainer(userId, activityId, null);
+    }
+
+    private Container findActivityContainer(String userId, String activityId, String moduleId) {
         List<LearningPlan> plans = planMapper.selectList(
                 new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<LearningPlan>()
                         .eq(LearningPlan::getUserId, userId)
@@ -669,6 +1186,7 @@ public class PlanServiceImpl implements PlanService {
         for (LearningPlan plan : plans) {
             List<SubPlan> subPlans = subPlanMapper.findByPlanId(plan.getId());
             for (SubPlan sp : subPlans) {
+                if (moduleId != null && !moduleId.equals(sp.getModuleId())) continue;
                 try {
                     Map<String, Object> spObj = objectMapper.readValue(sp.getSubPlanJson(), mapType());
                     List<Map<String, Object>> activities = castMapList(spObj.get("activities"));
@@ -705,6 +1223,40 @@ public class PlanServiceImpl implements PlanService {
             log.warn("Failed to serialize event payload", e);
         }
         learningEventMapper.insert(event);
+    }
+
+    private void writeLearningRecords(Container ctx, Map<String, Object> activity, String status, Integer durationSeconds) {
+        String userId = ctx.plan().getUserId();
+        String courseId = ctx.plan().getCourseId();
+        String planId = ctx.plan().getId();
+        String moduleId = ctx.subPlan().getModuleId();
+        String activityId = (String) activity.get("activity_id");
+
+        List<Map<String, Object>> resources = castMapList(activity.get("resources"));
+        if (resources.isEmpty()) {
+            Map<String, Object> resource = castMap(activity.get("resource"));
+            if (resource != null) resources = List.of(resource);
+        }
+
+        for (Map<String, Object> r : resources) {
+            String resourceType = (String) r.get("resource_type");
+            if (resourceType == null) continue;
+
+            LearningRecord record = new LearningRecord();
+            record.setUserId(userId);
+            record.setCourseId(courseId);
+            record.setPlanId(planId);
+            record.setModuleId(moduleId);
+            record.setActivityId(activityId);
+            record.setResourcePackId((String) r.get("resource_pack_id"));
+            record.setResourceType(resourceType);
+            record.setStatus(status);
+            record.setDurationSeconds(durationSeconds != null ? durationSeconds : 0);
+            if ("completed".equals(status)) {
+                record.setCompletedAt(LocalDateTime.now());
+            }
+            learningRecordMapper.upsert(record);
+        }
     }
 
     private int getRetryCount(Map<String, Object> activity) {
@@ -802,7 +1354,8 @@ public class PlanServiceImpl implements PlanService {
                     .profileVersion(plan.getProfileVersion())
                     .courseId(plan.getCourseId())
                     .status(plan.getStatus())
-                    .createdAt(plan.getCreatedAt() != null ? plan.getCreatedAt().toString() : null)
+                    .lockMode(plan.getLockMode() != null ? plan.getLockMode() : "sequential")
+                    .createdAt(plan.getCreatedAt() != null ? plan.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : null)
                     .modules(moduleDtos)
                     .edges(edgeDtos)
                     .summary(summaryDto)
@@ -1109,9 +1662,198 @@ public class PlanServiceImpl implements PlanService {
         }
     }
 
+    // ==================== 锁定模式 ====================
+
+    @Override
+    @Transactional
+    public PlanResponse updateLockMode(String userId, String courseId, String lockMode) {
+        if (!"sequential".equals(lockMode) && !"free".equals(lockMode)) {
+            throw new BusinessException("非法的锁定模式: " + lockMode);
+        }
+        LearningPlan plan = planMapper.findByUserIdAndCourseId(userId, courseId);
+        if (plan == null) {
+            throw new BusinessException("学习计划不存在");
+        }
+
+        try {
+            Map<String, Object> planObj = objectMapper.readValue(plan.getPlanJson(), mapType());
+            List<Map<String, Object>> modules = castMapList(planObj.get("modules"));
+
+            List<SubPlan> subPlans = subPlanMapper.findByPlanId(plan.getId());
+            Map<String, SubPlan> subPlanByModule = new LinkedHashMap<>();
+            Map<String, Map<String, Object>> subPlanObjs = new LinkedHashMap<>();
+            for (SubPlan sp : subPlans) {
+                subPlanByModule.put(sp.getModuleId(), sp);
+                subPlanObjs.put(sp.getModuleId(), objectMapper.readValue(sp.getSubPlanJson(), mapType()));
+            }
+
+            recomputeLockStates(modules, subPlanObjs, lockMode);
+
+            plan.setPlanJson(objectMapper.writeValueAsString(planObj));
+
+            for (Map.Entry<String, Map<String, Object>> e : subPlanObjs.entrySet()) {
+                SubPlan sp = subPlanByModule.get(e.getKey());
+                subPlanMapper.updateSubPlan(sp.getId(),
+                        objectMapper.writeValueAsString(e.getValue()), sp.getVersion());
+            }
+
+            plan.setLockMode(lockMode);
+            planMapper.updateById(plan);
+
+            return buildPlanResponse(plan);
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("Failed to update lock mode", e);
+            throw new RuntimeException("Failed to update lock mode", e);
+        }
+    }
+
+    /**
+     * 按模式重算 activity/module 的锁定状态。
+     * - free: 所有 locked -> ready
+     * - sequential: 按 requires/prerequisites 重算（终态 completed/failed/in_progress/skipped 不动）
+     */
+    private void recomputeLockStates(List<Map<String, Object>> modules,
+                                     Map<String, Map<String, Object>> subPlanObjs,
+                                     String lockMode) {
+        boolean free = "free".equals(lockMode);
+
+        // ---- Activity 级 ----
+        for (Map<String, Object> module : modules) {
+            String moduleId = (String) module.get("module_id");
+            Map<String, Object> subObj = subPlanObjs.get(moduleId);
+            if (subObj == null) continue;
+            List<Map<String, Object>> activities = castMapList(subObj.get("activities"));
+            if (activities == null) continue;
+
+            Map<String, String> statusSnap = new HashMap<>();
+            for (Map<String, Object> a : activities) {
+                statusSnap.put((String) a.get("activity_id"), (String) a.get("status"));
+            }
+
+            for (Map<String, Object> a : activities) {
+                String st = (String) a.get("status");
+                if ("completed".equals(st) || "in_progress".equals(st)
+                        || "failed".equals(st) || "skipped".equals(st)) {
+                    continue;
+                }
+                if (free) {
+                    if ("locked".equals(st)) a.put("status", "ready");
+                } else {
+                    List<String> requires = castStringList(a.get("requires"));
+                    boolean unlocked = true;
+                    if (requires != null && !requires.isEmpty()) {
+                        for (String reqId : requires) {
+                            if (!"completed".equals(statusSnap.get(reqId))) {
+                                unlocked = false;
+                                break;
+                            }
+                        }
+                    }
+                    a.put("status", unlocked ? "ready" : "locked");
+                }
+            }
+            subObj.put("activities", activities);
+        }
+
+        // ---- Module 级 ----
+        Map<String, String> moduleStatusSnap = new HashMap<>();
+        for (Map<String, Object> m : modules) {
+            moduleStatusSnap.put((String) m.get("module_id"), (String) m.get("status"));
+        }
+        for (Map<String, Object> m : modules) {
+            String st = (String) m.get("status");
+            if ("completed".equals(st) || "in_progress".equals(st)) continue;
+            if (free) {
+                if ("locked".equals(st)) m.put("status", "ready");
+            } else {
+                List<String> prereq = castStringList(m.get("prerequisites"));
+                boolean unlocked = true;
+                if (prereq != null && !prereq.isEmpty()) {
+                    for (String pid : prereq) {
+                        if (!"completed".equals(moduleStatusSnap.get(pid))) {
+                            unlocked = false;
+                            break;
+                        }
+                    }
+                }
+                m.put("status", unlocked ? "ready" : "locked");
+            }
+        }
+    }
+
+    /** sequential 模式下，activity 完成后重算同 module 内锁定状态 */
+    private void unlockAfterActivityComplete(Container ctx, String completedActivityId) {
+        if (!"completed".equals(ctx.activity().get("status"))) return;
+        if (!"sequential".equals(ctx.plan().getLockMode())) return;
+        Map<String, Object> subObj = ctx.subPlanObj();
+        List<Map<String, Object>> activities = castMapList(subObj.get("activities"));
+        if (activities == null) return;
+
+        Map<String, String> snap = new HashMap<>();
+        for (Map<String, Object> a : activities) {
+            snap.put((String) a.get("activity_id"), (String) a.get("status"));
+        }
+        boolean changed = false;
+        for (Map<String, Object> a : activities) {
+            if (!"locked".equals(a.get("status"))) continue;
+            List<String> requires = castStringList(a.get("requires"));
+            if (requires == null || requires.isEmpty()) continue;
+            boolean allDone = true;
+            for (String reqId : requires) {
+                if (!"completed".equals(snap.get(reqId))) { allDone = false; break; }
+            }
+            if (allDone) { a.put("status", "ready"); changed = true; }
+        }
+        if (changed) saveSubPlan(ctx);
+    }
+
+    /** sequential 模式下，module 完成后解锁 prerequisites 依赖该 module 的 module */
+    private void unlockDependentModules(Container ctx, String completedModuleId) {
+        if (!"sequential".equals(ctx.plan().getLockMode())) return;
+        Map<String, Object> planObj = ctx.planObj();
+        List<Map<String, Object>> modules = castMapList(planObj.get("modules"));
+        if (modules == null) return;
+        boolean changed = false;
+        for (Map<String, Object> m : modules) {
+            if (!"locked".equals(m.get("status"))) continue;
+            List<String> prereq = castStringList(m.get("prerequisites"));
+            if (prereq == null || !prereq.contains(completedModuleId)) continue;
+            boolean allDone = true;
+            for (String pid : prereq) {
+                boolean done = false;
+                for (Map<String, Object> pm : modules) {
+                    if (pid.equals(pm.get("module_id")) && "completed".equals(pm.get("status"))) {
+                        done = true;
+                        break;
+                    }
+                }
+                if (!done) { allDone = false; break; }
+            }
+            if (allDone) { m.put("status", "ready"); changed = true; }
+        }
+        if (changed) {
+            try {
+                ctx.plan().setPlanJson(objectMapper.writeValueAsString(planObj));
+                planMapper.updatePlan(ctx.plan().getId(),
+                        ctx.plan().getCurrentVersion(), ctx.plan().getPlanJson());
+            } catch (Exception e) {
+                log.error("Failed to unlock dependent modules", e);
+            }
+        }
+    }
+
     // ==================== 类型转换辅助 ====================
 
-    @SuppressWarnings("unchecked")
+    /** 兼容 completionCriteria (camelCase) 和 completion_criteria (snake_case)，为空时返回空 Map */
+    private Map<String, Object> getCompletionCriteria(Map<String, Object> activity) {
+        Map<String, Object> c = castMap(activity.get("completionCriteria"));
+        if (c != null) return c;
+        c = castMap(activity.get("completion_criteria"));
+        return c != null ? c : new LinkedHashMap<>();
+    }
+
     private Map<String, Object> castMap(Object obj) {
         return obj instanceof Map ? (Map<String, Object>) obj : null;
     }

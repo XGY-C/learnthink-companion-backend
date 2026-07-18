@@ -25,6 +25,7 @@ public class ResourceRecommendationController {
 
     private final PushService pushService;
     private final NotificationService notificationService;
+    private final com.learnthink.core.service.RecommendationFeedbackService feedbackService;
 
     /**
      * Dashboard 主动查看推荐
@@ -34,7 +35,8 @@ public class ResourceRecommendationController {
             @RequestParam("course_id") String courseId,
             @RequestParam(value = "limit", defaultValue = "5") int limit) {
         String userId = UserContextUtil.getCurrentUserId();
-        List<ScoredPack> scored = pushService.getRecommendations(userId, courseId, limit);
+        int safeLimit = Math.min(Math.max(limit, 1), 20);
+        List<ScoredPack> scored = pushService.getRecommendations(userId, courseId, safeLimit);
 
         RecommendationResponse resp = RecommendationResponse.builder()
                 .main(scored.isEmpty() ? null : scored.get(0))
@@ -64,7 +66,8 @@ public class ResourceRecommendationController {
             filtered = allNotifs;
         }
 
-        int unreadCount = pushService.getUnreadPushCount(userId);
+        // 从返回列表中统计未读数，确保与红点一致
+        int unreadCount = (int) filtered.stream().filter(n -> !n.isRead()).count();
 
         Map<String, Object> data = new java.util.LinkedHashMap<>();
         data.put("notifications", filtered);
@@ -102,4 +105,52 @@ public class ResourceRecommendationController {
         String userId = UserContextUtil.getCurrentUserId();
         notificationService.markAllAsRead(userId);
         return Result.success();
-    }}
+    }
+
+    /**
+     * 删除单条通知
+     */
+    @DeleteMapping("/notifications/{id}")
+    public Result<Void> deleteNotification(@PathVariable String id) {
+        String userId = UserContextUtil.getCurrentUserId();
+        notificationService.deleteNotification(id, userId);
+        return Result.success();
+    }
+
+    /**
+     * 记录推荐反馈行为（前端埋点）
+     */
+    @PostMapping("/feedback")
+    public Result<Void> recordFeedback(@RequestBody FeedbackRequest req) {
+        String userId = UserContextUtil.getCurrentUserId();
+        feedbackService.record(userId, req.getCourseId(), req.getPackId(),
+                req.getAction(), req.getSource(), req.getNotificationId(), req.getScoreJson());
+        return Result.success();
+    }
+
+    /**
+     * 推荐效果统计
+     */
+    @GetMapping("/stats")
+    public Result<Map<String, Object>> getStats(
+            @RequestParam("course_id") String courseId,
+            @RequestParam(value = "days", defaultValue = "30") int days) {
+        String userId = UserContextUtil.getCurrentUserId();
+        return Result.success(feedbackService.getStats(userId, courseId, days));
+    }
+
+    /**
+     * 反馈请求体（兼容前端 snake_case）
+     */
+    @lombok.Data
+    @com.fasterxml.jackson.databind.annotation.JsonNaming(
+            com.fasterxml.jackson.databind.PropertyNamingStrategies.SnakeCaseStrategy.class)
+    public static class FeedbackRequest {
+        private String courseId;
+        private String packId;
+        private String action;
+        private String source;
+        private String notificationId;
+        private String scoreJson;
+    }
+}

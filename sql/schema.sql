@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS courses (
     teacher_id CHAR(36) DEFAULT NULL COMMENT '授课教师ID，关联users.id',
     deleted_at DATETIME DEFAULT NULL COMMENT '逻辑删除时间',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
+    updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     INDEX idx_courses_teacher (teacher_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
@@ -170,7 +170,46 @@ CREATE TABLE IF NOT EXISTS profile_signal_cooldown (
 
 
 -- ============================================================
--- 3. 任务编排与事件（多智能体流水线）
+-- 3. 对话会话与消息
+-- ============================================================
+-- 会话主表
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id CHAR(36) PRIMARY KEY COMMENT 'session_id (UUID)',
+    user_id CHAR(36) NOT NULL,
+    course_id CHAR(36) NOT NULL,
+    title VARCHAR(255) DEFAULT NULL COMMENT '会话标题',
+    type VARCHAR(20) DEFAULT 'chat' COMMENT 'chat | lecture | resource | plan',
+    status VARCHAR(20) DEFAULT 'active' COMMENT 'active | archived',
+    profile_version_id CHAR(36) DEFAULT NULL,
+    message_count INT DEFAULT 0 COMMENT '消息总数',
+    current_round INT DEFAULT 0 COMMENT '当前对话轮次',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_chat_sessions_user_course (user_id, course_id),
+    INDEX idx_chat_sessions_updated (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- 原子消息表
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id CHAR(36) PRIMARY KEY COMMENT 'message_id (UUID)',
+    session_id CHAR(36) NOT NULL,
+    user_id CHAR(36) NOT NULL,
+    seq_num INT DEFAULT 0 COMMENT '全局有序序列号',
+    round_num INT DEFAULT 0 COMMENT '对话轮次',
+    role VARCHAR(20) NOT NULL COMMENT 'user | assistant | system',
+    content MEDIUMTEXT COMMENT '消息内容',
+    mode VARCHAR(20) DEFAULT NULL COMMENT 'chat | lecture | resource | plan',
+    feedback VARCHAR(10) DEFAULT NULL COMMENT 'like | dislike | null',
+    metadata_json JSON DEFAULT NULL COMMENT '按 mode 不同结构',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_chat_messages_session (session_id),
+    INDEX idx_chat_messages_user (user_id),
+    INDEX idx_chat_messages_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- ============================================================
+-- 4. 任务编排与事件（多智能体流水线）
 -- ============================================================
 -- 任务主表
 CREATE TABLE IF NOT EXISTS tasks (
@@ -293,11 +332,11 @@ CREATE TABLE IF NOT EXISTS resource_items (
     id CHAR(36) PRIMARY KEY,
     pack_id CHAR(36) NOT NULL,
     task_id CHAR(36) NOT NULL,
-    type VARCHAR(30) COMMENT 'doc / quiz / mindmap / reading / code / video',
+    type VARCHAR(30) COMMENT 'doc / quiz / mindmap / reading / code / video / html',
     title VARCHAR(500),
     status VARCHAR(20) DEFAULT 'pending' COMMENT 'pending / ready / failed / rejected',
     content_ref VARCHAR(500) COMMENT '对象存储 key',
-    content_mime VARCHAR(50) COMMENT 'text/markdown / application/json',
+    content_mime VARCHAR(50) COMMENT 'text/markdown / text/html / application/json',
     confidence VARCHAR(10) COMMENT '置信度等级 high / medium / low',
     quality_score DECIMAL(3,2) COMMENT '质量评分 0.00~100.00',
     metadata_json JSON COMMENT '难度、标签、估时等扩展字段',
@@ -389,6 +428,7 @@ CREATE TABLE IF NOT EXISTS learning_plans (
     current_version INT DEFAULT 1 COMMENT '当前计划版本号',
     plan_json JSON COMMENT '完整计划 JSON（modules, edges, summary）',
     status VARCHAR(20) DEFAULT 'generating' COMMENT 'pending_decision / decided / generating / ready / completed / archived',
+    lock_mode VARCHAR(12) NOT NULL DEFAULT 'sequential' COMMENT '锁定模式: sequential(按顺序解锁) / free(自由学习)',
     chat_id CHAR(36) DEFAULT NULL COMMENT '关联的对话会话ID，用于历史加载还原',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -457,6 +497,7 @@ CREATE TABLE IF NOT EXISTS quiz_attempts (
     score DECIMAL(5,2),
     weak_tags JSON COMMENT '错误标签列表',
     duration_seconds INT,
+    evaluation TEXT COMMENT 'AI 智能评估分析文本（做题专用维度）',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_qa_user_topic (user_id, topic),
     INDEX idx_qa_user_created (user_id, created_at),
@@ -638,3 +679,228 @@ CREATE TABLE IF NOT EXISTS user_stats (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- ============================================================
+-- 13. 学习资源学习记录表（v2.4 新增）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS learning_records (
+    id                  CHAR(36) PRIMARY KEY COMMENT '主键UUID',
+    user_id             CHAR(36) NOT NULL COMMENT '用户ID，FK→users.id',
+    course_id           CHAR(36) NOT NULL COMMENT '课程ID，FK→courses.id',
+    plan_id             CHAR(36) DEFAULT NULL COMMENT '学习计划ID，FK→learning_plans.id',
+    module_id           VARCHAR(20) DEFAULT NULL COMMENT '模块编号，对应sub_plans.module_id',
+    activity_id         VARCHAR(50) DEFAULT NULL COMMENT '活动编号，对应sub_plan_json中activities[].activity_id',
+    resource_pack_id    CHAR(36) DEFAULT NULL COMMENT '资源包ID，FK→resource_packs.id（生成中的资源可为空）',
+    resource_type       VARCHAR(20) NOT NULL COMMENT '资源类型：doc|quiz|mindmap|reading|code|video|html',
+    status              VARCHAR(20) NOT NULL COMMENT '学习状态：in_progress学习中|completed已完成(达标)|failed未达标',
+    duration_seconds    INT DEFAULT 0 COMMENT '累计学习时长（秒）',
+    completed_at        DATETIME DEFAULT NULL COMMENT '首次完成时间',
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后更新时间',
+
+    UNIQUE KEY uk_user_resource (user_id, plan_id, module_id, activity_id, resource_type),
+    INDEX idx_user_course (user_id, course_id),
+    INDEX idx_plan_activity (plan_id, module_id, activity_id),
+    INDEX idx_user_status (user_id, status),
+    INDEX idx_pack (resource_pack_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='学习资源学习记录表：记录用户对每个资源的学习状态，每用户×资源一条记录';
+
+-- ============================================================
+-- 14. 笔记本与笔记（课程维度的笔记容器）
+--     notebooks: 每个课程可建多个笔记本，支持内置封面
+--     notes: 可选关联 notebook_id，NULL=未分类
+-- ============================================================
+CREATE TABLE IF NOT EXISTS notebooks (
+    id          CHAR(36) PRIMARY KEY                                  COMMENT '笔记本ID，UUID',
+    user_id     CHAR(36) NOT NULL                                     COMMENT '所属用户ID',
+    course_id   CHAR(36) NOT NULL                                     COMMENT '所属课程ID',
+    name        VARCHAR(200) NOT NULL                                 COMMENT '笔记本名称',
+    description TEXT                                                   COMMENT '笔记本描述',
+    cover       VARCHAR(50) DEFAULT 'default'                         COMMENT '内置封面标识：default / blue / green / orange / purple / grid / dot / wave',
+    sort_order  INT DEFAULT 0                                         COMMENT '排序权重，越小越靠前',
+    is_default  TINYINT(1) DEFAULT 0                                  COMMENT '是否默认笔记本，每个课程下仅一个，0=否 1=是',
+    deleted_at  DATETIME                                               COMMENT '软删除时间',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP                    COMMENT '创建时间',
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_notebooks_user_course (user_id, course_id, sort_order),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS notes (
+    id                CHAR(36) PRIMARY KEY COMMENT '主键UUID',
+    user_id           CHAR(36) NOT NULL COMMENT '用户ID，FK→users.id',
+    course_id         CHAR(36) NOT NULL COMMENT '课程ID，FK→courses.id',
+
+    notebook_id       CHAR(36)       COMMENT '所属笔记本ID，NULL=未分类',
+
+    -- 资源定位
+    resource_pack_id  CHAR(36)       COMMENT '资源包ID，FK→resource_packs.id ON DELETE SET NULL',
+    resource_title    VARCHAR(500)   COMMENT '资源标题快照',
+
+    -- 章节/文本关联
+    section_title     VARCHAR(200)   COMMENT '章节标题（NULL=资源级笔记）',
+    selected_text     TEXT           COMMENT '选中的原文引用（NULL=非文本级）',
+    anchor_id         VARCHAR(64)    COMMENT '段落锚点ID，用于回跳',
+    text_range        VARCHAR(30)    COMMENT '字符偏移范围，用于高亮',
+
+    -- 笔记正文
+    content           TEXT NOT NULL  COMMENT '笔记正文',
+
+    -- 审计
+    deleted_at        DATETIME       COMMENT '软删除时间',
+    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后更新时间',
+
+    INDEX idx_notes_notebook (notebook_id),
+    INDEX idx_notes_user_course (user_id, course_id, resource_pack_id),
+    INDEX idx_notes_user_created (user_id, created_at),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
+    FOREIGN KEY (notebook_id) REFERENCES notebooks(id) ON DELETE SET NULL,
+    FOREIGN KEY (resource_pack_id) REFERENCES resource_packs(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='笔记表：用户资源笔记，支持资源级/章节级/文本级三级关联';
+
+
+-- ============================================================
+-- 15. 每日学习时长汇总表（v2.5 新增）
+--     心跳机制按日累加学习时长，为学习日历热力图提供数据源
+-- ============================================================
+CREATE TABLE IF NOT EXISTS daily_learning_logs (
+    id              CHAR(36) PRIMARY KEY COMMENT '主键UUID',
+    user_id         CHAR(36) NOT NULL COMMENT '用户ID，FK->users.id',
+    course_id       CHAR(36) NOT NULL COMMENT '课程ID，FK->courses.id',
+    log_date        DATE NOT NULL COMMENT '学习日期',
+    learning_seconds INT DEFAULT 0 COMMENT '当日学习时长（秒），心跳累加',
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后更新时间',
+    UNIQUE KEY uk_user_course_date (user_id, course_id, log_date),
+    INDEX idx_user_date (user_id, log_date),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='每日学习时长汇总表（心跳按日累加）';
+
+
+-- ============================================================
+-- 16. 题库与练习会话（v5.1 新增）
+--     独立题库 + 作答追踪 + 练习会话闭环（自己选题 / AI组卷 / 错题重做）
+--     增量迁移见 migration_question_bank.sql 与 migration_practice_session_enhance.sql
+-- ============================================================
+CREATE TABLE IF NOT EXISTS questions (
+    id              CHAR(36) PRIMARY KEY,
+    user_id         CHAR(36) NOT NULL             COMMENT '创建者/所属用户',
+    course_id       CHAR(36) NOT NULL             COMMENT '所属课程',
+    source_item_id  CHAR(36)                      COMMENT '来源资源项ID，从AI生成quiz提取时关联 resource_items.id',
+
+    question_type   VARCHAR(20) NOT NULL          COMMENT '题型：single_choice / multiple_choice / true_false / fill_blank / short_answer / code',
+    difficulty      TINYINT DEFAULT 3             COMMENT '难度 1-5',
+    title           TEXT NOT NULL                 COMMENT '题干',
+    options_json    JSON                          COMMENT '选项：[{label:"A", content:"..."}]，选择题用',
+    answer_json     JSON NOT NULL                 COMMENT '正确答案，格式因题型而异',
+    explanation     TEXT                          COMMENT '解析',
+
+    kp_id           CHAR(36)                      COMMENT '关联知识点，FK->course_knowledge_points.id',
+    tags_json       JSON                          COMMENT '自定义标签，如 ["矩阵运算","特征值"]',
+
+    attempt_count   INT DEFAULT 0                 COMMENT '总作答次数（冗余）',
+    correct_count   INT DEFAULT 0                 COMMENT '正确次数（冗余）',
+
+    status          VARCHAR(20) DEFAULT 'published' COMMENT 'draft / published / archived',
+    deleted_at      DATETIME                      COMMENT '软删除',
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    INDEX idx_q_user_course (user_id, course_id),
+    INDEX idx_q_source_item (source_item_id),
+    INDEX idx_q_kp (kp_id),
+    INDEX idx_q_type (question_type),
+    INDEX idx_q_difficulty (difficulty),
+    INDEX idx_q_status (status),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
+    FOREIGN KEY (source_item_id) REFERENCES resource_items(id) ON DELETE SET NULL,
+    FOREIGN KEY (kp_id) REFERENCES course_knowledge_points(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='题目库：独立于资源包的单个题目，支持AI生成/手动录入/从quiz资源批量抽取';
+
+CREATE TABLE IF NOT EXISTS question_attempts (
+    id              CHAR(36) PRIMARY KEY,
+    user_id         CHAR(36) NOT NULL,
+    course_id       CHAR(36) NOT NULL,
+    question_id     CHAR(36) NOT NULL             COMMENT 'FK->questions.id',
+    quiz_attempt_id CHAR(36)                      COMMENT '关联旧 quiz_attempts.id，向后兼容',
+
+    selected_answer JSON NOT NULL                 COMMENT '用户作答',
+    is_correct      TINYINT(1) NOT NULL           COMMENT '0=错 1=对',
+    duration_seconds INT DEFAULT 0                COMMENT '本题耗时',
+    attempt_number  INT NOT NULL DEFAULT 1        COMMENT '该题的第几次作答（1,2,3...）',
+
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_qa_user_question (user_id, question_id),
+    INDEX idx_qa_user_course (user_id, course_id, created_at),
+    INDEX idx_qa_question (question_id),
+    INDEX idx_qa_correct (is_correct),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
+    FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE,
+    FOREIGN KEY (quiz_attempt_id) REFERENCES quiz_attempts(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='题目作答记录：每题每次作答一条，支持错题追踪和正确率统计';
+
+CREATE TABLE IF NOT EXISTS practice_sessions (
+    id              CHAR(36) PRIMARY KEY,
+    user_id         CHAR(36) NOT NULL,
+    course_id       CHAR(36) NOT NULL,
+    session_type    VARCHAR(20) NOT NULL          COMMENT 'random / weak_point / wrong_review / kp_focus / custom',
+    kp_filter_json  JSON                          COMMENT '筛选的知识点ID列表',
+    difficulty_filter VARCHAR(20)                 COMMENT '难度筛选',
+
+    profile_version_id CHAR(36)                   COMMENT '组卷时所依据画像版本ID，FK->profile_versions.id',
+    weak_kps_json   JSON                          COMMENT '本次组卷锁定的薄弱知识点ID快照',
+    ai_generated_count INT DEFAULT 0              COMMENT '本次AI新生成的题数（区别于题库抽取）',
+
+    question_count  INT DEFAULT 0                 COMMENT '总题数',
+    correct_count   INT DEFAULT 0                 COMMENT '正确数',
+    total_duration_seconds INT DEFAULT 0          COMMENT '总耗时',
+    completed       TINYINT(1) DEFAULT 0          COMMENT '是否已完成',
+
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at    DATETIME,
+    evaluation      TEXT                          COMMENT 'AI 练习评估报告 Markdown',
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
+
+    INDEX idx_ps_user_course (user_id, course_id, created_at),
+    INDEX idx_ps_type (session_type),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
+    FOREIGN KEY (profile_version_id) REFERENCES profile_versions(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='练习会话：一次练习的聚合，记录筛选条件、薄弱点快照和整体结果';
+
+CREATE TABLE IF NOT EXISTS practice_session_items (
+    id              CHAR(36) PRIMARY KEY,
+    session_id      CHAR(36) NOT NULL             COMMENT 'FK->practice_sessions.id',
+    question_id     CHAR(36) NOT NULL             COMMENT 'FK->questions.id',
+    attempt_id      CHAR(36)                      COMMENT 'FK->question_attempts.id',
+    sort_order      INT DEFAULT 0                 COMMENT '题目顺序',
+    is_correct      TINYINT(1)                    COMMENT '作答结果',
+
+    INDEX idx_psi_session (session_id),
+    INDEX idx_psi_question (question_id),
+    FOREIGN KEY (session_id) REFERENCES practice_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE,
+    FOREIGN KEY (attempt_id) REFERENCES question_attempts(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='会话题目关联：记录每道题在本次练习中的结果';
+
+
+-- ============================================================
+-- 17. 增量迁移：学习计划锁定模式（lock_mode）
+-- ============================================================
+ALTER TABLE learning_plans
+  ADD COLUMN lock_mode VARCHAR(12) NOT NULL DEFAULT 'sequential'
+  COMMENT '锁定模式: sequential(按顺序解锁) / free(自由学习)'
+  AFTER status;

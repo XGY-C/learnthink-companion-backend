@@ -30,6 +30,7 @@ import java.util.concurrent.ConcurrentMap;
  *   <tr><td>chat</td><td>deepseek-v4-flash</td><td>否</td><td>ChatServiceImpl, ConversationAgent</td></tr>
  *   <tr><td>reasoning</td><td>deepseek-v4-pro</td><td>是 (high)</td><td>CurriculumPlanner, ContentReviewer</td></tr>
  *   <tr><td>generation</td><td>deepseek-v4-flash</td><td>否</td><td>DocumentGenerator, ExerciseGenerator 等</td></tr>
+ *   <tr><td>html-generation</td><td>deepseek-v4-flash</td><td>是 (high)</td><td>HtmlDocumentGenerator</td></tr>
  * </table>
  *
  * <h3>为什么 reasoning 启用思维链，chat/generation 不启用？</h3>
@@ -87,10 +88,27 @@ public class ModelConfig {
         return buildForPreset("generation");
     }
 
-    /** 统一模型——单次调用完成思考 + 工具调用 + 回复生成 */
+    /** HTML 生成模型——HtmlDocumentGenerator 专用。启用思维链提升交互式文档质量 */
+    @Bean
+    public ChatClient.Builder htmlGenerationChatClientBuilder() {
+        return buildForPreset("html-generation");
+    }
+
+    /** 统一模型--单次调用完成思考 + 工具调用 + 回复生成 */
     @Bean
     public ChatClient.Builder unifiedChatClientBuilder() {
         return buildForPreset("unified");
+    }
+
+    /**
+     * Smart v2 专用 ChatClient.Builder。
+     * <p>独立于现有 chat/unified 等预设，用于 SmartAgentLoop 的 ReAct 循环。
+     * 默认 thinking-enabled: false（备选方案 A），temperature 可用。
+     * 思考链通过 ToolCallObserver 桥接，不依赖 reasoning_content。</p>
+     */
+    @Bean("smartChatClientBuilder")
+    public ChatClient.Builder smartChatClientBuilder() {
+        return buildForPreset("smart");
     }
 
     private ChatClient.Builder buildForPreset(String presetName) {
@@ -140,12 +158,11 @@ public class ModelConfig {
         var options = optionsBuilder.build();
 
         // 通过 extraBody 注入 DeepSeek 思维链模式
-        // DeepSeek 默认启用思维链，但在缺少 reasoning_content 的工具调用后续场景中
-        // 会导致 400 错误。我们对每个预设显式设置：
-        //   reasoning → 启用（复杂任务使用 CoT）
-        //   chat/generation → 禁用（延迟敏感、依赖温度参数）
-        // 使用 extraBody（而非 HTTP 拦截器）确保同时覆盖 RestClient（同步）
-        // 和 WebClient（流式）路径
+        // DeepSeek V4 默认启用思维链（thinking: {"type": "enabled"}），需显式禁用。
+        // 注意：Spring AI 1.1.5 的 extraBody 在流式请求中可能未正确序列化。
+        // 如果 SmartAssistantServiceImpl 中检测到 reasoning_content 警告日志，
+        // 说明 thinking 参数未生效，需要改用 deepseek-chat 模型名（等价于 V4-Flash 非思考模式）。
+        // deepseek-chat 将于 2026/07/24 弃用，届时需确保 extraBody 在流式路径中生效。
         Map<String, Object> extraBody = new HashMap<>();
         extraBody.put("thinking", Map.of("type", thinking ? "enabled" : "disabled"));
         options.setExtraBody(extraBody);

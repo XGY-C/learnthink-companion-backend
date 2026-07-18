@@ -5,5 +5,6 @@ public record TutoringStartRequest(
     String sessionId,
     String chatId,
     String courseId,
-    ClarificationResponse clarificationResponse
+    ClarificationResponse clarificationResponse,
+    String mode
 ) {}

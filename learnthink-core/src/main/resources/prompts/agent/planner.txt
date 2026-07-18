@@ -38,6 +38,7 @@ Match types to sub-topic nature:
 - Algorithm sub-topic: doc + code + quiz
 - Extension sub-topic: reading + quiz (optional: doc)
 - video: for highly visual topics only, 1-2 per plan max (unless user explicitly requests more)
+- html: 交互文档（自包含 HTML）。当知识点适合交互演示（动态过程、可操作图表、分步探究、需即时反馈的小测验）时选择；纯文字讲解优先选 doc。按需选择，不必每个计划都产出 html。
 
 Total items (unconstrained): 10-25 across all sub-topics.
 

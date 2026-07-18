@@ -4,6 +4,7 @@ import com.learnthink.core.agent.impl.AutonomousGenerator;
 import com.learnthink.core.agent.impl.RagTool;
 import com.learnthink.core.agent.runtime.AgentContext;
 import com.learnthink.core.agent.orchestration.ResourceGenerationState;
+import com.learnthink.core.agent.tools.visual.VisualCodeExtractor;
 import com.learnthink.core.config.PromptLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,7 +61,8 @@ public class DocumentGenerator extends AutonomousGenerator implements TypeGenera
             throw new RuntimeException("Document generation failed for: " + item.title());
         }
 
-        String finalContent = result.content();
+        String finalContent = VisualCodeExtractor.unfoldInlineSvg(result.content())
+            .replaceAll("\\[source:\\s*[^\\]]+\\]", "");
         if (forceLowConfidence && result.confidence() < 0.6) {
             finalContent = "> ⚠️ Low confidence: evidence for this topic is limited.\n\n" + finalContent;
         }
@@ -86,7 +88,7 @@ public class DocumentGenerator extends AutonomousGenerator implements TypeGenera
         String systemPrompt = getGenerationPrompt(item, profile)
             + "\n\n## 定向修改要求\n" + reviewFeedback;
         String userMsg = "需修改的内容：\n"
-            + (original.content() != null ? original.content().substring(0, Math.min(2000, original.content().length())) : "");
+            + (original.content() != null ? original.content() : "");
 
         String content = chatClient.prompt()
             .messages(new SystemMessage(systemPrompt), new UserMessage(userMsg))
@@ -95,6 +97,9 @@ public class DocumentGenerator extends AutonomousGenerator implements TypeGenera
         log.info("[AI-RESPONSE][DocumentGenerator] revise length={} chars\n{}",
             content != null ? content.length() : 0,
             content != null ? content.substring(0, Math.min(2000, content.length())) : "null");
+
+        content = VisualCodeExtractor.unfoldInlineSvg(content)
+            .replaceAll("\\[source:\\s*[^\\]]+\\]", "");
 
         return new ResourceGenerationState.GeneratedContent(
             item.title(), content, "text/markdown", typeSources,
@@ -124,12 +129,9 @@ public class DocumentGenerator extends AutonomousGenerator implements TypeGenera
                               AgentContext ctx) {
         String systemPrompt = getGenerationSystemPrompt(task, sources)
             + "\n\n## 修改指令\n" + reviewFeedback;
-        String contentExcerpt = currentContent.length() > 2000
-            ? currentContent.substring(0, 2000) + "..." : currentContent;
-
         return chatClient.prompt()
             .messages(new SystemMessage(systemPrompt),
-                      new UserMessage("需要修改的内容：\n" + contentExcerpt))
+                      new UserMessage("需要修改的内容：\n" + currentContent))
             .toolCallbacks(buildRagToolCallback(ctx))
             .call().content();
     }
@@ -193,10 +195,10 @@ public class DocumentGenerator extends AutonomousGenerator implements TypeGenera
             sourcesText.isEmpty() ? "(no sources — use RAG tool to search for relevant information)" : sourcesText);
     }
 
-    /** 使用 AgentContext 中的 courseId 构建每次调用的 RagToolCallback */
+    /** 使用 AgentContext 中的 courseId 构建 DelegatingToolCallback */
     private ToolCallback buildRagToolCallback(AgentContext ctx) {
         if (ragTool == null) return null;
-        return new com.learnthink.core.agent.impl.RagToolCallback(
-            ragTool, ctx.courseId(), null, null);
+        return new com.learnthink.core.agent.tools.callbacks.DelegatingToolCallback(
+            ragTool, java.util.Map.of("course_id", ctx.courseId()));
     }
 }

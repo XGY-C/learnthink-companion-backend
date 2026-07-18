@@ -24,6 +24,7 @@ public class ClarificationHandler {
         return scheduler.schedule(() -> {
             log.info("Clarification timeout for session {} after {}s", sessionId, timeoutSeconds);
             emitter.planClarifyTimeout(sessionId, timeoutSeconds);
+            emitter.complete();
         }, timeoutSeconds, TimeUnit.SECONDS);
     }
 

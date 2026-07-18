@@ -86,17 +86,18 @@ public class DefaultTaskEventBroadcaster implements TaskEventBroadcaster {
     @Override
     public void agentThought(String taskId, String agentName, String agentRole,
                               String context, String observation, String thought,
-                              String decision, String confidenceLevel) {
+                              String decision, String pipelineStage, String confidenceLevel) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("traceId", UUID.randomUUID().toString());
         payload.put("agentName", agentName);
         payload.put("agentRole", agentRole);
-        payload.put("phase", decision);
-        payload.put("context", context);
-        payload.put("observation", observation);
-        payload.put("thought", thought);
-        payload.put("decision", decision);
-        payload.put("confidenceLevel", confidenceLevel);
+        payload.put("phase", decision != null ? decision : "");
+        payload.put("pipelineStage", pipelineStage != null ? pipelineStage : "");
+        payload.put("context", context != null ? context : "");
+        payload.put("observation", observation != null ? observation : "");
+        payload.put("thought", thought != null ? thought : "");
+        payload.put("decision", decision != null ? decision : "");
+        payload.put("confidenceLevel", confidenceLevel != null ? confidenceLevel : "medium");
         payload.put("trigger", "autonomous");
         payload.put("timestamp", Instant.now().toString());
         broadcast(taskId, "agent.thought", payload);

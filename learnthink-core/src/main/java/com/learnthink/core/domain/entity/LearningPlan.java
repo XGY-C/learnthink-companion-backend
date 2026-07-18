@@ -27,6 +27,8 @@ public class LearningPlan {
     private String planJson;
     // 状态
     private String status;
+    // 锁定模式: sequential / free
+    private String lockMode;
     // 关联的对话会话ID，用于历史加载还原
     private String chatId;
     // 创建时间

@@ -1,9 +1,11 @@
 package com.learnthink.core.service.profile;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.learnthink.core.domain.entity.ProfileChat;
+import com.learnthink.core.domain.entity.ChatMessage;
+import com.learnthink.core.domain.entity.ChatSession;
 import com.learnthink.core.domain.entity.ProfileVersion;
-import com.learnthink.core.repository.ProfileChatMapper;
+import com.learnthink.core.repository.ChatMessageMapper;
+import com.learnthink.core.repository.ChatSessionMapper;
 import com.learnthink.core.repository.ProfileVersionMapper;
 import com.learnthink.core.service.ProfileService;
 import org.slf4j.Logger;
@@ -13,24 +15,35 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
+/**
+ * 定时扫描超时会话并触发画像分析。
+ * <p>
+ * 已从 ProfileChat 迁移至 ChatSession + ChatMessage。
+ */
 @Component
 public class ProfileSessionEndScheduler {
 
     private static final Logger log = LoggerFactory.getLogger(ProfileSessionEndScheduler.class);
 
-    private final ProfileChatMapper profileChatMapper;
+    private final ChatSessionMapper chatSessionMapper;
+    private final ChatMessageMapper chatMessageMapper;
     private final ProfileVersionMapper profileVersionMapper;
     private final ProfileService profileService;
 
     @Value("${learnthink.profile.session-timeout-minutes:30}")
     private int sessionTimeoutMinutes;
 
-    public ProfileSessionEndScheduler(ProfileChatMapper profileChatMapper,
+    public ProfileSessionEndScheduler(ChatSessionMapper chatSessionMapper,
+                                      ChatMessageMapper chatMessageMapper,
                                       ProfileVersionMapper profileVersionMapper,
                                       ProfileService profileService) {
-        this.profileChatMapper = profileChatMapper;
+        this.chatSessionMapper = chatSessionMapper;
+        this.chatMessageMapper = chatMessageMapper;
         this.profileVersionMapper = profileVersionMapper;
         this.profileService = profileService;
     }
@@ -39,48 +52,63 @@ public class ProfileSessionEndScheduler {
     public void scanExpiredSessions() {
         LocalDateTime cutoff = LocalDateTime.now().minusMinutes(sessionTimeoutMinutes);
 
-        List<ProfileChat> expiredChats = profileChatMapper.selectList(
-                new LambdaQueryWrapper<ProfileChat>()
-                        .isNull(ProfileChat::getProfileVersionId)
-                        .isNotNull(ProfileChat::getMessagesJson)
-                        .ne(ProfileChat::getMessagesJson, "[]")
-                        .lt(ProfileChat::getCreatedAt, cutoff)
+        // 查询过期会话：profile_version_id IS NULL 且 message_count > 0 且创建时间超过阈值
+        // 排除已归档的会话（如 userId 为 null 被标记为 archived 的）
+        List<ChatSession> expiredSessions = chatSessionMapper.selectList(
+                new LambdaQueryWrapper<ChatSession>()
+                        .isNull(ChatSession::getProfileVersionId)
+                        .gt(ChatSession::getMessageCount, 0)
+                        .lt(ChatSession::getCreatedAt, cutoff)
+                        .ne(ChatSession::getStatus, "archived")
                         .last("LIMIT 20"));
 
-        for (ProfileChat chat : expiredChats) {
+        for (ChatSession session : expiredSessions) {
             try {
-                log.info("Session expired, triggering handleChatEnd: chatId={}", chat.getId());
-                var messages = parseMessages(chat.getMessagesJson());
-                profileService.handleChatEnd(chat.getUserId(), chat.getCourseId(), chat.getId(), messages);
+                if (session.getUserId() == null || session.getUserId().isBlank()) {
+                    log.warn("Session {} has null userId, marking as processed and skipping", session.getId());
+                    session.setStatus("archived");
+                    chatSessionMapper.updateById(session);
+                    continue;
+                }
 
+                log.info("Session expired, triggering handleChatEnd: chatId={}", session.getId());
+
+                // 从 chat_messages 加载消息
+                List<ChatMessage> msgs = chatMessageMapper.selectBySessionId(session.getId());
+                if (msgs == null || msgs.isEmpty()) {
+                    log.info("expired session {} has no messages, skipping", session.getId());
+                    continue;
+                }
+                List<Map<String, String>> messages = msgs.stream().map(m -> {
+                    Map<String, String> map = new LinkedHashMap<>();
+                    map.put("role", m.getRole());
+                    map.put("content", m.getContent());
+                    map.put("at", m.getCreatedAt() != null ? m.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toString() : "");
+                    return map;
+                }).collect(Collectors.toList());
+
+                profileService.handleChatEnd(session.getUserId(), session.getCourseId(),
+                    session.getId(), messages);
+
+                // 标注已处理的 session
                 ProfileVersion latestPv = profileVersionMapper.selectOne(
                         new LambdaQueryWrapper<ProfileVersion>()
-                                .eq(ProfileVersion::getUserId, chat.getUserId())
-                                .eq(ProfileVersion::getCourseId, chat.getCourseId())
+                                .eq(ProfileVersion::getUserId, session.getUserId())
+                                .eq(ProfileVersion::getCourseId, session.getCourseId())
                                 .orderByDesc(ProfileVersion::getVersion)
                                 .last("LIMIT 1"));
                 if (latestPv != null) {
-                    chat.setProfileVersionId(latestPv.getId());
-                    profileChatMapper.updateById(chat);
+                    session.setProfileVersionId(latestPv.getId());
+                    chatSessionMapper.updateById(session);
                 }
             } catch (Exception e) {
-                log.error("Failed to process expired session chatId={}: {}", chat.getId(), e.getMessage());
+                log.error("Failed to process expired session chatId={}: {}",
+                    session.getId(), e.getMessage());
             }
         }
 
-        if (!expiredChats.isEmpty()) {
-            log.info("Processed {} expired sessions", expiredChats.size());
-        }
-    }
-
-    private List<java.util.Map<String, String>> parseMessages(String json) {
-        if (json == null || json.isBlank()) return java.util.List.of();
-        try {
-            return new com.fasterxml.jackson.databind.ObjectMapper().readValue(json,
-                    new com.fasterxml.jackson.core.type.TypeReference<List<java.util.Map<String, String>>>() {});
-        } catch (Exception e) {
-            log.warn("Failed to parse messages JSON: {}", e.getMessage());
-            return java.util.List.of();
+        if (!expiredSessions.isEmpty()) {
+            log.info("Processed {} expired sessions", expiredSessions.size());
         }
     }
 }
